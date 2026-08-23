@@ -11,6 +11,11 @@ import { resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 300;
 
+// On Windows use PowerShell, not cmd.exe: models overwhelmingly write
+// PowerShell or POSIX-flavored commands, and cmd.exe chokes on both.
+const IS_WINDOWS = process.platform === "win32";
+const SHELL_NAME = IS_WINDOWS ? "PowerShell" : "/bin/sh";
+
 /**
  * @param {import("../tool-registry.mjs").ToolRegistry} registry
  * @param {object} options
@@ -21,7 +26,7 @@ export function registerShellTools(registry, { workspaceRoot }) {
     name: "run_command",
     requiresApproval: true,
     description:
-      `Run a command through the system shell (${process.platform === "win32" ? "cmd.exe" : "/bin/sh"}) ` +
+      `Run a command through the system shell (${SHELL_NAME}; use ${IS_WINDOWS ? "PowerShell" : "POSIX sh"} syntax) ` +
       "in the workspace directory and return its exit code, stdout, and stderr. " +
       `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s).`,
     parameters: {
@@ -54,13 +59,28 @@ export function registerShellTools(registry, { workspaceRoot }) {
 
 function runCommand(command, { cwd, timeoutMs }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      windowsHide: true,
-      // POSIX: own process group so the timeout can kill the whole tree.
-      detached: process.platform !== "win32",
-    });
+    const child = IS_WINDOWS
+      ? // `exit $LASTEXITCODE` propagates the native command's exit code,
+        // which powershell.exe otherwise reports as 0.
+        spawn(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            `${command}; exit $LASTEXITCODE`,
+          ],
+          { cwd, windowsHide: true },
+        )
+      : spawn(command, {
+          cwd,
+          shell: true,
+          windowsHide: true,
+          // POSIX: own process group so the timeout can kill the whole tree.
+          detached: true,
+        });
 
     let stdout = "";
     let stderr = "";

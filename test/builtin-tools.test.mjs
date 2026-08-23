@@ -31,6 +31,8 @@ test("all builtin tools are registered", () => {
     "list_dir",
     "write_file",
     "edit_file",
+    "grep_search",
+    "find_files",
     "run_command",
   ]) {
     assert.ok(registry.has(name), `missing tool: ${name}`);
@@ -137,6 +139,51 @@ test("edit_file reports when old_string is absent", async () => {
   });
   assert.equal(edit.ok, false);
   assert.match(edit.error, /not found/);
+});
+
+test("edit_file falls back to whitespace-tolerant matching and keeps file indentation", async () => {
+  const file = "function f() {\n    if (x) {\n        return 1;\n    }\n}\n";
+  await writeFile(path.join(root, "indent.mjs"), file, "utf8");
+
+  // The model reproduced the snippet with 2-space indentation instead of 4.
+  const edit = await registry.execute("edit_file", {
+    path: "indent.mjs",
+    old_string: "  if (x) {\n      return 1;\n  }",
+    new_string: "  if (x) {\n      return 2;\n  }",
+  });
+
+  assert.equal(edit.ok, true);
+  assert.match(edit.result.note, /indentation differences ignored/);
+  assert.equal(
+    await readFile(path.join(root, "indent.mjs"), "utf8"),
+    "function f() {\n    if (x) {\n        return 2;\n    }\n}\n",
+  );
+});
+
+test("edit_file flexible match handles CRLF files with LF snippets, preserving CRLF", async () => {
+  await writeFile(path.join(root, "crlf.txt"), "one\r\ntwo\r\nthree\r\n", "utf8");
+
+  const edit = await registry.execute("edit_file", {
+    path: "crlf.txt",
+    old_string: "one\ntwo",
+    new_string: "one\nTWO",
+  });
+
+  assert.equal(edit.ok, true);
+  assert.equal(await readFile(path.join(root, "crlf.txt"), "utf8"), "one\r\nTWO\r\nthree\r\n");
+});
+
+test("edit_file flexible match rejects ambiguous snippets", async () => {
+  await writeFile(path.join(root, "ambig.txt"), "  item\nx\n    item\n", "utf8");
+
+  const edit = await registry.execute("edit_file", {
+    path: "ambig.txt",
+    old_string: "\titem",
+    new_string: "\tthing",
+  });
+
+  assert.equal(edit.ok, false);
+  assert.match(edit.error, /matches 2 places/);
 });
 
 test("file tools refuse paths outside the workspace", async () => {

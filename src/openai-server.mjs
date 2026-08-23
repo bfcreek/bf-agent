@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import http from "node:http";
 
 import { AgentLoop } from "./agent-loop.mjs";
+import { assertToolCapable, isLikelyToolCapable } from "./model-routing.mjs";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 
@@ -21,9 +22,17 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
  * @param {string} options.systemPrompt Used when the request has no system message.
  * @param {number} [options.maxSteps]
  * @param {string} [options.defaultModel] Reported in responses when the request omits `model`.
+ * @param {object|false} [options.projectBootstrap] First-turn README/RAG bootstrap.
  * @returns {http.Server}
  */
-export function createOpenAIServer({ client, registry, systemPrompt, maxSteps = 10, defaultModel = "unknown" }) {
+export function createOpenAIServer({
+  client,
+  registry,
+  systemPrompt,
+  maxSteps = 10,
+  defaultModel = "unknown",
+  projectBootstrap = false,
+}) {
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
@@ -32,7 +41,7 @@ export function createOpenAIServer({ client, registry, systemPrompt, maxSteps = 
       }
       if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
         return await handleChatCompletions(
-          { client, registry, systemPrompt, maxSteps, defaultModel },
+          { client, registry, systemPrompt, maxSteps, defaultModel, projectBootstrap },
           req,
           res,
         );
@@ -53,10 +62,15 @@ async function handleModels({ client, defaultModel }, res) {
   if (typeof client.listModels === "function") {
     try {
       const listed = await client.listModels();
-      if (listed.length > 0) names = listed;
+      if (listed.length > 0) {
+        names = listed.filter((name) => isLikelyToolCapable(name) === true);
+      }
     } catch {
       // Ollama unreachable — still report the configured default.
     }
+  }
+  if (names.length === 0 && isLikelyToolCapable(defaultModel) === true) {
+    names = [defaultModel];
   }
   sendJson(res, 200, {
     object: "list",
@@ -84,6 +98,13 @@ async function handleChatCompletions(options, req, res) {
   }
 
   const model = typeof body.model === "string" && body.model ? body.model : undefined;
+  if (model) {
+    try {
+      assertToolCapable(model);
+    } catch (err) {
+      return sendError(res, 400, err.message, "invalid_request_error");
+    }
+  }
   const runClient = model
     ? { chat: (request) => options.client.chat({ ...request, model }) }
     : options.client;
@@ -94,6 +115,7 @@ async function handleChatCompletions(options, req, res) {
     systemPrompt: options.systemPrompt,
     maxSteps: options.maxSteps,
     compaction: {},
+    projectBootstrap: options.projectBootstrap,
   });
   const result = await loop.run(goal, { history });
 

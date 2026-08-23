@@ -12,9 +12,15 @@ import readline from "node:readline/promises";
 
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
+import { buildProjectContext } from "./project-index.mjs";
 import { McpClient, registerMcpTools } from "./mcp-client.mjs";
-import { resolveModel } from "./model-routing.mjs";
-import { OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import {
+  ModelRoutingError,
+  resolveModelDetected,
+  assertToolCapable,
+  listClassifiedModelsDetected,
+} from "./model-routing.mjs";
+import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
@@ -25,6 +31,7 @@ function parseArgs(argv) {
     model: "llama3.2",
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: 10,
+    numCtx: DEFAULT_NUM_CTX,
     quiet: false,
     cwd: process.cwd(),
     port: 11435,
@@ -32,6 +39,9 @@ function parseArgs(argv) {
     // headless runs cannot prompt, so they run unattended.
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
     mcp: [],
+    embedModel: "nomic-embed-text",
+    noIndex: false,
+    json: false,
     goal: "",
     errors: [],
   };
@@ -57,6 +67,13 @@ function parseArgs(argv) {
         const n = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(n) && n > 0) options.maxSteps = n;
         else if (raw !== undefined) options.errors.push(`--max-steps needs a positive integer, got '${raw}'.`);
+        break;
+      }
+      case "--num-ctx": {
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(raw ?? "", 10);
+        if (Number.isFinite(n) && n > 0) options.numCtx = n;
+        else if (raw !== undefined) options.errors.push(`--num-ctx needs a positive integer, got '${raw}'.`);
         break;
       }
       case "--quiet":
@@ -90,6 +107,17 @@ function parseArgs(argv) {
         if (spec !== undefined) options.mcp.push(spec);
         break;
       }
+      case "--embed-model": {
+        const name = value(arg, ++i);
+        if (name !== undefined) options.embedModel = name;
+        break;
+      }
+      case "--no-index":
+        options.noIndex = true;
+        break;
+      case "--json":
+        options.json = true;
+        break;
       case "--help":
       case "-h":
         options.help = true;
@@ -115,6 +143,10 @@ function parseArgs(argv) {
     options.serve = true;
     positional.shift();
   }
+  if (positional[0] === "models") {
+    options.listModels = true;
+    positional.shift();
+  }
   options.goal = positional.join(" ").trim();
   return options;
 }
@@ -129,18 +161,23 @@ function printHelp() {
 Usage:
   halo-agent "<goal>" [options]     Run one goal and print the answer
   halo-agent serve [options]        OpenAI-compatible server (/v1/chat/completions)
+  halo-agent models [options]       List installed Ollama models and tool compliance
 
 Options:
   --model <name>       Ollama model (default llama3.2)
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
   --max-steps <n>      Max model round-trips (default 10)
+  --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
                        agent: run them unattended (default when not a TTY, and in serve mode)
   --session <name>     Persist/resume this conversation (.halo-agent/sessions/ in the workspace)
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
+  --embed-model <name> Embedding model for project index (default nomic-embed-text)
+  --no-index           Skip building the local project vector index
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer
+  --json               JSON output (models command)
   --                   Treat everything after as the goal, even if it starts with -
   -v, --version        Print the version
   -h, --help           Show this help
@@ -150,11 +187,22 @@ Examples:
   halo-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
   halo-agent "fix the failing test" --session fix-tests --mode agent
   halo-agent serve --port 11435
+  halo-agent models
+  halo-agent models --json --base-url http://127.0.0.1:11434
   halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
 
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
   3  Ollama error   4  MCP attach failed`);
+}
+
+function makeProjectBootstrap(options, client) {
+  return {
+    workspaceRoot: options.cwd,
+    client: options.noIndex ? undefined : client,
+    embeddingModel: options.embedModel,
+    onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
+  };
 }
 
 function makeApprovalPrompt() {
@@ -166,6 +214,52 @@ function makeApprovalPrompt() {
     return /^y(es)?$/i.test(answer.trim());
   };
   return { handler, close: () => rl.close() };
+}
+
+function printClassifiedModels({ baseUrl, classified, json }) {
+  if (json) {
+    console.log(
+      JSON.stringify(
+        {
+          baseUrl,
+          compliant: classified.compliant,
+          notCompliant: classified.notCompliant,
+          unknown: classified.unknown,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  const lines = [`Ollama models at ${baseUrl}:`, ""];
+  const section = (title, names) => {
+    lines.push(`${title}:`);
+    if (names.length === 0) lines.push("  (none)");
+    else for (const name of names) lines.push(`  ${name}`);
+    lines.push("");
+  };
+  section("compliant (tool-capable)", classified.compliant);
+  section("not compliant", classified.notCompliant);
+  section("unknown", classified.unknown);
+  console.log(lines.join("\n").trimEnd());
+}
+
+async function listOllamaModels(options) {
+  const client = new OllamaClient({ baseUrl: options.baseUrl, model: options.model });
+  try {
+    const installed = await client.listModels();
+    const classified = await listClassifiedModelsDetected(client, installed);
+    printClassifiedModels({ baseUrl: options.baseUrl, classified, json: options.json });
+  } catch (err) {
+    if (err instanceof OllamaClientError) {
+      console.error(err.message);
+      process.exitCode = 3;
+      return;
+    }
+    throw err;
+  }
 }
 
 function describeStep(step) {
@@ -192,28 +286,53 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (!options.goal && !options.serve) {
+  if (!options.goal && !options.serve && !options.listModels) {
     console.error("No goal given.");
     printHelp();
     process.exitCode = 1;
     return;
   }
 
-  const client = new OllamaClient({ baseUrl: options.baseUrl, model: options.model });
+  if (options.listModels) {
+    await listOllamaModels(options);
+    return;
+  }
+
+  const client = new OllamaClient({
+    baseUrl: options.baseUrl,
+    model: options.model,
+    numCtx: options.numCtx,
+  });
 
   // Route to an installed, tool-capable model up front; skip silently when
   // Ollama is unreachable — the run itself will surface that error clearly.
   try {
     const installed = await client.listModels();
-    const routed = resolveModel({ requested: options.model, installed });
+    const routed = await resolveModelDetected({ requested: options.model, installed, client });
     for (const warning of routed.warnings) console.error(warning);
     client.model = routed.model;
     options.model = routed.model;
-  } catch {
-    // fall through with the requested model
+  } catch (err) {
+    if (err instanceof ModelRoutingError) {
+      console.error(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      assertToolCapable(options.model);
+    } catch (routingErr) {
+      console.error(routingErr.message);
+      process.exitCode = 1;
+      return;
+    }
+    // Ollama unreachable — fall through; the run itself will surface that error.
   }
 
-  const registry = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: options.cwd });
+  const registry = registerBuiltinTools(new ToolRegistry(), {
+    workspaceRoot: options.cwd,
+    searchClient: options.noIndex ? undefined : client,
+    embeddingModel: options.embedModel,
+  });
 
   const mcpClients = [];
   for (const spec of options.mcp) {
@@ -235,9 +354,18 @@ async function main() {
     }
   }
 
+  const projectContext = await buildProjectContext({
+    workspaceRoot: options.cwd,
+    client: options.noIndex ? undefined : client,
+    embeddingModel: options.embedModel,
+    index: !options.noIndex,
+    onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
+  });
+
   const systemPrompt = await buildSystemPrompt({
     basePrompt: DEFAULT_SYSTEM_PROMPT,
     workspaceRoot: options.cwd,
+    projectContext,
   });
 
   if (options.serve) {
@@ -247,6 +375,7 @@ async function main() {
       systemPrompt,
       maxSteps: options.maxSteps,
       defaultModel: options.model,
+      projectBootstrap: makeProjectBootstrap(options, client),
     });
     server.listen(options.port, () => {
       const { port } = server.address();
@@ -269,6 +398,15 @@ async function main() {
     maxSteps: options.maxSteps,
     onStep: options.quiet ? undefined : describeStep,
     compaction: {},
+    projectBootstrap: makeProjectBootstrap(options, client),
+    onBootstrap: options.quiet
+      ? undefined
+      : ({ readme, ragHits }) => {
+          const parts = [];
+          if (readme) parts.push("README");
+          if (ragHits > 0) parts.push(`${ragHits} indexed passage(s)`);
+          if (parts.length > 0) console.error(`[bootstrap] auto-retrieved ${parts.join(" + ")}`);
+        },
   });
 
   let store;
@@ -297,7 +435,10 @@ async function main() {
     }
 
     if (result.stopReason === "max-steps") {
-      console.error(`Stopped after ${options.maxSteps} steps without a final answer.`);
+      console.error(
+        `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
+      );
+      if (result.text) console.log(result.text);
       process.exitCode = 2;
       return;
     }

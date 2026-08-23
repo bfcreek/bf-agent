@@ -24,7 +24,7 @@ test("environment context names the workspace root, platform, and shell", async 
   const context = await buildEnvironmentContext({ workspaceRoot: root });
   assert.ok(context.includes(path.resolve(root)), "workspace root path present");
   assert.ok(context.includes(process.platform), "platform present");
-  assert.match(context, /run_command uses (cmd\.exe|\/bin\/sh)/);
+  assert.match(context, /run_command uses (PowerShell|\/bin\/sh)/);
   assert.ok(context.includes(process.version), "node version present");
 });
 
@@ -51,6 +51,16 @@ test("buildSystemPrompt prepends the base prompt", async () => {
   const prompt = await buildSystemPrompt({ basePrompt: "BASE RULES", workspaceRoot: root });
   assert.ok(prompt.startsWith("BASE RULES\n\n"));
   assert.match(prompt, /## Environment/);
+});
+
+test("buildSystemPrompt appends project context when provided", async () => {
+  const prompt = await buildSystemPrompt({
+    basePrompt: "BASE",
+    workspaceRoot: root,
+    projectContext: "## Project context\n\noverview",
+  });
+  assert.match(prompt, /## Project context/);
+  assert.match(prompt, /overview/);
 });
 
 test("truncateMiddle keeps the head and tail of long output", () => {

@@ -134,12 +134,27 @@ test("a request model overrides the default and is echoed back", async () => {
   await startServer(client);
 
   const response = await postChat({
-    model: "custom-model",
+    model: "llama3.2:latest",
     messages: [{ role: "user", content: "hi" }],
   });
   const body = await response.json();
-  assert.equal(body.model, "custom-model");
-  assert.equal(client.calls[0].model, "custom-model");
+  assert.equal(body.model, "llama3.2:latest");
+  assert.equal(client.calls[0].model, "llama3.2:latest");
+});
+
+test("a non-tool-capable request model is rejected with 400", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "ok" }]);
+  await startServer(client);
+
+  const response = await postChat({
+    model: "gemma3:12b",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.error.type, "invalid_request_error");
+  assert.match(body.error.message, /does not support tool calling/);
+  assert.equal(client.calls.length, 0);
 });
 
 test("stream:true replays the answer as SSE chunks ending with [DONE]", async () => {
@@ -181,8 +196,10 @@ test("array-of-parts content is flattened to text", async () => {
   assert.equal(goal.content, "part one\npart two");
 });
 
-test("GET /v1/models lists Ollama models", async () => {
-  const client = new FakeClient([], { models: ["llama3.2", "qwen3-coder:30b"] });
+test("GET /v1/models lists only tool-capable Ollama models", async () => {
+  const client = new FakeClient([], {
+    models: ["llama3.2", "qwen3-coder:30b", "gemma3:12b", "nomic-embed-text:latest"],
+  });
   await startServer(client);
 
   const response = await fetch(`${baseUrl}/v1/models`);

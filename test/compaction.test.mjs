@@ -2,20 +2,28 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AgentLoop } from "../src/agent-loop.mjs";
-import { compactMessages, transcriptSize } from "../src/compaction.mjs";
+import { compactMessages, estimateTokens, transcriptSize } from "../src/compaction.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 class FakeClient {
-  constructor(script) {
+  constructor(script, { numCtx, tokenCounts = [] } = {}) {
     this.script = [...script];
     this.calls = [];
+    this.numCtx = numCtx;
+    this.tokenCounts = [...tokenCounts];
   }
 
   async chat(request) {
     this.calls.push(structuredClone(request));
     const message = this.script.shift();
     if (!message) throw new Error("FakeClient script exhausted.");
-    return { message, raw: { message } };
+    const raw = { message };
+    const tokens = this.tokenCounts.shift();
+    if (tokens !== undefined) {
+      raw.prompt_eval_count = tokens;
+      raw.eval_count = 0;
+    }
+    return { message, raw };
   }
 }
 
@@ -75,6 +83,41 @@ test("kept window widens so it never starts on a tool result", async () => {
   assert.ok(firstKept.tool_calls, "window starts at the tool-calling assistant message");
 });
 
+test("estimateTokens takes the max of observed usage and the chars/4 heuristic", () => {
+  const messages = [{ role: "user", content: "x".repeat(4000) }]; // ~1000 tokens
+  assert.equal(estimateTokens(messages), 1000);
+  assert.equal(estimateTokens(messages, 5000), 5000);
+});
+
+test("token budget triggers compaction even when the char budget would not", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "SUMMARY" }]);
+  const messages = longTranscript(); // ~10k chars, well under the default 24k char budget
+
+  const result = await compactMessages({
+    client,
+    messages,
+    maxTokens: 2000,
+    observedTokens: 9000, // model reported real usage past the budget
+    keepRecent: 4,
+  });
+
+  assert.notEqual(result, messages);
+  assert.match(result[1].content, /SUMMARY/);
+});
+
+test("token budget set and under it: no compaction, even past the char default", async () => {
+  const client = new FakeClient([]);
+  const messages = [{ role: "system", content: "SYSTEM" }];
+  for (let i = 0; i < 30; i++) {
+    messages.push({ role: "user", content: "x".repeat(1000) }); // ~30k chars -> ~7.5k tokens
+  }
+
+  const result = await compactMessages({ client, messages, maxTokens: 12_000 });
+
+  assert.equal(result, messages);
+  assert.equal(client.calls.length, 0);
+});
+
 test("summarizer failure leaves the transcript unchanged", async () => {
   const failing = {
     async chat() {
@@ -108,6 +151,34 @@ test("agent loop compacts a long history before calling the model", async () => 
   assert.equal(runMessages[0].content, "SYSTEM");
   assert.match(runMessages[1].content, /HISTORY SUMMARY/);
   assert.ok(runMessages.length < 23, "transcript shrank");
+});
+
+test("loop derives a token budget from the client's numCtx and compacts on real usage", async () => {
+  const toolCall = { function: { name: "noop", arguments: {} } };
+  const client = new FakeClient(
+    [
+      { role: "assistant", content: "", tool_calls: [toolCall] }, // step 1
+      { role: "assistant", content: "HISTORY SUMMARY" }, // summarizer (triggered before step 2)
+      { role: "assistant", content: "final answer" }, // step 2
+    ],
+    {
+      numCtx: 1000, // budget = 750 tokens
+      tokenCounts: [900], // step 1 reports usage over the budget
+    },
+  );
+  const registry = new ToolRegistry();
+  registry.register({ name: "noop", execute: () => "ok" });
+  const loop = new AgentLoop({ client, registry, compaction: { keepRecent: 2 } });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.text, "final answer");
+  // Transcript is only ~100 chars — the char heuristic alone would never
+  // trigger; the summarizer call proves the reported tokens did.
+  const summarizerCall = client.calls[1];
+  assert.equal(summarizerCall.tools, undefined);
+  const finalCall = client.calls[2];
+  assert.match(finalCall.messages[1].content, /HISTORY SUMMARY/);
 });
 
 test("loop without compaction option never makes a summarizer call", async () => {

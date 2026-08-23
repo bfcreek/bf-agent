@@ -4,14 +4,48 @@
  * plain text or a stop condition trips.
  */
 
-import { compactMessages } from "./compaction.mjs";
+import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
+import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 
-export const DEFAULT_SYSTEM_PROMPT = [
-  "You are a capable local assistant with access to tools.",
-  "Use tools when they help you complete the user's task; call them with",
-  "valid arguments matching their schemas. When you have everything you",
-  "need, reply to the user in plain text without further tool calls.",
+/**
+ * Sent as a final user message when the loop runs out of steps, so the run
+ * still ends with a useful answer instead of empty text.
+ */
+const WRAP_UP_PROMPT = [
+  "You have used all available tool steps for this task.",
+  "Answer the user now in plain text using what you have learned.",
+  "If the task is not finished, say clearly what was done and what remains.",
+  "Do not call any more tools.",
 ].join(" ");
+
+/** Consecutive identical tool-call steps allowed before execution is refused. */
+const MAX_REPEATED_STEPS = 2;
+
+/**
+ * Written for small local models, which need procedural guidance, not just
+ * permission to use tools: each rule below maps to a known failure mode
+ * (guessing instead of reading, re-reading files instead of searching,
+ * blind edits, repeating failed calls, never finishing).
+ */
+export const DEFAULT_SYSTEM_PROMPT = [
+  "You are a capable local assistant that completes tasks using tools.",
+  "Call tools with valid arguments matching their schemas.",
+  "",
+  "Rules:",
+  "- Ground answers in facts from tools; never guess. For questions about this",
+  "  project, use the README and auto-retrieved passages from the first turn,",
+  "  then read_file, grep_search, or search_project for more detail.",
+  "- To find where something is defined or used, use grep_search or find_files",
+  "  instead of reading files one at a time.",
+  "- Read a file before editing it. Use edit_file for changes to existing",
+  "  files; use write_file only for new files or full rewrites.",
+  "- After changing files, verify the result: re-read the changed part, or run",
+  "  the project's tests or build with run_command when the task calls for it.",
+  "- If a tool call fails, read the error and change your approach. Never",
+  "  repeat a call that just failed with the same arguments.",
+  "- Keep going until the task is done, then reply to the user in plain text",
+  "  with no tool calls. State what you did and what, if anything, remains.",
+].join("\n");
 
 /**
  * @typedef {object} AgentStep
@@ -38,10 +72,27 @@ export class AgentLoop {
    * @param {string} [options.systemPrompt]
    * @param {number} [options.maxSteps] Max model round-trips per run.
    * @param {(step: AgentStep) => void} [options.onStep] Observer for tracing.
-   * @param {{maxChars?: number, keepRecent?: number}|false} [options.compaction]
-   *   Summarize old turns when the transcript exceeds the budget. Off by default.
+   * @param {{maxChars?: number, maxTokens?: number, keepRecent?: number}|false} [options.compaction]
+   *   Summarize old turns when the transcript exceeds the budget. Off by
+   *   default. When the client exposes `numCtx` (OllamaClient does), the
+   *   token budget defaults to a fraction of it and the trigger uses actual
+   *   token counts reported by the model.
+   * @param {object|false} [options.projectBootstrap]
+   *   On the first turn of a conversation, force README + goal-specific RAG into
+   *   the user message before the model is called. `{ workspaceRoot, client?,
+   *   embeddingModel?, onProgress? }`.
+   * @param {(info: {readme: boolean, ragHits: number}) => void} [options.onBootstrap]
    */
-  constructor({ client, registry, systemPrompt, maxSteps = 10, onStep, compaction = false } = {}) {
+  constructor({
+    client,
+    registry,
+    systemPrompt,
+    maxSteps = 10,
+    onStep,
+    compaction = false,
+    projectBootstrap = false,
+    onBootstrap,
+  } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
     if (!registry) throw new Error("AgentLoop requires a tool registry.");
     this.client = client;
@@ -50,6 +101,8 @@ export class AgentLoop {
     this.maxSteps = maxSteps;
     this.onStep = onStep;
     this.compaction = compaction;
+    this.projectBootstrap = projectBootstrap;
+    this.onBootstrap = onBootstrap;
   }
 
   /**
@@ -70,8 +123,28 @@ export class AgentLoop {
         : [{ role: "system", content: this.systemPrompt }];
     messages.push({ role: "user", content: goal });
 
+    if (this.projectBootstrap && isFreshTurn(history)) {
+      const bootstrap = await gatherFirstTurnProjectContext({
+        workspaceRoot: this.projectBootstrap.workspaceRoot,
+        goal,
+        client: this.projectBootstrap.client,
+        embeddingModel: this.projectBootstrap.embeddingModel,
+        signal,
+        onProgress: this.projectBootstrap.onProgress,
+      });
+      messages[messages.length - 1].content = `${goal}\n\n${bootstrap.text}`;
+      this.onBootstrap?.({ readme: bootstrap.readme, ragHits: bootstrap.ragHits });
+    }
+
     const steps = [];
     const tools = this.registry.schemas();
+    // Actual context usage (prompt + completion tokens) from the last model
+    // response — a far better compaction trigger than counting characters.
+    let observedTokens = 0;
+    // Small models get stuck repeating one tool call verbatim; track
+    // consecutive identical steps so we can break the cycle.
+    let repeatedKey = "";
+    let repeatedCount = 0;
 
     for (let index = 1; index <= this.maxSteps; index++) {
       if (signal?.aborted) {
@@ -79,14 +152,20 @@ export class AgentLoop {
       }
 
       if (this.compaction) {
-        messages = await compactMessages({
+        const compacted = await compactMessages({
           client: this.client,
           messages,
+          maxTokens: defaultTokenBudget(this.client),
           ...this.compaction,
+          observedTokens,
         });
+        if (compacted !== messages) observedTokens = 0;
+        messages = compacted;
       }
 
-      const { message } = await this.client.chat({ messages, tools, signal });
+      const { message, raw } = await chatWithRetry(this.client, { messages, tools, signal });
+      const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
+      if (usedTokens > 0) observedTokens = usedTokens;
       messages.push(normalizeAssistantMessage(message));
 
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
@@ -107,11 +186,26 @@ export class AgentLoop {
         };
       }
 
+      const stepKey = JSON.stringify(
+        toolCalls.map((c) => [c?.function?.name, c?.function?.arguments]),
+      );
+      repeatedCount = stepKey === repeatedKey ? repeatedCount + 1 : 0;
+      repeatedKey = stepKey;
+      const refuseRepeat = repeatedCount >= MAX_REPEATED_STEPS;
+
       const executed = [];
       for (const call of toolCalls) {
         const name = call?.function?.name ?? "";
         const args = call?.function?.arguments ?? {};
-        const outcome = await this.registry.execute(name, args);
+        const outcome = refuseRepeat
+          ? {
+              ok: false,
+              error:
+                `You have made this exact tool call ${repeatedCount + 1} times in a row; ` +
+                "it was not executed again. Do something different: change the arguments, " +
+                "use another tool, or give your final answer now.",
+            }
+          : await this.registry.execute(name, args);
         executed.push({ name, args, ...outcome });
         messages.push({
           role: "tool",
@@ -130,7 +224,44 @@ export class AgentLoop {
       this.onStep?.(step);
     }
 
-    return { text: "", stopReason: "max-steps", steps, messages };
+    // Out of steps: ask for a plain-text wrap-up (no tools offered) so the
+    // caller gets a best-effort answer instead of empty text. Best-effort —
+    // any failure here must not mask the max-steps outcome.
+    let text = "";
+    if (!signal?.aborted) {
+      try {
+        const wrapUp = [...messages, { role: "user", content: WRAP_UP_PROMPT }];
+        const { message } = await chatWithRetry(this.client, { messages: wrapUp, signal });
+        text = textOf(message.content).trim();
+        if (text) {
+          messages.push({ role: "user", content: WRAP_UP_PROMPT });
+          messages.push({ role: "assistant", content: text });
+          const step = { index: this.maxSteps + 1, kind: "final", content: text, toolCalls: [] };
+          steps.push(step);
+          this.onStep?.(step);
+        }
+      } catch {
+        // keep text = ""
+      }
+    }
+    return { text, stopReason: "max-steps", steps, messages };
+  }
+}
+
+/**
+ * One retry on transient client failures (network unreachable, 5xx). A
+ * single mid-task hiccup should not kill a run that already did real work.
+ */
+async function chatWithRetry(client, request) {
+  try {
+    return await client.chat(request);
+  } catch (err) {
+    if (err?.name === "AbortError" || request.signal?.aborted) throw err;
+    if (err?.name !== "OllamaClientError") throw err;
+    if (typeof err.status === "number" && err.status < 500) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (request.signal?.aborted) throw err;
+    return client.chat(request);
   }
 }
 
@@ -156,4 +287,20 @@ function toolResultContent(outcome) {
   const { result } = outcome;
   if (result === undefined || result === null) return "(no output)";
   return typeof result === "string" ? result : JSON.stringify(result);
+}
+
+/**
+ * Token budget derived from the client's context window, when it exposes one
+ * (OllamaClient does). Undefined keeps compaction on the character trigger.
+ */
+function defaultTokenBudget(client) {
+  const numCtx = client?.numCtx;
+  if (!Number.isFinite(numCtx) || numCtx <= 0) return undefined;
+  return Math.floor(numCtx * DEFAULT_CONTEXT_FRACTION);
+}
+
+/** First turn of a conversation — no prior user/assistant/tool messages in history. */
+function isFreshTurn(history) {
+  if (!history?.length) return true;
+  return !history.some((m) => m.role === "user" || m.role === "assistant" || m.role === "tool");
 }

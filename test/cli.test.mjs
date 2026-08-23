@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import http from "node:http";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,12 +16,32 @@ function cli(...args) {
   });
 }
 
+function cliAsync(...args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(root, "src", "cli.mjs"), ...args], {
+      encoding: "utf8",
+      cwd: root,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
 test("--help prints usage, options, examples, and exit codes", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
   assert.match(run.stdout, /Usage:/);
   assert.match(run.stdout, /halo-agent serve/);
-  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version"]) {
+  assert.match(run.stdout, /halo-agent models/);
+  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json"]) {
     assert.ok(run.stdout.includes(flag), `help should document ${flag}`);
   }
   assert.match(run.stdout, /Examples:/);
@@ -82,6 +103,65 @@ test("multiple usage errors are all reported at once", () => {
 
 test("an unreachable Ollama exits with code 3 and a clear message", () => {
   const run = cli("hello", "--base-url", "http://127.0.0.1:9", "--quiet");
+  assert.equal(run.status, 3);
+  assert.match(run.stderr, /Cannot reach Ollama/);
+});
+
+test("models reports compliance for installed Ollama models", async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/api/tags") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          models: [{ name: "qwen3-coder:30b" }, { name: "gemma3:12b" }],
+        }),
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
+  try {
+    const run = await cliAsync("models", "--base-url", `http://127.0.0.1:${port}`);
+    assert.equal(run.status, 0);
+    assert.match(run.stdout, /compliant \(tool-capable\):/);
+    assert.match(run.stdout, /qwen3-coder:30b/);
+    assert.match(run.stdout, /not compliant:/);
+    assert.match(run.stdout, /gemma3:12b/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("models --json prints structured compliance data", async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/api/tags") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ models: [{ name: "llama3.2" }] }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
+  try {
+    const run = await cliAsync("models", "--json", "--base-url", `http://127.0.0.1:${port}`);
+    assert.equal(run.status, 0);
+    const body = JSON.parse(run.stdout);
+    assert.equal(body.baseUrl, `http://127.0.0.1:${port}`);
+    assert.deepEqual(body.compliant, ["llama3.2"]);
+    assert.deepEqual(body.notCompliant, []);
+    assert.deepEqual(body.unknown, []);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("models exits with code 3 when Ollama is unreachable", () => {
+  const run = cli("models", "--base-url", "http://127.0.0.1:9");
   assert.equal(run.status, 3);
   assert.match(run.stderr, /Cannot reach Ollama/);
 });

@@ -40,11 +40,19 @@ test("the SDK exports the full public surface", () => {
     "createOpenAIServer",
     "SessionStore",
     "registerBuiltinTools",
+    "registerProjectSearchTool",
     "buildSystemPrompt",
     "buildEnvironmentContext",
+    "buildProjectContext",
+    "gatherFirstTurnProjectContext",
+    "ensureProjectIndex",
+    "searchProjectIndex",
     "compactMessages",
     "resolveModel",
     "isLikelyToolCapable",
+    "listClassifiedModels",
+    "assertToolCapable",
+    "ModelRoutingError",
     "DEFAULT_SYSTEM_PROMPT",
   ]) {
     assert.ok(name in sdk, `missing export: ${name}`);
@@ -56,7 +64,7 @@ test("createAgent runs a goal end to end with builtin tools", async () => {
     { role: "assistant", content: "", tool_calls: [{ function: { name: "echo", arguments: { text: "ping" } } }] },
     { role: "assistant", content: "echoed" },
   ]);
-  const agent = await sdk.createAgent({ client, workspaceRoot: root });
+  const agent = await sdk.createAgent({ client, workspaceRoot: root, projectIndex: false, projectBootstrap: false });
 
   const result = await agent.run("echo ping");
   assert.equal(result.text, "echoed");
@@ -65,7 +73,7 @@ test("createAgent runs a goal end to end with builtin tools", async () => {
 
 test("createAgent injects a context-built system prompt", async () => {
   const client = new FakeClient([{ role: "assistant", content: "ok" }]);
-  const agent = await sdk.createAgent({ client, workspaceRoot: root });
+  const agent = await sdk.createAgent({ client, workspaceRoot: root, projectIndex: false, projectBootstrap: false });
 
   await agent.run("hi");
   const system = client.calls[0].messages[0];

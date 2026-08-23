@@ -7,6 +7,8 @@
 
 export const DEFAULT_MAX_CHARS = 24_000;
 export const DEFAULT_KEEP_RECENT = 6;
+/** Compact when the transcript is estimated past this share of the context window. */
+export const DEFAULT_CONTEXT_FRACTION = 0.75;
 
 const SUMMARIZER_PROMPT = [
   "You compress agent conversation history. Summarize the transcript into a",
@@ -26,10 +28,29 @@ export function transcriptSize(messages) {
 }
 
 /**
+ * Estimate the transcript's token count: the best of what Ollama actually
+ * reported for the last round-trip (observedTokens) and a chars/4 heuristic
+ * that also covers content appended since.
+ *
+ * @param {Array<object>} messages
+ * @param {number} [observedTokens] `prompt_eval_count + eval_count` from the
+ *   most recent Ollama response, when known.
+ * @returns {number}
+ */
+export function estimateTokens(messages, observedTokens = 0) {
+  return Math.max(observedTokens, Math.ceil(transcriptSize(messages) / 4));
+}
+
+/**
  * @param {object} options
  * @param {{chat: Function}} options.client
  * @param {Array<object>} options.messages Transcript starting with a system message.
- * @param {number} [options.maxChars] Budget that triggers compaction.
+ * @param {number} [options.maxChars] Character budget that triggers compaction
+ *   when no token budget is set.
+ * @param {number} [options.maxTokens] Token budget that triggers compaction;
+ *   when set it replaces the character trigger (see estimateTokens).
+ * @param {number} [options.observedTokens] Actual token usage reported by the
+ *   model for the last round-trip; sharpens the token estimate.
  * @param {number} [options.keepRecent] Recent messages kept verbatim.
  * @returns {Promise<Array<object>>} The original array when nothing was
  *   compacted, otherwise a new compacted array.
@@ -38,9 +59,14 @@ export async function compactMessages({
   client,
   messages,
   maxChars = DEFAULT_MAX_CHARS,
+  maxTokens,
+  observedTokens = 0,
   keepRecent = DEFAULT_KEEP_RECENT,
 }) {
-  if (transcriptSize(messages) <= maxChars) return messages;
+  const overBudget = maxTokens
+    ? estimateTokens(messages, observedTokens) > maxTokens
+    : transcriptSize(messages) > maxChars;
+  if (!overBudget) return messages;
 
   // Never split a tool-call exchange: a role=tool message must keep the
   // assistant message that requested it, so widen the kept window backward.

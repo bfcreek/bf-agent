@@ -52,6 +52,7 @@ Options:
 | `--model <name>` | `llama3.2` | Ollama model to drive the loop |
 | `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server |
 | `--max-steps <n>` | `10` | Max model round-trips before the loop stops |
+| `--num-ctx <n>` | `16384` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
 | `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
@@ -59,9 +60,11 @@ Options:
 | `--quiet` | off | Suppress step trace; print only the final answer |
 
 The requested model is resolved against Ollama's installed list at startup:
-untagged names match their tags (`llama3.2` finds `llama3.2:latest`), missing
-models fall back to the first installed tool-capable model, and models known
-to lack tool calling get a warning.
+untagged names match their tags (`llama3.2` finds `llama3.2:latest`) and
+missing models fall back to the first installed tool-capable model. Tool
+capability is asked of Ollama itself (`/api/show` capabilities), so new
+models classify correctly; a family-name list is the fallback for older
+Ollama versions.
 
 Sessions store the full transcript, an accumulated step log, and the list of
 files the agent changed. Re-running with the same `--session` name continues
@@ -113,6 +116,8 @@ setups that need different wiring. External MCP tools bridge in via
 | --- | --- |
 | `read_file` | Read a file (optionally a line range); long output is truncated |
 | `list_dir` | List a directory; subdirectory names end with `/` |
+| `grep_search` | Regex search over file contents (`path:line: text`); prunes `node_modules`, `.git`, etc., skips binaries |
+| `find_files` | Find files by glob (`*.mjs`, `src/**/*.js`) |
 | `write_file` | Create or overwrite a file, creating parent directories |
 | `edit_file` | Replace an exact snippet in a file (unique match or `replace_all`) |
 | `run_command` | Run a shell command with captured output and a hard timeout |
@@ -132,7 +137,10 @@ The system prompt is built per run by the context builder: platform, shell,
 workspace root, and a top-level file listing, so the model starts oriented
 instead of spending steps exploring. Long transcripts are compacted
 automatically — older turns are summarized by the model while the system
-message and recent turns are kept verbatim.
+message and recent turns are kept verbatim. Compaction triggers on real
+token usage: every request carries an explicit `num_ctx` (default 16384,
+`--num-ctx` to change), and the loop watches the token counts Ollama reports
+to compact before the window overflows.
 
 ## How the loop works
 
@@ -155,6 +163,19 @@ node --test
 
 Tests mock the Ollama client — no server or model required.
 
+## Evals
+
+```powershell
+node evals/run.mjs --models llama3.2,qwen3-coder:30b
+```
+
+Runs real end-to-end tasks (answer from a README, create/edit files, find a
+definition, run a command, fix a failing test) against live Ollama models in
+throwaway temp workspaces, and reports pass rate, steps, and duration per
+model. Use this to measure whether a runtime change actually improves agent
+quality. `--task <name>` runs one task, `--json <file>` saves results,
+`--verbose` traces tool calls. Exit code 2 means at least one task failed.
+
 ## Layout
 
 | Path | Purpose |
@@ -171,8 +192,10 @@ Tests mock the Ollama client — no server or model required.
 | `src/index.mjs` | SDK entry point (`createAgent` and all public exports) |
 | `src/tools/builtin.mjs` | Registers the standard tool set (diagnostics + file + shell) |
 | `src/tools/fs.mjs` | Workspace-scoped file tools and path/output guards |
+| `src/tools/search.mjs` | `grep_search` and `find_files` over the workspace tree |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
+| `evals/` | Live-model eval harness (`evals/run.mjs`) and task definitions |
 
 ## Relationship to Aura Wire
 

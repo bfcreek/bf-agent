@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { after, before, test } from "node:test";
 
 import { AgentLoop } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
@@ -143,17 +146,110 @@ test("unknown tool name is reported back to the model, loop continues", async ()
   assert.match(result.steps[0].toolCalls[0].error, /Unknown tool 'no_such_tool'/);
 });
 
-test("stops at maxSteps when the model keeps calling tools", async () => {
+test("stops at maxSteps and asks for a plain-text wrap-up answer", async () => {
   const endless = { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] };
-  const client = new FakeClient([endless, endless, endless, endless]);
+  const client = new FakeClient([
+    endless,
+    endless,
+    endless,
+    { role: "assistant", content: "Partial answer: I added things." }, // wrap-up
+  ]);
   const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 3 });
 
   const result = await loop.run("loop forever");
 
   assert.equal(result.stopReason, "max-steps");
+  assert.equal(result.text, "Partial answer: I added things.");
+  // 3 tool steps + 1 final wrap-up step.
+  assert.equal(result.steps.length, 4);
+  assert.equal(result.steps[3].kind, "final");
+  // The wrap-up call offers no tools and carries the wrap-up instruction.
+  const wrapUpCall = client.calls[3];
+  assert.equal(wrapUpCall.tools, undefined);
+  assert.match(wrapUpCall.messages[wrapUpCall.messages.length - 1].content, /all available tool steps/);
+});
+
+test("wrap-up failure still returns the max-steps result with empty text", async () => {
+  const endless = { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] };
+  // Script exhausts after the loop steps, so the wrap-up call throws.
+  const client = new FakeClient([endless, endless]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 2 });
+
+  const result = await loop.run("loop forever");
+
+  assert.equal(result.stopReason, "max-steps");
   assert.equal(result.text, "");
-  assert.equal(result.steps.length, 3);
-  assert.equal(client.calls.length, 3);
+  assert.equal(result.steps.length, 2);
+});
+
+test("the third consecutive identical tool call is refused with a nudge", async () => {
+  let executions = 0;
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "probe",
+    execute: () => {
+      executions++;
+      return "same result";
+    },
+  });
+  const same = { role: "assistant", content: "", tool_calls: [toolCall("probe", { q: 1 })] };
+  const client = new FakeClient([
+    same,
+    same,
+    same, // refused — nudge goes back instead of a third execution
+    { role: "assistant", content: "fine, moving on" },
+  ]);
+  const loop = new AgentLoop({ client, registry });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.text, "fine, moving on");
+  assert.equal(executions, 2, "third identical call must not execute");
+  const refused = result.steps[2].toolCalls[0];
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /times in a row/);
+  // A different call resets the streak — nudge text reaches the model.
+  const nudgeMsg = client.calls[3].messages.filter((m) => m.role === "tool").pop();
+  assert.match(nudgeMsg.content, /^ERROR: /);
+});
+
+test("transient client errors are retried once", async () => {
+  const flaky = {
+    attempts: 0,
+    async chat() {
+      this.attempts++;
+      if (this.attempts === 1) {
+        const err = new Error("Cannot reach Ollama");
+        err.name = "OllamaClientError";
+        err.status = null;
+        throw err;
+      }
+      return { message: { role: "assistant", content: "recovered" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client: flaky, registry: makeRegistry() });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.text, "recovered");
+  assert.equal(flaky.attempts, 2);
+});
+
+test("client errors with a 4xx status are not retried", async () => {
+  const failing = {
+    attempts: 0,
+    async chat() {
+      this.attempts++;
+      const err = new Error("model not found");
+      err.name = "OllamaClientError";
+      err.status = 404;
+      throw err;
+    },
+  };
+  const loop = new AgentLoop({ client: failing, registry: makeRegistry() });
+
+  await assert.rejects(() => loop.run("go"), /model not found/);
+  assert.equal(failing.attempts, 1);
 });
 
 test("string tool arguments (JSON) are parsed before execution", async () => {
@@ -215,4 +311,36 @@ test("aborted signal stops before calling the model", async () => {
 
   assert.equal(result.stopReason, "aborted");
   assert.equal(client.calls.length, 0);
+});
+
+let bootstrapRoot;
+
+before(async () => {
+  bootstrapRoot = await mkdtemp(path.join(os.tmpdir(), "halo-agent-loop-boot-"));
+  await writeFile(path.join(bootstrapRoot, "README.md"), "# Boot Project\n\nUnique boot marker.\n", "utf8");
+});
+
+after(async () => {
+  await rm(bootstrapRoot, { recursive: true, force: true });
+});
+
+test("projectBootstrap injects README on the first turn only", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "boot answer" },
+    { role: "assistant", content: "follow-up answer" },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    projectBootstrap: { workspaceRoot: bootstrapRoot },
+  });
+
+  const first = await loop.run("what is this project?");
+  assert.match(first.messages.find((m) => m.role === "user").content, /Unique boot marker/);
+  assert.match(client.calls[0].messages.find((m) => m.role === "user").content, /Auto-retrieved project context/);
+
+  const history = first.messages;
+  await loop.run("follow up", { history });
+  const followUpUsers = client.calls[1].messages.filter((m) => m.role === "user");
+  assert.equal(followUpUsers[followUpUsers.length - 1].content, "follow up");
 });

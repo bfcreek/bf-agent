@@ -24,7 +24,7 @@ export async function buildEnvironmentContext({
   maxEntries = DEFAULT_MAX_ENTRIES,
 } = {}) {
   const root = path.resolve(workspaceRoot ?? process.cwd());
-  const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
+  const shell = process.platform === "win32" ? "PowerShell" : "/bin/sh";
 
   let names = [];
   let listingNote = "";
@@ -62,9 +62,12 @@ export async function buildEnvironmentContext({
  * @param {object} options
  * @param {string} options.basePrompt
  * @param {string} [options.workspaceRoot]
+ * @param {string} [options.projectContext] Injected project overview / index note.
  * @returns {Promise<string>}
  */
-export async function buildSystemPrompt({ basePrompt, workspaceRoot }) {
+export async function buildSystemPrompt({ basePrompt, workspaceRoot, projectContext }) {
   const context = await buildEnvironmentContext({ workspaceRoot });
-  return `${basePrompt}\n\n${context}`;
+  const parts = [basePrompt, context];
+  if (projectContext?.trim()) parts.push(projectContext.trim());
+  return parts.join("\n\n");
 }

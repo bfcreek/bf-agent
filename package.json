@@ -17,6 +17,7 @@
   "scripts": {
     "start": "node src/cli.mjs",
     "serve": "node src/cli.mjs serve",
-    "test": "node --test"
+    "test": "node --test",
+    "evals": "node evals/run.mjs"
   }
 }

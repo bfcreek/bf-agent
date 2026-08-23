@@ -48,6 +48,57 @@ export function truncateMiddle(text, limit = MAX_TOOL_OUTPUT_CHARS) {
 }
 
 /**
+ * Whitespace-tolerant fallback for edit_file: models (small ones especially)
+ * often reproduce the target snippet with wrong indentation or line endings,
+ * which would fail the exact match. Find the snippet by comparing lines with
+ * leading/trailing whitespace ignored; the replacement keeps the file's real
+ * indentation by shifting every new line by the first-line indent delta.
+ *
+ * @param {string} text Full file contents.
+ * @param {string} oldString Snippet as the model wrote it.
+ * @param {string} newString Replacement as the model wrote it.
+ * @returns {{updated: string, matches: number}|null} Null when no flexible
+ *   match exists; matches > 1 means ambiguous (nothing replaced).
+ */
+export function replaceFlexible(text, oldString, newString) {
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const fileLines = text.split(/\r?\n/);
+  const oldLines = oldString.split(/\r?\n/);
+  const targets = oldLines.map((l) => l.trim());
+  if (!targets.some((t) => t !== "")) return null;
+
+  const hits = [];
+  for (let i = 0; i + targets.length <= fileLines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < targets.length; j++) {
+      if (fileLines[i + j].trim() !== targets[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) hits.push(i);
+  }
+  if (hits.length === 0) return null;
+  if (hits.length > 1) return { updated: text, matches: hits.length };
+
+  const start = hits[0];
+  const fileIndent = fileLines[start].match(/^[ \t]*/)[0];
+  const snippetIndent = oldLines[0].match(/^[ \t]*/)[0];
+  const newLines = newString.split(/\r?\n/).map((line) => {
+    if (line.trim() === "") return line;
+    if (line.startsWith(snippetIndent)) return fileIndent + line.slice(snippetIndent.length);
+    return fileIndent + line.replace(/^[ \t]*/, "");
+  });
+
+  const updated = [
+    ...fileLines.slice(0, start),
+    ...newLines,
+    ...fileLines.slice(start + targets.length),
+  ].join(eol);
+  return { updated, matches: 1 };
+}
+
+/**
  * @param {import("../tool-registry.mjs").ToolRegistry} registry
  * @param {object} options
  * @param {string} options.workspaceRoot Absolute directory the tools may touch.
@@ -153,7 +204,25 @@ export function registerFileTools(registry, { workspaceRoot }) {
       const text = await readFile(target, "utf8");
       const occurrences = text.split(old_string).length - 1;
       if (occurrences === 0) {
-        throw new Error("old_string was not found in the file.");
+        // Exact match failed — try the whitespace-tolerant match before
+        // giving up, since mangled indentation is the usual culprit.
+        const flexible = replaceFlexible(text, old_string, String(new_string ?? ""));
+        if (!flexible) {
+          throw new Error(
+            "old_string was not found in the file, even ignoring indentation differences. Re-read the file and copy the exact text.",
+          );
+        }
+        if (flexible.matches > 1) {
+          throw new Error(
+            `old_string matches ${flexible.matches} places (ignoring indentation); add surrounding context to make it unique.`,
+          );
+        }
+        await writeFile(target, flexible.updated, "utf8");
+        return {
+          path: path.relative(root, target),
+          replacements: 1,
+          note: "matched with indentation differences ignored; the file's original indentation was kept",
+        };
       }
       if (occurrences > 1 && !replace_all) {
         throw new Error(

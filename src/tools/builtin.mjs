@@ -5,6 +5,8 @@
  */
 
 import { registerFileTools } from "./fs.mjs";
+import { registerProjectSearchTool } from "./project-search.mjs";
+import { registerSearchTools } from "./search.mjs";
 import { registerShellTools } from "./shell.mjs";
 
 /**
@@ -12,8 +14,14 @@ import { registerShellTools } from "./shell.mjs";
  * @param {object} [options]
  * @param {string} [options.workspaceRoot] Directory file/shell tools are
  *   confined to. Defaults to the process working directory.
+ * @param {{embed: Function}} [options.searchClient] When set, registers
+ *   search_project over the local project index.
+ * @param {string} [options.embeddingModel]
  */
-export function registerBuiltinTools(registry, { workspaceRoot = process.cwd() } = {}) {
+export function registerBuiltinTools(
+  registry,
+  { workspaceRoot = process.cwd(), searchClient, embeddingModel } = {},
+) {
   registry.register({
     name: "get_time",
     description:
@@ -46,7 +54,15 @@ export function registerBuiltinTools(registry, { workspaceRoot = process.cwd() }
   });
 
   registerFileTools(registry, { workspaceRoot });
+  registerSearchTools(registry, { workspaceRoot });
   registerShellTools(registry, { workspaceRoot });
+  if (searchClient) {
+    registerProjectSearchTool(registry, {
+      workspaceRoot,
+      client: searchClient,
+      embeddingModel,
+    });
+  }
 
   return registry;
 }
