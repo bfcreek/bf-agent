@@ -6,6 +6,7 @@
  * Serve OpenAI:   node src/cli.mjs serve [--port 11435] [...]
  */
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 
@@ -32,53 +33,81 @@ function parseArgs(argv) {
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
     mcp: [],
     goal: "",
+    errors: [],
   };
   const positional = [];
+
+  const value = (flag, i) => {
+    const v = argv[i];
+    if (v === undefined) options.errors.push(`${flag} requires a value.`);
+    return v;
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
       case "--model":
-        options.model = argv[++i] ?? options.model;
+        options.model = value(arg, ++i) ?? options.model;
         break;
       case "--base-url":
-        options.baseUrl = argv[++i] ?? options.baseUrl;
+        options.baseUrl = value(arg, ++i) ?? options.baseUrl;
         break;
       case "--max-steps": {
-        const n = Number.parseInt(argv[++i] ?? "", 10);
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(n) && n > 0) options.maxSteps = n;
+        else if (raw !== undefined) options.errors.push(`--max-steps needs a positive integer, got '${raw}'.`);
         break;
       }
       case "--quiet":
         options.quiet = true;
         break;
-      case "--cwd":
-        options.cwd = path.resolve(argv[++i] ?? options.cwd);
+      case "--cwd": {
+        const raw = value(arg, ++i);
+        if (raw !== undefined) options.cwd = path.resolve(raw);
         break;
+      }
       case "--port": {
-        const p = Number.parseInt(argv[++i] ?? "", 10);
+        const raw = value(arg, ++i);
+        const p = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(p) && p >= 0 && p <= 65535) options.port = p;
+        else if (raw !== undefined) options.errors.push(`--port needs a number from 0 to 65535, got '${raw}'.`);
         break;
       }
       case "--mode": {
-        const mode = argv[++i];
+        const mode = value(arg, ++i);
         if (mode === "ask" || mode === "agent") options.mode = mode;
+        else if (mode !== undefined) options.errors.push(`--mode must be 'ask' or 'agent', got '${mode}'.`);
         break;
       }
-      case "--session":
-        options.session = argv[++i] ?? undefined;
+      case "--session": {
+        const name = value(arg, ++i);
+        if (name !== undefined) options.session = name;
         break;
+      }
       case "--mcp": {
-        const spec = argv[++i];
-        if (spec) options.mcp.push(spec);
+        const spec = value(arg, ++i);
+        if (spec !== undefined) options.mcp.push(spec);
         break;
       }
       case "--help":
       case "-h":
         options.help = true;
         break;
+      case "--version":
+      case "-v":
+        options.version = true;
+        break;
+      case "--":
+        positional.push(...argv.slice(i + 1));
+        i = argv.length;
+        break;
       default:
-        positional.push(arg);
+        if (arg.startsWith("-")) {
+          options.errors.push(`Unknown option '${arg}'.`);
+        } else {
+          positional.push(arg);
+        }
     }
   }
 
@@ -90,8 +119,12 @@ function parseArgs(argv) {
   return options;
 }
 
+const VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+
 function printHelp() {
-  console.log(`halo-agent - local agent loop on Ollama
+  console.log(`halo-agent v${VERSION} - local agent loop on Ollama
 
 Usage:
   halo-agent "<goal>" [options]     Run one goal and print the answer
@@ -108,7 +141,20 @@ Options:
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer
-  -h, --help           Show this help`);
+  --                   Treat everything after as the goal, even if it starts with -
+  -v, --version        Print the version
+  -h, --help           Show this help
+
+Examples:
+  halo-agent "what time is it?"
+  halo-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
+  halo-agent "fix the failing test" --session fix-tests --mode agent
+  halo-agent serve --port 11435
+  halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
+
+Exit codes:
+  0  success        1  usage error      2  stopped at max steps
+  3  Ollama error   4  MCP attach failed`);
 }
 
 function makeApprovalPrompt() {
@@ -132,9 +178,24 @@ function describeStep(step) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help || (!options.goal && !options.serve)) {
+  if (options.version) {
+    console.log(VERSION);
+    return;
+  }
+  if (options.help) {
     printHelp();
-    process.exitCode = options.help ? 0 : 1;
+    return;
+  }
+  if (options.errors.length > 0) {
+    for (const error of options.errors) console.error(error);
+    console.error("Run 'halo-agent --help' for usage.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!options.goal && !options.serve) {
+    console.error("No goal given.");
+    printHelp();
+    process.exitCode = 1;
     return;
   }
 
