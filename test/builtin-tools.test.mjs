@@ -1,0 +1,196 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { after, before, beforeEach, test } from "node:test";
+
+import { ToolRegistry } from "../src/tool-registry.mjs";
+import { registerBuiltinTools } from "../src/tools/builtin.mjs";
+import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot } from "../src/tools/fs.mjs";
+
+let root;
+let registry;
+
+before(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), "halo-agent-tools-"));
+});
+
+after(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+beforeEach(() => {
+  registry = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: root });
+});
+
+test("all builtin tools are registered", () => {
+  for (const name of [
+    "get_time",
+    "echo",
+    "read_file",
+    "list_dir",
+    "write_file",
+    "edit_file",
+    "run_command",
+  ]) {
+    assert.ok(registry.has(name), `missing tool: ${name}`);
+  }
+});
+
+test("resolveWithinRoot rejects escapes and accepts inside paths", () => {
+  assert.equal(resolveWithinRoot(root, "a/b.txt"), path.join(root, "a", "b.txt"));
+  assert.equal(resolveWithinRoot(root, undefined), path.resolve(root));
+  assert.throws(() => resolveWithinRoot(root, "../outside.txt"), /outside the workspace/);
+  assert.throws(
+    () => resolveWithinRoot(root, path.join(os.tmpdir(), "elsewhere.txt")),
+    /outside the workspace/,
+  );
+});
+
+test("write_file then read_file round-trips content", async () => {
+  const write = await registry.execute("write_file", {
+    path: "notes/hello.txt",
+    content: "hello world",
+  });
+  assert.equal(write.ok, true);
+  assert.equal(write.result.bytesWritten, 11);
+
+  const read = await registry.execute("read_file", { path: "notes/hello.txt" });
+  assert.deepEqual(read, { ok: true, result: "hello world" });
+});
+
+test("read_file supports offset and limit line ranges", async () => {
+  await writeFile(path.join(root, "lines.txt"), "one\ntwo\nthree\nfour\nfive", "utf8");
+
+  const middle = await registry.execute("read_file", { path: "lines.txt", offset: 2, limit: 2 });
+  assert.deepEqual(middle, { ok: true, result: "two\nthree" });
+
+  const tail = await registry.execute("read_file", { path: "lines.txt", offset: 4 });
+  assert.deepEqual(tail, { ok: true, result: "four\nfive" });
+});
+
+test("read_file truncates very large files with a marker", async () => {
+  await writeFile(path.join(root, "big.txt"), "x".repeat(MAX_TOOL_OUTPUT_CHARS + 500), "utf8");
+
+  const read = await registry.execute("read_file", { path: "big.txt" });
+  assert.equal(read.ok, true);
+  assert.match(read.result, /\[output truncated: 500 of \d+ characters omitted\]$/);
+});
+
+test("read_file on a missing file fails gracefully", async () => {
+  const read = await registry.execute("read_file", { path: "no-such-file.txt" });
+  assert.equal(read.ok, false);
+  assert.match(read.error, /read_file/);
+});
+
+test("list_dir marks directories with a trailing slash", async () => {
+  await mkdir(path.join(root, "pkg", "sub"), { recursive: true });
+  await writeFile(path.join(root, "pkg", "a.txt"), "a", "utf8");
+
+  const listed = await registry.execute("list_dir", { path: "pkg" });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.result.entries, ["a.txt", "sub/"]);
+});
+
+test("edit_file replaces a unique match", async () => {
+  await writeFile(path.join(root, "edit.txt"), "alpha beta gamma", "utf8");
+
+  const edit = await registry.execute("edit_file", {
+    path: "edit.txt",
+    old_string: "beta",
+    new_string: "BETA",
+  });
+  assert.equal(edit.ok, true);
+  assert.equal(edit.result.replacements, 1);
+  assert.equal(await readFile(path.join(root, "edit.txt"), "utf8"), "alpha BETA gamma");
+});
+
+test("edit_file rejects ambiguous matches unless replace_all is set", async () => {
+  await writeFile(path.join(root, "dupes.txt"), "x y x y x", "utf8");
+
+  const ambiguous = await registry.execute("edit_file", {
+    path: "dupes.txt",
+    old_string: "x",
+    new_string: "z",
+  });
+  assert.equal(ambiguous.ok, false);
+  assert.match(ambiguous.error, /appears 3 times/);
+
+  const all = await registry.execute("edit_file", {
+    path: "dupes.txt",
+    old_string: "x",
+    new_string: "z",
+    replace_all: true,
+  });
+  assert.equal(all.ok, true);
+  assert.equal(all.result.replacements, 3);
+  assert.equal(await readFile(path.join(root, "dupes.txt"), "utf8"), "z y z y z");
+});
+
+test("edit_file reports when old_string is absent", async () => {
+  await writeFile(path.join(root, "absent.txt"), "nothing here", "utf8");
+
+  const edit = await registry.execute("edit_file", {
+    path: "absent.txt",
+    old_string: "missing",
+    new_string: "found",
+  });
+  assert.equal(edit.ok, false);
+  assert.match(edit.error, /not found/);
+});
+
+test("file tools refuse paths outside the workspace", async () => {
+  for (const [name, args] of [
+    ["read_file", { path: "../escape.txt" }],
+    ["write_file", { path: "../escape.txt", content: "x" }],
+    ["list_dir", { path: ".." }],
+  ]) {
+    const outcome = await registry.execute(name, args);
+    assert.equal(outcome.ok, false, `${name} should refuse`);
+    assert.match(outcome.error, /outside the workspace/);
+  }
+});
+
+test("run_command captures stdout and exit code", async () => {
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.log('hi from tool')"`,
+  });
+  assert.equal(run.ok, true);
+  assert.equal(run.result.exitCode, 0);
+  assert.equal(run.result.timedOut, false);
+  assert.match(run.result.stdout, /hi from tool/);
+});
+
+test("run_command reports non-zero exit codes and stderr", async () => {
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.error('bad'); process.exit(3)"`,
+  });
+  assert.equal(run.ok, true);
+  assert.equal(run.result.exitCode, 3);
+  assert.match(run.result.stderr, /bad/);
+});
+
+test("run_command executes in the workspace root", async () => {
+  await writeFile(path.join(root, "marker.txt"), "here", "utf8");
+
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.log(require('fs').existsSync('marker.txt'))"`,
+  });
+  assert.equal(run.ok, true);
+  assert.match(run.result.stdout, /true/);
+});
+
+test("run_command kills commands that exceed the timeout", async () => {
+  const run = await registry.execute("run_command", {
+    command: `node -e "setTimeout(() => {}, 60000)"`,
+    timeout_seconds: 1,
+  });
+  assert.equal(run.ok, true);
+  assert.equal(run.result.timedOut, true);
+});
+
+test("run_command rejects a cwd outside the workspace", async () => {
+  const run = await registry.execute("run_command", { command: "node -v", cwd: ".." });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /outside the workspace/);
+});

@@ -1,0 +1,17 @@
+{
+  "name": "halo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local agent runtime for Ollama: plan/act/observe loop, tools, and an OpenAI-compatible facade.",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "halo-agent": "src/cli.mjs"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "test": "node --test"
+  }
+}
