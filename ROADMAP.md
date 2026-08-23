@@ -17,11 +17,11 @@ halo-agent extensions: editors point at Wire's `/v1` door and Wire routes here.
 | 3 | **Builtin tools** | done (v1) | `read_file`, `write_file`, `edit_file`, `list_dir`, `run_command` + diagnostics; workspace-scoped paths, output caps, command timeouts. Approvals land with item 8 |
 | 4 | **Tool registry** | done (v1) | Schema + executor dispatch; MCP later |
 | 5 | **CLI** | done (v1) | `halo-agent "prompt"` against local Ollama |
-| 6 | **Context builder** | pending | cwd, selective files, output trimming |
-| 7 | **Compaction** | pending | Summarize old turns when context fills |
-| 8 | **Safety / approvals** | pending | Ask vs agent mode, write gates, sandbox |
+| 6 | **Context builder** | done (v1) | System prompt gets platform/shell/cwd + top-level listing; head+tail trimming for command output |
+| 7 | **Compaction** | done (v1) | Char-budget trigger; old turns summarized by the model, system + recent turns kept verbatim |
+| 8 | **Safety / approvals** | done (v1) | Ask vs agent mode; write/shell tools gated behind y/N prompt in a TTY; sandbox still future work |
 | 9 | **Session persistence** | pending | Resume tasks, step log, diff summary |
-| 10 | **OpenAI-compatible server** | pending | `/v1/chat/completions` facade over the loop; the door Wire routes IDE traffic through |
+| 10 | **OpenAI-compatible server** | done (v1) | `halo-agent serve`: `/v1/chat/completions` (+SSE replay, `/v1/models`) facade over the loop; the door Wire routes IDE traffic through |
 | 11 | **SDK** | pending | Public embedding API over loop/registry/client (today's modules are the seed); semver, typed, examples |
 | 12 | **Model routing** | pending | Tool-capable model detection, fallbacks |
 | 13 | **RAG / memory** | pending | Local index or Terran integration |

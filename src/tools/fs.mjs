@@ -36,6 +36,18 @@ export function truncateOutput(text, limit = MAX_TOOL_OUTPUT_CHARS) {
 }
 
 /**
+ * Cap output keeping the head and tail. Command output (build logs, test
+ * runs) usually has the interesting part — the error — at the end, so plain
+ * head truncation would hide it.
+ */
+export function truncateMiddle(text, limit = MAX_TOOL_OUTPUT_CHARS) {
+  if (text.length <= limit) return text;
+  const half = Math.floor(limit / 2);
+  const omitted = text.length - half * 2;
+  return `${text.slice(0, half)}\n[... ${omitted} characters omitted ...]\n${text.slice(text.length - half)}`;
+}
+
+/**
  * @param {import("../tool-registry.mjs").ToolRegistry} registry
  * @param {object} options
  * @param {string} options.workspaceRoot Absolute directory the tools may touch.
@@ -97,6 +109,7 @@ export function registerFileTools(registry, { workspaceRoot }) {
 
   registry.register({
     name: "write_file",
+    requiresApproval: true,
     description:
       "Create or overwrite a text file inside the workspace. Missing parent directories are created. Use edit_file to change part of an existing file.",
     parameters: {
@@ -118,6 +131,7 @@ export function registerFileTools(registry, { workspaceRoot }) {
 
   registry.register({
     name: "edit_file",
+    requiresApproval: true,
     description:
       "Replace an exact text snippet in an existing file. old_string must match exactly once unless replace_all is true. Include enough surrounding context to make it unique.",
     parameters: {

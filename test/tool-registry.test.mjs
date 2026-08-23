@@ -59,6 +59,80 @@ test("invalid JSON string arguments fail gracefully", async () => {
   assert.match(outcome.error, /not valid JSON/);
 });
 
+test("gated tool is blocked when the approval handler denies", async () => {
+  const registry = new ToolRegistry();
+  let executed = false;
+  registry.register({
+    name: "danger",
+    requiresApproval: true,
+    execute: () => {
+      executed = true;
+      return "done";
+    },
+  });
+  registry.setApprovalHandler(() => false);
+
+  const outcome = await registry.execute("danger", {});
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error, /declined/);
+  assert.equal(executed, false);
+});
+
+test("gated tool runs when the approval handler allows", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "danger", requiresApproval: true, execute: () => "done" });
+  const seen = [];
+  registry.setApprovalHandler((request) => {
+    seen.push(request);
+    return true;
+  });
+
+  const outcome = await registry.execute("danger", { path: "a.txt" });
+  assert.deepEqual(outcome, { ok: true, result: "done" });
+  assert.deepEqual(seen, [{ name: "danger", args: { path: "a.txt" } }]);
+});
+
+test("gated tool runs freely when no approval handler is set", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "danger", requiresApproval: true, execute: () => "done" });
+  const outcome = await registry.execute("danger", {});
+  assert.equal(outcome.ok, true);
+});
+
+test("approval handler errors are reported, not thrown", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "danger", requiresApproval: true, execute: () => "done" });
+  registry.setApprovalHandler(() => {
+    throw new Error("prompt unavailable");
+  });
+  const outcome = await registry.execute("danger", {});
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error, /Approval check failed: prompt unavailable/);
+});
+
+test("ungated tools never consult the approval handler", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "safe", execute: () => "ok" });
+  let consulted = false;
+  registry.setApprovalHandler(() => {
+    consulted = true;
+    return false;
+  });
+  const outcome = await registry.execute("safe", {});
+  assert.equal(outcome.ok, true);
+  assert.equal(consulted, false);
+});
+
+test("write_file, edit_file, and run_command are approval-gated builtins", async () => {
+  const registry = registerBuiltinTools(new ToolRegistry());
+  for (const name of ["write_file", "edit_file", "run_command"]) {
+    assert.equal(registry.tools.get(name).requiresApproval, true, `${name} should be gated`);
+  }
+  for (const name of ["read_file", "list_dir", "get_time", "echo"]) {
+    assert.ok(!registry.tools.get(name).requiresApproval, `${name} should not be gated`);
+  }
+});
+
 test("builtin tools register and run", async () => {
   const registry = registerBuiltinTools(new ToolRegistry());
   assert.ok(registry.has("get_time"));

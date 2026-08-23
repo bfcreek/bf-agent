@@ -6,7 +6,7 @@
 
 import { spawn } from "node:child_process";
 
-import { resolveWithinRoot, truncateOutput } from "./fs.mjs";
+import { resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 300;
@@ -19,6 +19,7 @@ const MAX_TIMEOUT_SECONDS = 300;
 export function registerShellTools(registry, { workspaceRoot }) {
   registry.register({
     name: "run_command",
+    requiresApproval: true,
     description:
       `Run a command through the system shell (${process.platform === "win32" ? "cmd.exe" : "/bin/sh"}) ` +
       "in the workspace directory and return its exit code, stdout, and stderr. " +
@@ -78,8 +79,8 @@ function runCommand(command, { cwd, timeoutMs }) {
       resolve({
         exitCode: code,
         timedOut,
-        stdout: truncateOutput(stdout),
-        stderr: truncateOutput(stderr),
+        stdout: truncateMiddle(stdout),
+        stderr: truncateMiddle(stderr),
       });
     };
 

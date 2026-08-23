@@ -9,12 +9,26 @@
  * @property {string} description What the tool does, written for the model.
  * @property {object} parameters JSON schema for the arguments object.
  * @property {(args: object) => Promise<unknown>|unknown} execute
+ * @property {boolean} [requiresApproval] Gate this tool behind the approval
+ *   handler when one is set (writes, shell — anything that mutates state).
  */
 
 export class ToolRegistry {
   constructor() {
     /** @type {Map<string, ToolDefinition>} */
     this.tools = new Map();
+    /** @type {((request: {name: string, args: object}) => Promise<boolean>|boolean)|null} */
+    this.approvalHandler = null;
+  }
+
+  /**
+   * Gate tools marked `requiresApproval` behind this callback. Return true
+   * to allow the call. When no handler is set, gated tools run freely
+   * (agent mode).
+   */
+  setApprovalHandler(handler) {
+    this.approvalHandler = handler;
+    return this;
   }
 
   /** @param {ToolDefinition} tool */
@@ -70,6 +84,21 @@ export class ToolRegistry {
         parsedArgs = args.trim() ? JSON.parse(args) : {};
       } catch {
         return { ok: false, error: `Arguments for '${name}' were not valid JSON.` };
+      }
+    }
+
+    if (tool.requiresApproval && this.approvalHandler) {
+      let approved;
+      try {
+        approved = await this.approvalHandler({ name, args: parsedArgs ?? {} });
+      } catch (err) {
+        return { ok: false, error: `Approval check failed: ${err?.message ?? err}` };
+      }
+      if (!approved) {
+        return {
+          ok: false,
+          error: `The user declined to allow '${name}'. Do not retry the same call; ask the user or find another way.`,
+        };
       }
     }
 

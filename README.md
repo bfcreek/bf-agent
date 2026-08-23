@@ -43,7 +43,25 @@ Options:
 | `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server |
 | `--max-steps <n>` | `10` | Max model round-trips before the loop stops |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
+| `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
 | `--quiet` | off | Suppress step trace; print only the final answer |
+
+## OpenAI-compatible server
+
+```powershell
+node src/cli.mjs serve --port 11435
+```
+
+Exposes the agent loop behind the standard OpenAI API so any existing client
+(or Aura Wire routing rule) can use it with no halo-agent awareness:
+
+- `POST /v1/chat/completions` — messages in, agent loop (with tools) runs,
+  `chat.completion` out. `stream: true` is honored by replaying the finished
+  answer as SSE chunks. A `model` in the request overrides the default.
+- `GET /v1/models` — installed Ollama models.
+
+Serve mode always runs unattended (`agent` mode): there is no terminal to
+prompt for approvals. Put Wire's guardrails in front if you need policy.
 
 ## Builtin tools
 
@@ -57,13 +75,20 @@ Options:
 | `get_time`, `echo` | Diagnostics |
 
 All file and shell tools are confined to the workspace root (`--cwd`): paths
-that resolve outside it are rejected, command output is capped, and commands
-are killed (whole process tree) after a timeout, 30s by default.
+that resolve outside it are rejected, output is capped (command output keeps
+head and tail so errors at the end of long logs survive), and commands are
+killed (whole process tree) after a timeout, 30s by default.
 
-**No approval gate yet** — the agent reads, writes, and runs commands in the
-workspace without asking. Point `--cwd` at a directory you are comfortable
-letting the model modify. Interactive approvals and write gates are roadmap
-item 8.
+**Approvals:** in a terminal, `write_file`, `edit_file`, and `run_command`
+each ask for y/N confirmation before running (`--mode ask`, the default).
+Pass `--mode agent` to run unattended. Non-TTY and serve-mode runs are
+always unattended.
+
+The system prompt is built per run by the context builder: platform, shell,
+workspace root, and a top-level file listing, so the model starts oriented
+instead of spending steps exploring. Long transcripts are compacted
+automatically — older turns are summarized by the model while the system
+message and recent turns are kept verbatim.
 
 ## How the loop works
 
@@ -92,7 +117,10 @@ Tests mock the Ollama client — no server or model required.
 | --- | --- |
 | `src/agent-loop.mjs` | Core plan/act/observe loop |
 | `src/ollama-client.mjs` | Thin `/api/chat` client |
-| `src/tool-registry.mjs` | Tool schema + executor dispatch |
+| `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
+| `src/context-builder.mjs` | Environment + workspace snapshot for the system prompt |
+| `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
+| `src/openai-server.mjs` | `/v1/chat/completions` facade over the loop |
 | `src/tools/builtin.mjs` | Registers the standard tool set (diagnostics + file + shell) |
 | `src/tools/fs.mjs` | Workspace-scoped file tools and path/output guards |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
@@ -103,7 +131,7 @@ Tests mock the Ollama client — no server or model required.
 halo-agent is a standalone product, but **Wire is the pairing that completes it**:
 Wire provides the OpenAI `/v1` front door, routing rules, cost observability,
 compression, and guardrails; halo-agent provides the loop and local tool execution.
-IDE integration is deliberately Wire's job — editors point at Wire, and Wire routes
-to halo-agent as a custom provider once the OpenAI-compatible server ships
-(roadmap item 10). Composition is HTTP only, no shared code. Details from the
-Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.
+IDE integration is deliberately Wire's job — editors point at Wire, and Wire
+routes to halo-agent as a custom provider via `halo-agent serve` (the
+OpenAI-compatible door, roadmap item 10). Composition is HTTP only, no shared
+code. Details from the Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.

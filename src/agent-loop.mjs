@@ -4,7 +4,9 @@
  * plain text or a stop condition trips.
  */
 
-const DEFAULT_SYSTEM_PROMPT = [
+import { compactMessages } from "./compaction.mjs";
+
+export const DEFAULT_SYSTEM_PROMPT = [
   "You are a capable local assistant with access to tools.",
   "Use tools when they help you complete the user's task; call them with",
   "valid arguments matching their schemas. When you have everything you",
@@ -36,8 +38,10 @@ export class AgentLoop {
    * @param {string} [options.systemPrompt]
    * @param {number} [options.maxSteps] Max model round-trips per run.
    * @param {(step: AgentStep) => void} [options.onStep] Observer for tracing.
+   * @param {{maxChars?: number, keepRecent?: number}|false} [options.compaction]
+   *   Summarize old turns when the transcript exceeds the budget. Off by default.
    */
-  constructor({ client, registry, systemPrompt, maxSteps = 10, onStep } = {}) {
+  constructor({ client, registry, systemPrompt, maxSteps = 10, onStep, compaction = false } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
     if (!registry) throw new Error("AgentLoop requires a tool registry.");
     this.client = client;
@@ -45,6 +49,7 @@ export class AgentLoop {
     this.systemPrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.maxSteps = maxSteps;
     this.onStep = onStep;
+    this.compaction = compaction;
   }
 
   /**
@@ -59,7 +64,7 @@ export class AgentLoop {
    * @returns {Promise<AgentRunResult>}
    */
   async run(goal, { history, signal } = {}) {
-    const messages =
+    let messages =
       history && history.length > 0
         ? [...history]
         : [{ role: "system", content: this.systemPrompt }];
@@ -71,6 +76,14 @@ export class AgentLoop {
     for (let index = 1; index <= this.maxSteps; index++) {
       if (signal?.aborted) {
         return { text: "", stopReason: "aborted", steps, messages };
+      }
+
+      if (this.compaction) {
+        messages = await compactMessages({
+          client: this.client,
+          messages,
+          ...this.compaction,
+        });
       }
 
       const { message } = await this.client.chat({ messages, tools, signal });
