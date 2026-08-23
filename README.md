@@ -35,6 +35,16 @@ No npm dependencies — the runtime uses only Node built-ins.
 node src/cli.mjs "what time is it right now?"
 ```
 
+Or use the launchers in `bin/`, which check that Node.js 20+ is installed
+(and print install instructions if not) before forwarding every argument to
+the CLI:
+
+```powershell
+.\bin\halo-agent.ps1 "what time is it right now?"   # PowerShell
+bin\halo-agent.cmd "what time is it right now?"      # cmd
+./bin/halo-agent.sh "what time is it right now?"     # macOS / Linux
+```
+
 Options:
 
 | Flag | Default | Meaning |
