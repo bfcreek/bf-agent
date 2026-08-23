@@ -11,8 +11,11 @@ import readline from "node:readline/promises";
 
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
+import { McpClient, registerMcpTools } from "./mcp-client.mjs";
+import { resolveModel } from "./model-routing.mjs";
 import { OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
+import { SessionStore } from "./session-store.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 
@@ -27,6 +30,7 @@ function parseArgs(argv) {
     // Interactive terminals gate writes/shell behind a prompt; piped or
     // headless runs cannot prompt, so they run unattended.
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
+    mcp: [],
     goal: "",
   };
   const positional = [];
@@ -61,6 +65,14 @@ function parseArgs(argv) {
         if (mode === "ask" || mode === "agent") options.mode = mode;
         break;
       }
+      case "--session":
+        options.session = argv[++i] ?? undefined;
+        break;
+      case "--mcp": {
+        const spec = argv[++i];
+        if (spec) options.mcp.push(spec);
+        break;
+      }
       case "--help":
       case "-h":
         options.help = true;
@@ -92,6 +104,8 @@ Options:
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
                        agent: run them unattended (default when not a TTY, and in serve mode)
+  --session <name>     Persist/resume this conversation (.halo-agent/sessions/ in the workspace)
+  --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer
   -h, --help           Show this help`);
@@ -125,7 +139,41 @@ async function main() {
   }
 
   const client = new OllamaClient({ baseUrl: options.baseUrl, model: options.model });
+
+  // Route to an installed, tool-capable model up front; skip silently when
+  // Ollama is unreachable — the run itself will surface that error clearly.
+  try {
+    const installed = await client.listModels();
+    const routed = resolveModel({ requested: options.model, installed });
+    for (const warning of routed.warnings) console.error(warning);
+    client.model = routed.model;
+    options.model = routed.model;
+  } catch {
+    // fall through with the requested model
+  }
+
   const registry = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: options.cwd });
+
+  const mcpClients = [];
+  for (const spec of options.mcp) {
+    try {
+      const mcp = await McpClient.connect({
+        command: spec,
+        onStderr: options.quiet ? undefined : (line) => console.error(`[mcp] ${line}`),
+      });
+      mcpClients.push(mcp);
+      const names = await registerMcpTools(registry, mcp);
+      if (!options.quiet) {
+        console.error(`[mcp] ${mcp.serverInfo?.name ?? spec}: ${names.join(", ") || "(no tools)"}`);
+      }
+    } catch (err) {
+      console.error(`Failed to attach MCP server '${spec}': ${err.message}`);
+      process.exitCode = 4;
+      for (const mcp of mcpClients) await mcp.close();
+      return;
+    }
+  }
+
   const systemPrompt = await buildSystemPrompt({
     basePrompt: DEFAULT_SYSTEM_PROMPT,
     workspaceRoot: options.cwd,
@@ -162,8 +210,31 @@ async function main() {
     compaction: {},
   });
 
+  let store;
+  let priorSession = null;
+  if (options.session) {
+    store = new SessionStore({ workspaceRoot: options.cwd });
+    priorSession = await store.load(options.session);
+    if (priorSession && !options.quiet) {
+      console.error(
+        `[session ${options.session}] resuming: ${priorSession.messages.length} messages, ${priorSession.steps.length} steps so far`,
+      );
+    }
+  }
+
   try {
-    const result = await loop.run(options.goal);
+    const result = await loop.run(options.goal, {
+      history: priorSession?.messages,
+    });
+
+    if (store) {
+      const saved = store.merge(options.session, priorSession, result);
+      await store.save(options.session, saved);
+      if (!options.quiet && saved.changedFiles.length > 0) {
+        console.error(`[session ${options.session}] files changed: ${saved.changedFiles.join(", ")}`);
+      }
+    }
+
     if (result.stopReason === "max-steps") {
       console.error(`Stopped after ${options.maxSteps} steps without a final answer.`);
       process.exitCode = 2;
@@ -179,6 +250,7 @@ async function main() {
     throw err;
   } finally {
     approval?.close();
+    for (const mcp of mcpClients) await mcp.close();
   }
 }
 

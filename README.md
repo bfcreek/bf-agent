@@ -44,7 +44,18 @@ Options:
 | `--max-steps <n>` | `10` | Max model round-trips before the loop stops |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
+| `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
+| `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); its tools appear as `mcp_<name>` |
 | `--quiet` | off | Suppress step trace; print only the final answer |
+
+The requested model is resolved against Ollama's installed list at startup:
+untagged names match their tags (`llama3.2` finds `llama3.2:latest`), missing
+models fall back to the first installed tool-capable model, and models known
+to lack tool calling get a warning.
+
+Sessions store the full transcript, an accumulated step log, and the list of
+files the agent changed. Re-running with the same `--session` name continues
+the conversation with prior context.
 
 ## OpenAI-compatible server
 
@@ -62,6 +73,29 @@ Exposes the agent loop behind the standard OpenAI API so any existing client
 
 Serve mode always runs unattended (`agent` mode): there is no terminal to
 prompt for approvals. Put Wire's guardrails in front if you need policy.
+
+## SDK
+
+The same machinery is embeddable — `createAgent()` wires up the client,
+builtin tools, context-built system prompt, and compaction in one call:
+
+```js
+import { createAgent } from "halo-agent";
+
+const agent = await createAgent({
+  model: "qwen3-coder:30b",
+  workspaceRoot: "/path/to/project",
+  tools: [{ name: "deploy", description: "Deploy the app.", execute: () => "done" }],
+  approvalHandler: async ({ name, args }) => confirmSomehow(name, args),
+});
+
+const { text, steps } = await agent.run("run the tests and fix any failure");
+```
+
+Every piece is also exported individually (`AgentLoop`, `ToolRegistry`,
+`OllamaClient`, `createOpenAIServer`, `SessionStore`, `McpClient`, ...) for
+setups that need different wiring. External MCP tools bridge in via
+`registerMcpTools(agent.registry, await McpClient.connect({ command: "..." }))`.
 
 ## Builtin tools
 
@@ -121,6 +155,10 @@ Tests mock the Ollama client — no server or model required.
 | `src/context-builder.mjs` | Environment + workspace snapshot for the system prompt |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
 | `src/openai-server.mjs` | `/v1/chat/completions` facade over the loop |
+| `src/session-store.mjs` | Persist/resume sessions with step log and changed files |
+| `src/model-routing.mjs` | Tool-capable detection and installed-model resolution |
+| `src/mcp-client.mjs` | Stdio MCP client + registry bridge for external tools |
+| `src/index.mjs` | SDK entry point (`createAgent` and all public exports) |
 | `src/tools/builtin.mjs` | Registers the standard tool set (diagnostics + file + shell) |
 | `src/tools/fs.mjs` | Workspace-scoped file tools and path/output guards |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |

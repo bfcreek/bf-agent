@@ -20,12 +20,12 @@ halo-agent extensions: editors point at Wire's `/v1` door and Wire routes here.
 | 6 | **Context builder** | done (v1) | System prompt gets platform/shell/cwd + top-level listing; head+tail trimming for command output |
 | 7 | **Compaction** | done (v1) | Char-budget trigger; old turns summarized by the model, system + recent turns kept verbatim |
 | 8 | **Safety / approvals** | done (v1) | Ask vs agent mode; write/shell tools gated behind y/N prompt in a TTY; sandbox still future work |
-| 9 | **Session persistence** | pending | Resume tasks, step log, diff summary |
+| 9 | **Session persistence** | done (v1) | `--session <name>`: transcript, step log, changed-files summary under `.halo-agent/sessions/` |
 | 10 | **OpenAI-compatible server** | done (v1) | `halo-agent serve`: `/v1/chat/completions` (+SSE replay, `/v1/models`) facade over the loop; the door Wire routes IDE traffic through |
-| 11 | **SDK** | pending | Public embedding API over loop/registry/client (today's modules are the seed); semver, typed, examples |
-| 12 | **Model routing** | pending | Tool-capable model detection, fallbacks |
-| 13 | **RAG / memory** | pending | Local index or Terran integration |
-| 14 | **MCP** | pending | Extension point for external tools |
+| 11 | **SDK** | done (v1) | `src/index.mjs` public surface + `createAgent()` one-call setup; package `exports` wired |
+| 12 | **Model routing** | done (v1) | Tool-capable family detection; requested model resolved against installed list with fallback + warnings at startup |
+| 13 | **RAG / memory** | pending | Local index or Terran integration — decision needed |
+| 14 | **MCP** | done (v1) | Stdio MCP client (initialize, tools/list, tools/call); `--mcp "<command>"` attaches servers, tools bridge in as `mcp_<name>` |
 
 ## Compatibility commitments
 
