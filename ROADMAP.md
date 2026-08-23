@@ -24,7 +24,7 @@ halo-agent extensions: editors point at Wire's `/v1` door and Wire routes here.
 | 10 | **OpenAI-compatible server** | done (v1) | `halo-agent serve`: `/v1/chat/completions` (+SSE replay, `/v1/models`) facade over the loop; the door Wire routes IDE traffic through |
 | 11 | **SDK** | done (v1) | `src/index.mjs` public surface + `createAgent()` one-call setup; package `exports` wired |
 | 12 | **Model routing** | done (v1) | Tool-capable family detection; requested model resolved against installed list with fallback + warnings at startup |
-| 13 | **RAG / memory** | pending | Local index or Terran integration — decision needed |
+| 13 | **RAG / memory** | resolved (no build) | Not halo-agent's job: internal state is covered by compaction (7) + sessions (9); knowledge retrieval is Terran's domain, attached via MCP (14). No built-in index |
 | 14 | **MCP** | done (v1) | Stdio MCP client (initialize, tools/list, tools/call); `--mcp "<command>"` attaches servers, tools bridge in as `mcp_<name>` |
 
 ## Compatibility commitments
