@@ -4,6 +4,8 @@
  * to detect tool calls before deciding the next step.
  */
 
+import { resolveThinkSetting } from "./prompt-enhancements.mjs";
+
 export class OllamaClientError extends Error {
   constructor(message, { status, cause } = {}) {
     super(message, cause ? { cause } : undefined);
@@ -26,6 +28,9 @@ export const DEFAULT_NUM_CTX = 16_384;
  */
 export const DEFAULT_TEMPERATURE = 0.2;
 
+/** Default think mode: enable native reasoning on capable models. */
+export const DEFAULT_THINK = "auto";
+
 export class OllamaClient {
   /**
    * @param {object} [options]
@@ -33,6 +38,8 @@ export class OllamaClient {
    * @param {string} [options.model] Default model when a call omits one.
    * @param {number|null} [options.numCtx] Context window (tokens) sent as
    *   `options.num_ctx` on every chat call. Pass null to use Ollama's default.
+   * @param {boolean|string} [options.think] Ollama native thinking: `auto`
+   *   (default), `true`/`false`, or a level (`low`, `medium`, `high`, `max`).
    * @param {object} [options.modelOptions] Extra Ollama options (temperature,
    *   top_p, ...) merged into every chat call; per-call options win.
    * @param {typeof fetch} [options.fetchImpl] Injectable for tests.
@@ -41,12 +48,18 @@ export class OllamaClient {
     baseUrl = "http://127.0.0.1:11434",
     model = "llama3.2",
     numCtx = DEFAULT_NUM_CTX,
+    think = DEFAULT_THINK,
     modelOptions,
     fetchImpl,
   } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.model = model;
     this.numCtx = numCtx;
+    this.think = think;
+    /** @type {boolean|null} Set via configureClientModel after model resolution. */
+    this.thinkingCapable = null;
+    /** @type {number} Parameters in billions; used for think auto-levels. */
+    this.paramsB = 0;
     this.modelOptions = { temperature: DEFAULT_TEMPERATURE, ...modelOptions };
     this.fetchImpl = fetchImpl ?? fetch;
   }
@@ -60,17 +73,28 @@ export class OllamaClient {
    * @param {string} [request.model] Override the client default model.
    * @param {object} [request.options] Ollama options for this call, merged
    *   over the client defaults (num_ctx, modelOptions).
+   * @param {boolean|string} [request.think] Per-call think override.
    * @param {AbortSignal} [request.signal]
    * @returns {Promise<{message: object, raw: object}>} Assistant message
    *   (`{role, content, tool_calls?}`) plus the raw Ollama response — `raw`
    *   carries `prompt_eval_count`/`eval_count` for token accounting.
    */
-  async chat({ messages, tools, model, options, signal }) {
+  async chat({ messages, tools, model, options, think, signal }) {
+    const resolvedModel = model || this.model;
     const body = {
-      model: model || this.model,
+      model: resolvedModel,
       messages,
       stream: false,
     };
+    const resolvedThink = resolveThinkSetting({
+      think: think ?? this.think,
+      thinkingCapable: this.thinkingCapable,
+      model: resolvedModel,
+      paramsB: this.paramsB,
+    });
+    if (resolvedThink !== undefined) {
+      body.think = resolvedThink;
+    }
     if (tools && tools.length > 0) {
       body.tools = tools;
     }
@@ -117,6 +141,18 @@ export class OllamaClient {
 
   /** @returns {Promise<string[]>} Installed model names. */
   async listModels({ signal } = {}) {
+    const models = await this.listModelsDetailed({ signal });
+    return models.map((m) => m.name);
+  }
+
+  /**
+   * Installed models with the size metadata `/api/tags` provides, for
+   * hardware-aware model selection.
+   *
+   * @returns {Promise<Array<{name: string, sizeBytes: number, parameterSize: string}>>}
+   *   `parameterSize` is Ollama's human string (e.g. "20.9B"), "" when unknown.
+   */
+  async listModelsDetailed({ signal } = {}) {
     let response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/api/tags`, { signal });
@@ -133,7 +169,13 @@ export class OllamaClient {
       });
     }
     const raw = await response.json();
-    return (raw?.models ?? []).map((m) => m?.name).filter(Boolean);
+    return (raw?.models ?? [])
+      .filter((m) => m?.name)
+      .map((m) => ({
+        name: m.name,
+        sizeBytes: typeof m.size === "number" ? m.size : 0,
+        parameterSize: m.details?.parameter_size ?? "",
+      }));
   }
 
   /**

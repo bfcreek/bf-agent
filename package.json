@@ -18,6 +18,8 @@
     "start": "node src/cli.mjs",
     "serve": "node src/cli.mjs serve",
     "test": "node --test",
-    "evals": "node evals/run.mjs"
+    "evals": "node evals/run.mjs",
+    "bench": "node evals/dev-bench.mjs",
+    "bench:menu": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench.ps1"
   }
 }

@@ -1,7 +1,8 @@
 /**
  * Standard tool set for the agent: diagnostics (get_time, echo), filesystem
  * access, and shell execution — the latter two scoped to a workspace root.
- * Approval gates and sandboxing arrive with roadmap item 8.
+ * Write/shell tools are approval-gated; shell deletion commands are blocked
+ * outright when no approval handler is available (unattended runs).
  */
 
 import { registerFileTools } from "./fs.mjs";

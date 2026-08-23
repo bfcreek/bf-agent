@@ -4,12 +4,18 @@ import { test } from "node:test";
 import {
   assertToolCapable,
   detectToolCapable,
+  isCloudModel,
+  isLikelyThinkingCapable,
   isLikelyToolCapable,
   listClassifiedModels,
   listClassifiedModelsDetected,
+  MIN_EFFECTIVE_PARAMS_B,
   ModelRoutingError,
+  parseParamsBillions,
   resolveModel,
+  resolveModelAuto,
   resolveModelDetected,
+  suggestModel,
 } from "../src/model-routing.mjs";
 
 /** Client whose /api/show reports scripted capabilities per model. */
@@ -228,6 +234,170 @@ test("resolveModelDetected falls back using detected capabilities", async () => 
   });
   assert.equal(routed.model, "brand-new-agent:7b");
   assert.match(routed.warnings[0], /falling back/);
+});
+
+const GB = 1e9;
+
+/** Full auto-selection client: detailed tags list + scripted capabilities. */
+function makeAutoClient(entries) {
+  return {
+    async listModelsDetailed() {
+      return entries.map(({ name, sizeBytes = 0, parameterSize = "" }) => ({
+        name,
+        sizeBytes,
+        parameterSize,
+      }));
+    },
+    async show({ model }) {
+      const entry = entries.find((e) => e.name === model);
+      if (!entry?.capabilities) throw new Error(`model '${model}' not found`);
+      return { capabilities: entry.capabilities };
+    },
+  };
+}
+
+const THINKING_TOOLS = ["completion", "tools", "thinking"];
+const TOOLS_ONLY = ["completion", "tools"];
+
+test("parseParamsBillions parses B/M/T strings and estimates from file size", () => {
+  assert.equal(parseParamsBillions("20.9B"), 20.9);
+  assert.equal(parseParamsBillions("1T"), 1000);
+  assert.equal(parseParamsBillions("500M"), 0.5);
+  assert.equal(parseParamsBillions("8.0B", 999 * GB), 8);
+  // no string: ~0.6 bytes/param estimate
+  assert.equal(Math.round(parseParamsBillions("", 12 * GB)), 20);
+  assert.equal(parseParamsBillions("", 0), 0);
+});
+
+test("isCloudModel matches Ollama cloud naming", () => {
+  assert.equal(isCloudModel("gpt-oss:120b-cloud"), true);
+  assert.equal(isCloudModel("glm-4.6:cloud"), true);
+  assert.equal(isCloudModel("qwen3-coder:30b"), false);
+  assert.equal(isCloudModel("cloudy-model:7b"), false);
+});
+
+test("isLikelyThinkingCapable knows thinking families; qwen3-coder is not one", () => {
+  assert.equal(isLikelyThinkingCapable("qwen3:14b"), true);
+  assert.equal(isLikelyThinkingCapable("gpt-oss:20b"), true);
+  assert.equal(isLikelyThinkingCapable("qwen3-coder:30b"), null);
+  assert.equal(isLikelyThinkingCapable("llama3.2:latest"), null);
+});
+
+test("suggestModel picks the strongest local thinking+tools model that fits", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+    { name: "gpt-oss:20b", sizeBytes: 13 * GB, parameterSize: "20.9B", capabilities: THINKING_TOOLS },
+    // Bigger but non-thinking: excluded despite tools.
+    { name: "qwen3-coder:30b", sizeBytes: 18 * GB, parameterSize: "30.5B", capabilities: TOOLS_ONLY },
+    // Thinking but too big for the memory budget.
+    { name: "gpt-oss:120b", sizeBytes: 65 * GB, parameterSize: "116.8B", capabilities: THINKING_TOOLS },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 64 * GB, // budget = 32 GB
+  });
+  assert.equal(picked.model, "gpt-oss:20b");
+  assert.equal(picked.cloud, false);
+});
+
+test("suggestModel skips models below the effectiveness floor", async () => {
+  const client = makeAutoClient([
+    { name: "tiny-thinker:1.5b", sizeBytes: 1 * GB, parameterSize: "1.5B", capabilities: THINKING_TOOLS },
+    { name: "qwen3:8b", sizeBytes: 5 * GB, parameterSize: "8.2B", capabilities: THINKING_TOOLS },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 32 * GB,
+  });
+  assert.equal(picked.model, "qwen3:8b");
+  assert.ok(MIN_EFFECTIVE_PARAMS_B > 1.5, "floor excludes the tiny model");
+});
+
+test("suggestModel falls back to an installed cloud model when no local qualifies", async () => {
+  const client = makeAutoClient([
+    // Local: too small, or non-thinking, or does not fit.
+    { name: "llama3.2:latest", sizeBytes: 2 * GB, parameterSize: "3.2B", capabilities: TOOLS_ONLY },
+    { name: "gpt-oss:120b", sizeBytes: 65 * GB, parameterSize: "116.8B", capabilities: THINKING_TOOLS },
+    // Cloud: no memory constraint.
+    { name: "gpt-oss:120b-cloud", sizeBytes: 400, parameterSize: "116.8B", capabilities: THINKING_TOOLS },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 32 * GB,
+  });
+  assert.equal(picked.model, "gpt-oss:120b-cloud");
+  assert.equal(picked.cloud, true);
+  assert.match(picked.reason, /no local model is strong enough/);
+});
+
+test("suggestModel returns null when nothing qualifies", async () => {
+  const client = makeAutoClient([
+    { name: "llama3.2:latest", sizeBytes: 2 * GB, parameterSize: "3.2B", capabilities: TOOLS_ONLY },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 32 * GB,
+  });
+  assert.equal(picked, null);
+});
+
+test("resolveModelAuto with auto picks via suggestModel and explains itself", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+  ]);
+  const routed = await resolveModelAuto({ requested: "auto", client, totalMemBytes: 64 * GB });
+  assert.equal(routed.model, "qwen3:14b");
+  assert.match(routed.warnings[0], /Using 'qwen3:14b'/);
+});
+
+test("resolveModelAuto errors with guidance when nothing is suitable", async () => {
+  const client = makeAutoClient([
+    { name: "llama3.2:latest", sizeBytes: 2 * GB, parameterSize: "3.2B", capabilities: TOOLS_ONLY },
+  ]);
+  await assert.rejects(
+    () => resolveModelAuto({ requested: "auto", client, totalMemBytes: 32 * GB }),
+    { name: "ModelRoutingError", message: /ollama pull/i },
+  );
+});
+
+test("resolveModelAuto honors an explicit weak model but warns", async () => {
+  const client = makeAutoClient([
+    { name: "llama3.2:latest", sizeBytes: 2 * GB, parameterSize: "3.2B", capabilities: TOOLS_ONLY },
+  ]);
+  const routed = await resolveModelAuto({
+    requested: "llama3.2",
+    client,
+    totalMemBytes: 32 * GB,
+  });
+  assert.equal(routed.model, "llama3.2:latest");
+  assert.match(routed.warnings[0], /may be too weak/);
+});
+
+test("resolveModelAuto rejects an explicit model without tool support", async () => {
+  const client = makeAutoClient([
+    { name: "gemma3:12b", sizeBytes: 8 * GB, parameterSize: "12.2B", capabilities: ["completion"] },
+  ]);
+  await assert.rejects(
+    () => resolveModelAuto({ requested: "gemma3:12b", client, totalMemBytes: 32 * GB }),
+    { name: "ModelRoutingError", message: /does not support tool calling/ },
+  );
+});
+
+test("resolveModelAuto auto-selects when the explicit model is not installed", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+  ]);
+  const routed = await resolveModelAuto({
+    requested: "no-such-model",
+    client,
+    totalMemBytes: 64 * GB,
+  });
+  assert.equal(routed.model, "qwen3:14b");
+  assert.match(routed.warnings[0], /not installed; auto-selecting/);
 });
 
 test("listClassifiedModelsDetected groups by probed capabilities", async () => {

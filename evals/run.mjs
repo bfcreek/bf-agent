@@ -13,12 +13,13 @@
  * workspace per task.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { createAgent } from "../src/index.mjs";
 import { TASKS } from "./tasks.mjs";
+import { removeWorkspaceDir } from "./workspace-cleanup.mjs";
 
 function parseArgs(argv) {
   const options = {
@@ -93,7 +94,12 @@ async function runTask({ task, model, options }) {
     };
   } finally {
     clearTimeout(timer);
-    await rm(dir, { recursive: true, force: true });
+    const cleanup = await removeWorkspaceDir(dir);
+    if (!cleanup.removed) {
+      console.error(
+        `  warning: could not remove workspace ${dir}: ${cleanup.error?.message ?? cleanup.error}`,
+      );
+    }
   }
 }
 

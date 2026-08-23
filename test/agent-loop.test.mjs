@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -343,4 +344,140 @@ test("projectBootstrap injects README on the first turn only", async () => {
   await loop.run("follow up", { history });
   const followUpUsers = client.calls[1].messages.filter((m) => m.role === "user");
   assert.equal(followUpUsers[followUpUsers.length - 1].content, "follow up");
+});
+
+test("simple goals skip the planning pre-pass", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "hi there" }]);
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("say hi");
+
+  assert.equal(result.steps.length, 1);
+  assert.equal(client.calls.length, 1);
+});
+
+test("complex goals get a planning pre-pass before tools", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "1. grep_search for foo\n2. read_file src/foo.mjs\n3. edit" },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
+    { role: "assistant", content: "done" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.steps[0].kind, "plan");
+  assert.match(result.steps[0].content, /grep_search/);
+  assert.equal(client.calls[0].tools, undefined);
+  assert.equal(client.calls[1].tools.length, 2);
+});
+
+test("task hints are injected into the user message", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "ok" },
+    { role: "assistant", content: "ok" },
+    { role: "assistant", content: "ok" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+
+  await loop.run("fix the failing test in auth.spec.mjs");
+
+  const user = client.calls[0].messages.find((m) => m.role === "user");
+  assert.match(user.content, /## Task focus/);
+  assert.match(user.content, /Run the relevant tests first/);
+});
+
+test("planning and hints can be disabled", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "ok" },
+    { role: "assistant", content: "ok" },
+    { role: "assistant", content: "ok" },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    taskHints: false,
+  });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.steps.length, 1);
+  const user = client.calls[0].messages.find((m) => m.role === "user");
+  assert.doesNotMatch(user.content, /## Task focus/);
+});
+
+test("premature final without tools is nudged to use tools", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "I created greet.mjs for you." },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
+    { role: "assistant", content: "Done — files created and test passed." },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+
+  const result = await loop.run("Create greet.mjs and test.mjs, then run node test.mjs.");
+
+  assert.equal(result.steps.length, 2);
+  assert.equal(result.steps[0].kind, "tool-calls");
+  assert.equal(result.steps[1].kind, "final");
+  assert.match(client.calls[1].messages.at(-1).content, /without calling any tools/);
+});
+
+test("empty answer on a read question is nudged", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "" },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "8080" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+
+  const result = await loop.run(
+    "Read README.md and answer: what port does the service use? Reply with just the number.",
+  );
+
+  assert.equal(result.text, "8080");
+  assert.match(client.calls[1].messages.at(-1).content, /empty/i);
+});
+
+test("terranRag injects corpus context into the user message", async () => {
+  const server = http.createServer(async (req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", service: "aura-context-hub-rest" }));
+      return;
+    }
+    if (req.url?.startsWith("/admin/corpus-search")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          results: [{ content: "Terran hit text.", score: 0.5, metadata: { fileName: "doc.md" } }],
+          warnings: [],
+          scope: { mode: "single", namespace: "general" },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
+
+  const client = new FakeClient([{ role: "assistant", content: "answer" }]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    terranRag: { restUrl: `http://127.0.0.1:${port}` },
+  });
+
+  try {
+    const result = await loop.run("what is the policy?");
+    assert.equal(result.text, "answer");
+    const user = client.calls[0].messages.find((m) => m.role === "user");
+    assert.match(user.content, /what is the policy\?/);
+    assert.match(user.content, /Terran corpus context/);
+    assert.match(user.content, /Terran hit text/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

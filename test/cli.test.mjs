@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -16,11 +18,12 @@ function cli(...args) {
   });
 }
 
-function cliAsync(...args) {
+function cliAsync(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(root, "src", "cli.mjs"), ...args], {
       encoding: "utf8",
       cwd: root,
+      env: options.env ?? process.env,
     });
     let stdout = "";
     let stderr = "";
@@ -41,7 +44,7 @@ test("--help prints usage, options, examples, and exit codes", () => {
   assert.match(run.stdout, /Usage:/);
   assert.match(run.stdout, /halo-agent serve/);
   assert.match(run.stdout, /halo-agent models/);
-  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json"]) {
+  for (const flag of ["--model", "--session", "--mcp", "--mode", "--terran", "--ns", "--web", "--version", "--json"]) {
     assert.ok(run.stdout.includes(flag), `help should document ${flag}`);
   }
   assert.match(run.stdout, /Examples:/);
@@ -124,7 +127,7 @@ test("models reports compliance for installed Ollama models", async () => {
   await new Promise((resolve) => server.listen(0, resolve));
   const { port } = server.address();
   try {
-    const run = await cliAsync("models", "--base-url", `http://127.0.0.1:${port}`);
+    const run = await cliAsync(["models", "--base-url", `http://127.0.0.1:${port}`]);
     assert.equal(run.status, 0);
     assert.match(run.stdout, /compliant \(tool-capable\):/);
     assert.match(run.stdout, /qwen3-coder:30b/);
@@ -148,7 +151,7 @@ test("models --json prints structured compliance data", async () => {
   await new Promise((resolve) => server.listen(0, resolve));
   const { port } = server.address();
   try {
-    const run = await cliAsync("models", "--json", "--base-url", `http://127.0.0.1:${port}`);
+    const run = await cliAsync(["models", "--json", "--base-url", `http://127.0.0.1:${port}`]);
     assert.equal(run.status, 0);
     const body = JSON.parse(run.stdout);
     assert.equal(body.baseUrl, `http://127.0.0.1:${port}`);
@@ -164,4 +167,112 @@ test("models exits with code 3 when Ollama is unreachable", () => {
   const run = cli("models", "--base-url", "http://127.0.0.1:9");
   assert.equal(run.status, 3);
   assert.match(run.stderr, /Cannot reach Ollama/);
+});
+
+test("--help documents config edit and the config file", () => {
+  const run = cli("--help");
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /halo-agent config edit/);
+  assert.match(run.stdout, /config\.yaml/);
+});
+
+test("config values apply when CLI does not override them", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-cli-config-"));
+  const configPath = path.join(dir, "config.yaml");
+  await writeFile(
+    configPath,
+    `base-url: http://127.0.0.1:9
+max-steps: 1
+`,
+    "utf8",
+  );
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "hello", "--quiet"],
+      {
+        encoding: "utf8",
+        cwd: root,
+        env: { ...process.env, HALO_AGENT_CONFIG: configPath },
+      },
+    );
+    assert.equal(run.status, 3);
+    assert.match(run.stderr, /Cannot reach Ollama at http:\/\/127\.0\.0\.1:9/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI flags override config values", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-cli-config-"));
+  const configPath = path.join(dir, "config.yaml");
+  await writeFile(configPath, "base-url: http://127.0.0.1:9\n", "utf8");
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "hello", "--base-url", "http://127.0.0.1:8", "--quiet"],
+      {
+        encoding: "utf8",
+        cwd: root,
+        env: { ...process.env, HALO_AGENT_CONFIG: configPath },
+      },
+    );
+    assert.equal(run.status, 3);
+    assert.match(run.stderr, /Cannot reach Ollama at http:\/\/127\.0\.0\.1:8/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("invalid config values are reported before running", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-cli-config-"));
+  const configPath = path.join(dir, "config.yaml");
+  await writeFile(configPath, "max-steps: abc\n", "utf8");
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "hello"],
+      {
+        encoding: "utf8",
+        cwd: root,
+        env: { ...process.env, HALO_AGENT_CONFIG: configPath },
+      },
+    );
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /config 'max-steps'/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("config edit creates the config file", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-cli-config-"));
+  const configPath = path.join(dir, "config.yaml");
+  const editorPath = path.join(dir, "fake-editor.mjs");
+  await writeFile(
+    editorPath,
+    `import { readFileSync } from "node:fs";
+console.log(readFileSync(process.argv[2], "utf8").includes("halo-agent user configuration") ? "ok" : "bad");
+`,
+    "utf8",
+  );
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "config", "edit"],
+      {
+        encoding: "utf8",
+        cwd: root,
+        env: {
+          ...process.env,
+          HALO_AGENT_CONFIG: configPath,
+          EDITOR: `"${process.execPath}" "${editorPath}"`,
+        },
+      },
+    );
+    assert.equal(run.status, 0);
+    assert.match(run.stdout, /ok/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

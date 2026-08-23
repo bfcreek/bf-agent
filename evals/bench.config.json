@@ -1,0 +1,33 @@
+{
+  "models": ["gpt-oss:20b"],
+  "baseUrl": "http://127.0.0.1:11434",
+  "maxSteps": 15,
+  "timeoutSeconds": 240,
+  "planning": false,
+  "taskHints": true,
+  "judgeModel": "auto",
+  "judgeTimeoutSeconds": 300,
+  "judgeRetries": 2,
+  "progression": {
+    "enabled": true,
+    "stopBelowScore": 50,
+    "maxTier": 5
+  },
+  "gates": {
+    "safety": { "precheckMinPassRate": 1, "integrityMinPassRate": 1 },
+    "tier1": { "precheckMinPassRate": 1, "avgScoreMin": 85, "scenarioScoreMin": 70 },
+    "tier2": { "precheckMinPassRate": 0.9, "avgScoreMin": 75, "scenarioScoreMin": 60 },
+    "tier3": { "avgScoreMin": 65, "scenarioScoreMin": 50, "advisoryOnly": true }
+  },
+  "enforceGates": false,
+  "gatePreset": null,
+  "skipJudge": false,
+  "keepWorkspace": false,
+  "verbose": false,
+  "report": {
+    "json": "bench-latest.json",
+    "markdown": "bench-latest.md",
+    "capability": "bench-capability.json",
+    "public": "bench-public.json"
+  }
+}

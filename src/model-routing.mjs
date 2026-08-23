@@ -3,7 +3,16 @@
  * has installed, and only accept tool-capable models. Models without native
  * tool support either reject the request or silently ignore tool schemas,
  * so detecting that up front beats a confusing mid-run failure.
+ *
+ * Auto-selection (`--model auto`, the default) goes further: it picks the
+ * strongest installed model that is tool-capable AND thinking-capable, at
+ * least MIN_EFFECTIVE_PARAMS_B parameters, and fits in memory. A weak model
+ * that flails through an agent task wastes more than it saves, so when no
+ * local model qualifies, installed Ollama cloud models are used instead —
+ * local-first, cloud only when we must.
  */
+
+import os from "node:os";
 
 export class ModelRoutingError extends Error {
   constructor(message) {
@@ -11,6 +20,12 @@ export class ModelRoutingError extends Error {
     this.name = "ModelRoutingError";
   }
 }
+
+/** Below this many billions of parameters, agent tasks mostly fail. */
+export const MIN_EFFECTIVE_PARAMS_B = 7;
+
+/** A local model should fit in this share of total memory to run comfortably. */
+export const MEMORY_FIT_FRACTION = 0.5;
 
 /** Families whose Ollama templates support native tool calling. */
 const TOOL_CAPABLE = [
@@ -46,6 +61,21 @@ const NOT_TOOL_CAPABLE = [
 ];
 
 /**
+ * Families whose templates support thinking/reasoning. Fallback only —
+ * /api/show capabilities is the real source (see detectCapabilities).
+ * qwen3-coder is explicitly non-thinking, hence the lookahead.
+ */
+const THINKING_CAPABLE = [
+  /^qwen3(?!-coder)/,
+  /^qwq/,
+  /^gpt-oss/,
+  /^deepseek-r1/,
+  /^magistral/,
+  /^phi4-reasoning/,
+  /^exaone-deep/,
+];
+
+/**
  * @param {string} name Model name, with or without a tag.
  * @returns {boolean|null} true/false when the family is known, null when unknown.
  */
@@ -74,27 +104,200 @@ export function assertToolCapable(name) {
 }
 
 /**
- * Ask Ollama itself whether a model supports tool calling: `/api/show`
- * reports a `capabilities` array. Accurate for any installed model — the
- * family regexes above are only the fallback for older Ollama versions or
- * when the probe fails.
+ * @param {string} name
+ * @returns {boolean|null} true when the family is known to think, null when unknown.
+ */
+export function isLikelyThinkingCapable(name) {
+  const base = String(name).toLowerCase();
+  if (THINKING_CAPABLE.some((re) => re.test(base))) return true;
+  return null;
+}
+
+/** Ollama cloud models carry a -cloud / :cloud suffix and run remotely. */
+export function isCloudModel(name) {
+  return /(-|:)cloud$/i.test(String(name));
+}
+
+/**
+ * Parse Ollama's human parameter-size string ("20.9B", "1T", "500M") into
+ * billions. Falls back to estimating from the file size (~0.6 bytes per
+ * parameter at the common q4 quantization) and returns 0 when unknowable.
  *
+ * @param {string} parameterSize
+ * @param {number} [sizeBytes]
+ * @returns {number} Parameters in billions.
+ */
+export function parseParamsBillions(parameterSize, sizeBytes = 0) {
+  const match = /^([\d.]+)\s*([bmt])/i.exec(String(parameterSize).trim());
+  if (match) {
+    const value = Number.parseFloat(match[1]);
+    const unit = match[2].toLowerCase();
+    if (Number.isFinite(value)) {
+      if (unit === "t") return value * 1000;
+      if (unit === "m") return value / 1000;
+      return value;
+    }
+  }
+  if (sizeBytes > 0) return sizeBytes / 0.6e9;
+  return 0;
+}
+
+/**
+ * Ask Ollama itself what a model supports: `/api/show` reports a
+ * `capabilities` array ("tools", "thinking", ...). Accurate for any
+ * installed model — the family regexes above are only the fallback for
+ * older Ollama versions or when the probe fails.
+ *
+ * @param {{show?: Function}} client
+ * @param {string} name Installed model name.
+ * @returns {Promise<{tools: boolean|null, thinking: boolean|null}>}
+ */
+export async function detectCapabilities(client, name) {
+  if (client?.show) {
+    try {
+      const info = await client.show({ model: name });
+      if (Array.isArray(info?.capabilities)) {
+        return {
+          tools: info.capabilities.includes("tools"),
+          thinking: info.capabilities.includes("thinking"),
+        };
+      }
+    } catch {
+      // old Ollama or transient failure — fall back to the family lists
+    }
+  }
+  return { tools: isLikelyToolCapable(name), thinking: isLikelyThinkingCapable(name) };
+}
+
+/**
  * @param {{show?: Function}} client
  * @param {string} name Installed model name.
  * @returns {Promise<boolean|null>} Same contract as isLikelyToolCapable.
  */
 export async function detectToolCapable(client, name) {
-  if (client?.show) {
-    try {
-      const info = await client.show({ model: name });
-      if (Array.isArray(info?.capabilities)) {
-        return info.capabilities.includes("tools");
-      }
-    } catch {
-      // old Ollama or transient failure — fall back to the family list
+  return (await detectCapabilities(client, name)).tools;
+}
+
+/**
+ * Pick the strongest suitable installed model. Requirements: tool calling
+ * and thinking (both improve agent reliability), at least
+ * MIN_EFFECTIVE_PARAMS_B parameters (below that agent tasks mostly fail),
+ * and — for local models — a file size that fits comfortably in memory.
+ * Local models win when any qualify; otherwise installed Ollama cloud
+ * models are considered, since a capable cloud model beats an ineffective
+ * local one.
+ *
+ * @param {object} options
+ * @param {{show?: Function}} options.client Capability probe.
+ * @param {Array<{name: string, sizeBytes?: number, parameterSize?: string}>} options.models
+ *   Installed models (from listModelsDetailed, or bare {name} objects).
+ * @param {number} [options.totalMemBytes] Defaults to this machine's RAM.
+ * @returns {Promise<{model: string, paramsB: number, cloud: boolean, reason: string}|null>}
+ */
+export async function suggestModel({ client, models, totalMemBytes = os.totalmem() }) {
+  const memoryBudget = totalMemBytes * MEMORY_FIT_FRACTION;
+  const locals = [];
+  const clouds = [];
+
+  for (const entry of models ?? []) {
+    const { tools, thinking } = await detectCapabilities(client, entry.name);
+    if (tools !== true || thinking !== true) continue;
+    const paramsB = parseParamsBillions(entry.parameterSize ?? "", entry.sizeBytes ?? 0);
+    if (paramsB < MIN_EFFECTIVE_PARAMS_B) continue;
+    if (isCloudModel(entry.name)) {
+      clouds.push({ name: entry.name, paramsB });
+    } else if (!entry.sizeBytes || entry.sizeBytes <= memoryBudget) {
+      locals.push({ name: entry.name, paramsB });
     }
   }
-  return isLikelyToolCapable(name);
+
+  const best = (list) =>
+    list.sort((a, b) => b.paramsB - a.paramsB || a.name.localeCompare(b.name))[0];
+
+  const local = best(locals);
+  if (local) {
+    return {
+      model: local.name,
+      paramsB: local.paramsB,
+      cloud: false,
+      reason: `strongest local model with thinking + tools that fits in memory (${Math.round(local.paramsB)}B parameters)`,
+    };
+  }
+  const cloud = best(clouds);
+  if (cloud) {
+    return {
+      model: cloud.name,
+      paramsB: cloud.paramsB,
+      cloud: true,
+      reason: "no local model is strong enough (thinking + tools, " +
+        `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, fitting in memory); using an installed Ollama cloud model`,
+    };
+  }
+  return null;
+}
+
+const NO_SUITABLE_MODEL_HELP =
+  `No installed model is suitable for agent use (needs tool calling + thinking, ` +
+  `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
+  "Pull a stronger local model (e.g. ollama pull qwen3:14b) or an Ollama cloud model " +
+  "(e.g. ollama pull gpt-oss:120b-cloud), or pass --model to override.";
+
+/**
+ * Resolve the model for a run. "auto" (or empty) picks the best installed
+ * model via suggestModel. An explicit name is honored as long as it is
+ * installed and tool-capable — thinking and the size floor are advisory
+ * (warning) for explicit choices, never blocking.
+ *
+ * @param {object} options
+ * @param {string} [options.requested] Model name or "auto".
+ * @param {{show?: Function, listModelsDetailed: Function}} options.client
+ * @param {number} [options.totalMemBytes]
+ * @param {AbortSignal} [options.signal]
+ * @returns {Promise<{model: string, warnings: string[]}>}
+ * @throws {ModelRoutingError} When nothing suitable can be used.
+ */
+export async function resolveModelAuto({ requested, client, totalMemBytes, signal }) {
+  const warnings = [];
+  const models = await client.listModelsDetailed({ signal });
+  const auto = !requested || requested === "auto";
+
+  if (!auto) {
+    const match = findInstalled(requested, models.map((m) => m.name));
+    if (match) {
+      const { tools, thinking } = await detectCapabilities(client, match);
+      if (tools === false) {
+        throw new ModelRoutingError(
+          `Model '${match}' does not support tool calling. Choose a tool-capable model or use --model auto.`,
+        );
+      }
+      if (tools === null) {
+        warnings.push(`Could not verify that '${match}' supports tool calling; continuing anyway.`);
+      }
+      const entry = models.find((m) => m.name === match);
+      const paramsB = parseParamsBillions(entry?.parameterSize ?? "", entry?.sizeBytes ?? 0);
+      if (paramsB > 0 && paramsB < MIN_EFFECTIVE_PARAMS_B) {
+        warnings.push(
+          `Model '${match}' (~${paramsB.toFixed(1)}B parameters) may be too weak for agent tasks; --model auto picks the strongest installed model.`,
+        );
+      } else if (thinking === false) {
+        warnings.push(
+          `Model '${match}' does not support thinking; thinking models tend to be more reliable agents.`,
+        );
+      }
+      return { model: match, warnings };
+    }
+    if (models.length === 0) {
+      assertToolCapable(requested);
+      warnings.push(`Could not verify '${requested}' is installed; Ollama returned no models.`);
+      return { model: requested, warnings };
+    }
+    warnings.push(`Model '${requested}' is not installed; auto-selecting instead.`);
+  }
+
+  const suggestion = await suggestModel({ client, models, totalMemBytes });
+  if (!suggestion) throw new ModelRoutingError(NO_SUITABLE_MODEL_HELP);
+  warnings.push(`Using '${suggestion.model}': ${suggestion.reason}.`);
+  return { model: suggestion.model, warnings };
 }
 
 /**

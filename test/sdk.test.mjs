@@ -54,6 +54,9 @@ test("the SDK exports the full public surface", () => {
     "assertToolCapable",
     "ModelRoutingError",
     "DEFAULT_SYSTEM_PROMPT",
+    "detectTaskHints",
+    "resolveThinkSetting",
+    "configureClientModel",
   ]) {
     assert.ok(name in sdk, `missing export: ${name}`);
   }

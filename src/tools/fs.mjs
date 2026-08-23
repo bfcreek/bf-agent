@@ -98,6 +98,13 @@ export function replaceFlexible(text, oldString, newString) {
   return { updated, matches: 1 };
 }
 
+/** Literal single replacement — avoids `String.replace` interpreting `$` in the new text. */
+export function replaceOnce(text, search, replacement) {
+  const index = text.indexOf(search);
+  if (index === -1) return text;
+  return text.slice(0, index) + replacement + text.slice(index + search.length);
+}
+
 /**
  * @param {import("../tool-registry.mjs").ToolRegistry} registry
  * @param {object} options
@@ -230,8 +237,8 @@ export function registerFileTools(registry, { workspaceRoot }) {
         );
       }
       const updated = replace_all
-        ? text.split(old_string).join(new_string)
-        : text.replace(old_string, new_string);
+        ? text.split(old_string).join(String(new_string ?? ""))
+        : replaceOnce(text, old_string, String(new_string ?? ""));
       await writeFile(target, updated, "utf8");
       return { path: path.relative(root, target), replacements: replace_all ? occurrences : 1 };
     },

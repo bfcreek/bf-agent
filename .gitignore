@@ -3,3 +3,7 @@ node_modules/
 .env
 .halo-agent/
 evals-*.json
+bench-*.json
+bench-*.md
+bench-test.json
+bench-test.md

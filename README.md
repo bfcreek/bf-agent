@@ -49,7 +49,7 @@ Options:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--model <name>` | `llama3.2` | Ollama model to drive the loop |
+| `--model <name\|auto>` | `auto` | Ollama model to drive the loop; `auto` picks the best installed model (see below) |
 | `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server |
 | `--max-steps <n>` | `10` | Max model round-trips before the loop stops |
 | `--num-ctx <n>` | `16384` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently |
@@ -57,14 +57,26 @@ Options:
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
 | `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); its tools appear as `mcp_<name>` |
+| `--terran` | off | Search Aura Terran corpora for each user message via Direct RAG REST |
+| `--ns <namespace>` | all corpora | Terran corpus namespace (`--terran` implied) |
 | `--quiet` | off | Suppress step trace; print only the final answer |
+| `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
+| `--no-plan` | off | Skip the planning pre-pass on complex goals |
+| `--no-hints` | off | Skip task-type constraint hints in the user message |
 
-The requested model is resolved against Ollama's installed list at startup:
-untagged names match their tags (`llama3.2` finds `llama3.2:latest`) and
-missing models fall back to the first installed tool-capable model. Tool
-capability is asked of Ollama itself (`/api/show` capabilities), so new
-models classify correctly; a family-name list is the fallback for older
-Ollama versions.
+The model is resolved against Ollama's installed list at startup. With
+`auto` (the default), halo-agent picks the strongest installed model that
+supports both tool calling and thinking, has at least 7B parameters, and
+fits comfortably in this machine's memory — a model too weak to finish agent
+tasks wastes more than it saves. When no local model qualifies, an installed
+[Ollama cloud](https://ollama.com/cloud) model is used instead: local-first,
+cloud only when we must. Explicit `--model` names are always honored
+(untagged names match their tags, so `llama3.2` finds `llama3.2:latest`)
+with a warning when the choice looks too weak; missing names fall back to
+auto-selection. Capabilities are asked of Ollama itself (`/api/show`), so
+new models classify correctly; a family-name list is the fallback for older
+Ollama versions. `halo-agent models` shows the classification and what
+`auto` would pick.
 
 Sessions store the full transcript, an accumulated step log, and the list of
 files the agent changed. Re-running with the same `--session` name continues
@@ -133,9 +145,20 @@ each ask for y/N confirmation before running (`--mode ask`, the default).
 Pass `--mode agent` to run unattended. Non-TTY and serve-mode runs are
 always unattended.
 
+**Deletions:** file-deletion commands (`rm`, `del`, `Remove-Item`, `git
+clean`, `find -delete`, …) are refused outright in unattended runs — safety
+wins over task instructions, so a goal like "clean up" cannot delete files
+nobody explicitly authorized. The agent is instructed to finish and ask the
+user which files may be removed. To actually delete, run in `--mode ask`
+and approve the command at the y/N prompt.
+
 The system prompt is built per run by the context builder: platform, shell,
 workspace root, and a top-level file listing, so the model starts oriented
-instead of spending steps exploring. Long transcripts are compacted
+instead of spending steps exploring. On complex goals, a planning pre-pass
+asks the model for a short numbered plan before any tools run; task-type
+heuristics (test-fix, debug, refactor, etc.) append focused constraints to
+the user message. Thinking-capable models get Ollama's native `think` mode
+enabled automatically (`--think` to control). Long transcripts are compacted
 automatically — older turns are summarized by the model while the system
 message and recent turns are kept verbatim. Compaction triggers on real
 token usage: every request carries an explicit `num_ctx` (default 16384,
@@ -176,6 +199,51 @@ model. Use this to measure whether a runtime change actually improves agent
 quality. `--task <name>` runs one task, `--json <file>` saves results,
 `--verbose` traces tool calls. Exit code 2 means at least one task failed.
 
+## Dev bench (agent + judge)
+
+```powershell
+npm run bench
+node evals/dev-bench.mjs --tier 2
+node evals/dev-bench.mjs --scenario greet-module --keep-workspace
+```
+
+Development benchmarks with **increasing complexity tiers** (simple module →
+multi-file fixes → small CLI → HTTP API → refactor → log/CSV tools). Each
+scenario runs halo-agent in a fresh temp workspace, then grades the outcome with
+the **Cursor CLI** (`agent --model auto`) in read-only ask mode.
+
+**Config:** `bench.config.json` in the project root, or `evals/bench.config.json`
+— loaded automatically when present. CLI flags override config values.
+`npm run bench` picks it up with no extra flags.
+
+**Tier progression** (on by default): runs tier 1, then tier 2, … with a
+per-tier summary. Stops early if the tier average score falls below
+`progression.stopBelowScore` (default 50). Use `--flat` to run all scenarios
+without pausing between tiers.
+
+When complete, prints an **assessment report** with overall score, per-tier
+breakdown, per-scenario scores, and ranked recommendations for improving
+halo-agent. Reports are also written to `bench-latest.json` and
+`bench-latest.md` (configurable).
+
+| Flag | Meaning |
+| --- | --- |
+| `--config <path>` | Config file (default: `bench.config.json` or `evals/bench.config.json` if present) |
+| `--tier <n>` | Run scenarios up to tier *n* |
+| `--progression` / `--flat` | Enable or disable tier-by-tier progression |
+| `--stop-below <score>` | Halt progression when tier average is below *score* |
+| `--scenario <name>` | Run one scenario |
+| `--scenarios a,b,c` | Run a subset |
+| `--model <name\|auto>` | Ollama model for halo-agent |
+| `--skip-judge` | Run agent only (no Cursor CLI) |
+| `--judge-model auto` | Judge model (default `auto`) |
+| `--keep-workspace` | Leave temp dir for inspection |
+| `--json` / `--markdown` | Report output paths |
+| `--no-report` | Skip writing report files |
+
+Requires Ollama for the agent and the Cursor CLI (`agent`) for judging. Not a
+release gate — run while iterating on the runtime.
+
 ## Layout
 
 | Path | Purpose |
@@ -185,6 +253,7 @@ quality. `--task <name>` runs one task, `--json <file>` saves results,
 | `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
 | `src/context-builder.mjs` | Environment + workspace snapshot for the system prompt |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
+| `src/prompt-enhancements.mjs` | Task hints, planning pre-pass, Ollama think resolution |
 | `src/openai-server.mjs` | `/v1/chat/completions` facade over the loop |
 | `src/session-store.mjs` | Persist/resume sessions with step log and changed files |
 | `src/model-routing.mjs` | Tool-capable detection and installed-model resolution |
@@ -195,7 +264,7 @@ quality. `--task <name>` runs one task, `--json <file>` saves results,
 | `src/tools/search.mjs` | `grep_search` and `find_files` over the workspace tree |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
-| `evals/` | Live-model eval harness (`evals/run.mjs`) and task definitions |
+| `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), scenarios, judge |
 
 ## Relationship to Aura Wire
 

@@ -1,7 +1,9 @@
 /**
  * Shell tool: run a command through the system shell, scoped to the
- * workspace. No approval gate yet (roadmap item 8) — the guardrails here are
- * the workspace-bound cwd, a hard timeout, and capped output.
+ * workspace. Guardrails: workspace-bound cwd, a hard timeout, capped output,
+ * and a hard block on file-deletion commands unless a human approved the
+ * call (ask mode). Safety wins over task instructions: a goal like "clean
+ * up" must not delete files nobody explicitly authorized.
  */
 
 import { spawn } from "node:child_process";
@@ -10,6 +12,53 @@ import { resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 300;
+
+/**
+ * Command names (PowerShell and POSIX, incl. aliases) that delete files.
+ * Compared against the first word of each shell segment, basename only.
+ */
+const DELETE_COMMAND_NAMES = new Set([
+  "rm",
+  "rmdir",
+  "rd",
+  "del",
+  "erase",
+  "unlink",
+  "shred",
+  "trash",
+  "remove-item",
+  "ri",
+]);
+
+/**
+ * Best-effort detection of file-deletion commands. Splits the command line
+ * into segments at shell separators (;, |, &&, ||, newlines, subshells,
+ * script blocks) and checks the leading word of each. Catches `rm`/`del`/
+ * `Remove-Item` variants, `git rm`/`git clean`, and `find ... -delete`; it
+ * cannot catch every escape hatch (e.g. inline scripts), so the system
+ * prompt carries the same rule for the model.
+ *
+ * @param {string} command
+ * @returns {string|null} The offending segment, or null when none found.
+ */
+export function findDeleteCommand(command) {
+  const segments = String(command ?? "").split(/(?:\|\||&&|[;|&\n(){}`]|\$\()/);
+  for (const raw of segments) {
+    const segment = raw.trim();
+    if (!segment) continue;
+    let words = segment.split(/\s+/);
+    if (words[0]?.toLowerCase() === "sudo") words = words.slice(1);
+    const base = words[0]
+      ?.toLowerCase()
+      .replace(/^.*[\\/]/, "")
+      .replace(/\.exe$/, "");
+    if (!base) continue;
+    if (DELETE_COMMAND_NAMES.has(base)) return segment;
+    if (base === "git" && ["rm", "clean"].includes(words[1]?.toLowerCase())) return segment;
+    if (base === "find" && /\s-delete(\s|$)/.test(segment)) return segment;
+  }
+  return null;
+}
 
 // On Windows use PowerShell, not cmd.exe: models overwhelmingly write
 // PowerShell or POSIX-flavored commands, and cmd.exe chokes on both.
@@ -46,6 +95,19 @@ export function registerShellTools(registry, { workspaceRoot }) {
     },
     async execute({ command, cwd, timeout_seconds }) {
       if (!command || !command.trim()) throw new Error("command must not be empty.");
+      // Deletion is destructive: it only runs when a human approved this
+      // exact call (an approval handler is set and already said yes before
+      // execute). Unattended runs get a refusal that tells the model to
+      // stop and ask the user rather than find another way.
+      const deleteSegment = findDeleteCommand(command);
+      if (deleteSegment && !registry.approvalHandler) {
+        throw new Error(
+          `This command deletes files ('${deleteSegment}'), which requires explicit user approval, ` +
+            "and no approval prompt is available in this session. Do not attempt to delete " +
+            "files another way. If the task requires deleting files, stop and ask the user " +
+            "in your final answer to confirm exactly which files may be deleted.",
+        );
+      }
       const dir = resolveWithinRoot(workspaceRoot, cwd);
       const timeoutMs =
         Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) *

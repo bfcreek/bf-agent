@@ -16,36 +16,39 @@ import { buildProjectContext } from "./project-index.mjs";
 import { McpClient, registerMcpTools } from "./mcp-client.mjs";
 import {
   ModelRoutingError,
-  resolveModelDetected,
+  resolveModelAuto,
   assertToolCapable,
   listClassifiedModelsDetected,
+  suggestModel,
 } from "./model-routing.mjs";
-import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import { DEFAULT_NUM_CTX, DEFAULT_THINK, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import { configureClientModel } from "./prompt-enhancements.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
+import {
+  assertTerranReady,
+  makeTerranRagOptions,
+  TerranError,
+} from "./terran-client.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import {
+  applyConfigToDefaults,
+  ensureConfigFile,
+  getBuiltinDefaults,
+  getConfigPath,
+  loadUserConfig,
+  openConfigInEditor,
+} from "./user-config.mjs";
 
-function parseArgs(argv) {
+function parseArgs(argv, initial = getBuiltinDefaults()) {
   const options = {
-    model: "llama3.2",
-    baseUrl: "http://127.0.0.1:11434",
-    maxSteps: 10,
-    numCtx: DEFAULT_NUM_CTX,
-    quiet: false,
-    cwd: process.cwd(),
-    port: 11435,
-    // Interactive terminals gate writes/shell behind a prompt; piped or
-    // headless runs cannot prompt, so they run unattended.
-    mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
-    mcp: [],
-    embedModel: "nomic-embed-text",
-    noIndex: false,
-    json: false,
-    goal: "",
+    ...initial,
+    mcp: [...(initial.mcp ?? [])],
     errors: [],
   };
   const positional = [];
+  let mcpFromCli = false;
 
   const value = (flag, i) => {
     const v = argv[i];
@@ -104,7 +107,13 @@ function parseArgs(argv) {
       }
       case "--mcp": {
         const spec = value(arg, ++i);
-        if (spec !== undefined) options.mcp.push(spec);
+        if (spec !== undefined) {
+          if (!mcpFromCli) {
+            options.mcp = [];
+            mcpFromCli = true;
+          }
+          options.mcp.push(spec);
+        }
         break;
       }
       case "--embed-model": {
@@ -115,8 +124,42 @@ function parseArgs(argv) {
       case "--no-index":
         options.noIndex = true;
         break;
+      case "--terran":
+        options.terran = true;
+        break;
+      case "--web":
+        options.terranWeb = true;
+        options.terran = true;
+        break;
+      case "--ns": {
+        const ns = value(arg, ++i);
+        if (ns !== undefined) {
+          options.terranNamespace = ns;
+          options.terran = true;
+        }
+        break;
+      }
       case "--json":
         options.json = true;
+        break;
+      case "--think": {
+        const level = value(arg, ++i);
+        if (level === "auto" || level === "true" || level === "false" || level === "off") {
+          options.think = level === "false" || level === "off" ? false : level;
+        } else if (level === "low" || level === "medium" || level === "high" || level === "max") {
+          options.think = level;
+        } else if (level !== undefined) {
+          options.errors.push(
+            `--think must be auto, true, false, off, or low|medium|high|max, got '${level}'.`,
+          );
+        }
+        break;
+      }
+      case "--no-plan":
+        options.noPlan = true;
+        break;
+      case "--no-hints":
+        options.noHints = true;
         break;
       case "--help":
       case "-h":
@@ -147,6 +190,14 @@ function parseArgs(argv) {
     options.listModels = true;
     positional.shift();
   }
+  if (positional[0] === "config") {
+    options.configCommand = true;
+    positional.shift();
+    if (positional[0] === "edit") {
+      options.configEdit = true;
+      positional.shift();
+    }
+  }
   options.goal = positional.join(" ").trim();
   return options;
 }
@@ -162,9 +213,16 @@ Usage:
   halo-agent "<goal>" [options]     Run one goal and print the answer
   halo-agent serve [options]        OpenAI-compatible server (/v1/chat/completions)
   halo-agent models [options]       List installed Ollama models and tool compliance
+  halo-agent config edit            Create or open the user config file in $EDITOR
+
+Config:
+  Defaults can be set in ${getConfigPath()} (YAML). Keys match CLI flag names
+  (without --). Command-line flags override config values.
 
 Options:
-  --model <name>       Ollama model (default llama3.2)
+  --model <name|auto>  Ollama model. Default auto: strongest installed model with
+                       thinking + tool support that fits in memory; falls back to an
+                       installed Ollama cloud model when no local model is strong enough
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
   --max-steps <n>      Max model round-trips (default 10)
   --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
@@ -175,6 +233,13 @@ Options:
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --embed-model <name> Embedding model for project index (default nomic-embed-text)
   --no-index           Skip building the local project vector index
+  --terran             Search Aura Terran corpora for each user message (Direct RAG REST)
+  --ns <namespace>     Terran corpus namespace (implies --terran)
+  --web                Blend Terran web search into corpus REST calls (implies --terran)
+  --think <mode>       Native model reasoning: auto (default), true, false/off,
+                       or low|medium|high|max (for thinking models / gpt-oss)
+  --no-plan            Skip the planning pre-pass on complex goals
+  --no-hints           Skip task-type constraint hints in the user message
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer
   --json               JSON output (models command)
@@ -190,10 +255,12 @@ Examples:
   halo-agent models
   halo-agent models --json --base-url http://127.0.0.1:11434
   halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
+  halo-agent "what is our refund policy?" --terran --ns general
+  halo-agent "latest Node.js LTS release notes" --terran --web
 
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
-  3  Ollama error   4  MCP attach failed`);
+  3  Ollama error   4  MCP attach failed   5  Terran unavailable`);
 }
 
 function makeProjectBootstrap(options, client) {
@@ -203,6 +270,18 @@ function makeProjectBootstrap(options, client) {
     embeddingModel: options.embedModel,
     onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
   };
+}
+
+function makeTerranRag(options) {
+  if (!options.terran) return false;
+  const rag = makeTerranRagOptions({
+    namespace: options.terranNamespace,
+    includeWebSearch: options.terranWeb,
+  });
+  if (!options.quiet) {
+    rag.onWarning = (message) => console.error(`[terran] ${message}`);
+  }
+  return rag;
 }
 
 function makeApprovalPrompt() {
@@ -216,12 +295,13 @@ function makeApprovalPrompt() {
   return { handler, close: () => rl.close() };
 }
 
-function printClassifiedModels({ baseUrl, classified, json }) {
+function printClassifiedModels({ baseUrl, classified, suggested, json }) {
   if (json) {
     console.log(
       JSON.stringify(
         {
           baseUrl,
+          suggested: suggested ? { model: suggested.model, reason: suggested.reason } : null,
           compliant: classified.compliant,
           notCompliant: classified.notCompliant,
           unknown: classified.unknown,
@@ -243,15 +323,21 @@ function printClassifiedModels({ baseUrl, classified, json }) {
   section("compliant (tool-capable)", classified.compliant);
   section("not compliant", classified.notCompliant);
   section("unknown", classified.unknown);
+  lines.push(
+    suggested
+      ? `suggested (--model auto): ${suggested.model} — ${suggested.reason}`
+      : "suggested (--model auto): none — no installed model has thinking + tools at a usable size",
+  );
   console.log(lines.join("\n").trimEnd());
 }
 
 async function listOllamaModels(options) {
   const client = new OllamaClient({ baseUrl: options.baseUrl, model: options.model });
   try {
-    const installed = await client.listModels();
-    const classified = await listClassifiedModelsDetected(client, installed);
-    printClassifiedModels({ baseUrl: options.baseUrl, classified, json: options.json });
+    const models = await client.listModelsDetailed();
+    const classified = await listClassifiedModelsDetected(client, models.map((m) => m.name));
+    const suggested = await suggestModel({ client, models });
+    printClassifiedModels({ baseUrl: options.baseUrl, classified, suggested, json: options.json });
   } catch (err) {
     if (err instanceof OllamaClientError) {
       console.error(err.message);
@@ -263,6 +349,11 @@ async function listOllamaModels(options) {
 }
 
 function describeStep(step) {
+  if (step.kind === "plan") {
+    const preview = step.content.length > 240 ? `${step.content.slice(0, 240)}...` : step.content;
+    console.error(`[plan]\n${preview}`);
+    return;
+  }
   if (step.kind === "final") return;
   for (const call of step.toolCalls) {
     const status = call.ok ? "ok" : `error: ${call.error}`;
@@ -271,13 +362,28 @@ function describeStep(step) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const builtins = getBuiltinDefaults();
+  const { values: configValues, errors: configErrors } = await loadUserConfig();
+  const withConfig = applyConfigToDefaults(builtins, configValues);
+  const options = parseArgs(process.argv.slice(2), withConfig);
+  options.errors.push(...configErrors);
+
   if (options.version) {
     console.log(VERSION);
     return;
   }
   if (options.help) {
     printHelp();
+    return;
+  }
+  if (options.configEdit) {
+    const configPath = await ensureConfigFile();
+    process.exitCode = openConfigInEditor(configPath);
+    return;
+  }
+  if (options.configCommand) {
+    console.error("Unknown config subcommand. Use: halo-agent config edit");
+    process.exitCode = 1;
     return;
   }
   if (options.errors.length > 0) {
@@ -298,32 +404,49 @@ async function main() {
     return;
   }
 
+  if (options.terran) {
+    try {
+      await assertTerranReady({ includeWebSearch: options.terranWeb });
+    } catch (err) {
+      if (err instanceof TerranError) {
+        console.error(err.message);
+        process.exitCode = 5;
+        return;
+      }
+      throw err;
+    }
+  }
+
   const client = new OllamaClient({
     baseUrl: options.baseUrl,
     model: options.model,
     numCtx: options.numCtx,
+    think: options.think,
   });
 
-  // Route to an installed, tool-capable model up front; skip silently when
-  // Ollama is unreachable — the run itself will surface that error clearly.
+  // Route to an installed, suitable model up front ("auto" picks the
+  // strongest thinking+tool model); skip silently when Ollama is
+  // unreachable — the run itself will surface that error clearly.
   try {
-    const installed = await client.listModels();
-    const routed = await resolveModelDetected({ requested: options.model, installed, client });
+    const routed = await resolveModelAuto({ requested: options.model, client });
     for (const warning of routed.warnings) console.error(warning);
-    client.model = routed.model;
     options.model = routed.model;
+    await configureClientModel(client, routed.model);
   } catch (err) {
     if (err instanceof ModelRoutingError) {
       console.error(err.message);
       process.exitCode = 1;
       return;
     }
-    try {
-      assertToolCapable(options.model);
-    } catch (routingErr) {
-      console.error(routingErr.message);
-      process.exitCode = 1;
-      return;
+    if (options.model !== "auto") {
+      try {
+        assertToolCapable(options.model);
+        await configureClientModel(client, options.model);
+      } catch (routingErr) {
+        console.error(routingErr.message);
+        process.exitCode = 1;
+        return;
+      }
     }
     // Ollama unreachable — fall through; the run itself will surface that error.
   }
@@ -376,6 +499,7 @@ async function main() {
       maxSteps: options.maxSteps,
       defaultModel: options.model,
       projectBootstrap: makeProjectBootstrap(options, client),
+      terranRag: makeTerranRag(options),
     });
     server.listen(options.port, () => {
       const { port } = server.address();
@@ -398,7 +522,10 @@ async function main() {
     maxSteps: options.maxSteps,
     onStep: options.quiet ? undefined : describeStep,
     compaction: {},
+    planning: !options.noPlan,
+    taskHints: !options.noHints,
     projectBootstrap: makeProjectBootstrap(options, client),
+    terranRag: makeTerranRag(options),
     onBootstrap: options.quiet
       ? undefined
       : ({ readme, ragHits }) => {
@@ -406,6 +533,14 @@ async function main() {
           if (readme) parts.push("README");
           if (ragHits > 0) parts.push(`${ragHits} indexed passage(s)`);
           if (parts.length > 0) console.error(`[bootstrap] auto-retrieved ${parts.join(" + ")}`);
+        },
+    onTerranRag: options.quiet
+      ? undefined
+      : ({ hitCount, webHitCount }) => {
+          const parts = [];
+          if (hitCount > 0) parts.push(`${hitCount} corpus passage(s)`);
+          if (webHitCount > 0) parts.push(`${webHitCount} web result(s)`);
+          if (parts.length > 0) console.error(`[terran] auto-retrieved ${parts.join(" + ")}`);
         },
   });
 

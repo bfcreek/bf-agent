@@ -66,6 +66,25 @@ test("numCtx null omits num_ctx (Ollama server default)", async () => {
   assert.equal(requests[0].body.options.num_ctx, undefined);
 });
 
+test("listModelsDetailed returns size metadata and tolerates missing fields", async () => {
+  const { fetchImpl } = makeFetch([
+    {
+      models: [
+        { name: "gpt-oss:20b", size: 13_000_000_000, details: { parameter_size: "20.9B" } },
+        { name: "bare-model" },
+      ],
+    },
+  ]);
+  const client = new OllamaClient({ fetchImpl });
+
+  const models = await client.listModelsDetailed();
+
+  assert.deepEqual(models, [
+    { name: "gpt-oss:20b", sizeBytes: 13_000_000_000, parameterSize: "20.9B" },
+    { name: "bare-model", sizeBytes: 0, parameterSize: "" },
+  ]);
+});
+
 test("chat returns the raw response with token counts for context accounting", async () => {
   const { fetchImpl } = makeFetch([CHAT_REPLY]);
   const client = new OllamaClient({ fetchImpl });
@@ -75,4 +94,40 @@ test("chat returns the raw response with token counts for context accounting", a
   assert.equal(message.content, "hi");
   assert.equal(raw.prompt_eval_count, 120);
   assert.equal(raw.eval_count, 30);
+});
+
+test("chat sends think when the model is thinking-capable", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY]);
+  const client = new OllamaClient({ fetchImpl, think: "auto" });
+  client.thinkingCapable = true;
+  client.paramsB = 8;
+
+  await client.chat({ messages: [{ role: "user", content: "hi" }], model: "qwen3:8b" });
+
+  assert.equal(requests[0].body.think, true);
+});
+
+test("chat omits think when disabled or model lacks thinking", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY, CHAT_REPLY]);
+  const client = new OllamaClient({ fetchImpl, think: false });
+  client.thinkingCapable = true;
+
+  await client.chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(requests[0].body.think, undefined);
+
+  const client2 = new OllamaClient({ fetchImpl, think: "auto" });
+  client2.thinkingCapable = false;
+  await client2.chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(requests[1].body.think, undefined);
+});
+
+test("chat uses gpt-oss think levels in auto mode for small models", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY]);
+  const client = new OllamaClient({ fetchImpl, think: "auto" });
+  client.thinkingCapable = true;
+  client.paramsB = 8;
+
+  await client.chat({ messages: [{ role: "user", content: "hi" }], model: "gpt-oss:20b" });
+
+  assert.equal(requests[0].body.think, "high");
 });

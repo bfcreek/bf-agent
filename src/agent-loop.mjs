@@ -6,6 +6,14 @@
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
+import {
+  detectTaskHints,
+  formatTaskConstraints,
+  isComplexGoal,
+  PLANNING_USER_MESSAGE,
+  prematureFinalNudge,
+} from "./prompt-enhancements.mjs";
+import { gatherTerranContext } from "./terran-client.mjs";
 
 /**
  * Sent as a final user message when the loop runs out of steps, so the run
@@ -41,6 +49,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  files; use write_file only for new files or full rewrites.",
   "- After changing files, verify the result: re-read the changed part, or run",
   "  the project's tests or build with run_command when the task calls for it.",
+  "- Deleting files is destructive and always needs explicit permission.",
+  "  Never delete a file the user did not name for deletion. If the task",
+  "  implies deleting files (e.g. 'clean up'), do not delete anything —",
+  "  finish and ask the user to confirm exactly which files may be removed.",
   "- If a tool call fails, read the error and change your approach. Never",
   "  repeat a call that just failed with the same arguments.",
   "- Keep going until the task is done, then reply to the user in plain text",
@@ -50,7 +62,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
 /**
  * @typedef {object} AgentStep
  * @property {number} index 1-based model round-trip number.
- * @property {"tool-calls"|"final"} kind What the model did this step.
+ * @property {"tool-calls"|"final"|"plan"} kind What the model did this step.
  * @property {string} content Assistant text for this step (may be empty).
  * @property {Array<{name: string, args: object, ok: boolean, result?: unknown, error?: string}>} toolCalls
  */
@@ -82,6 +94,14 @@ export class AgentLoop {
    *   the user message before the model is called. `{ workspaceRoot, client?,
    *   embeddingModel?, onProgress? }`.
    * @param {(info: {readme: boolean, ragHits: number}) => void} [options.onBootstrap]
+   * @param {object|false} [options.terranRag]
+   *   On every user message, search Aura Terran via Direct RAG REST and append
+   *   hits to the user turn. `{ namespace?, restUrl?, token? }`. When REST is
+   *   not running, the run continues without Terran context (no error).
+   * @param {(info: {hitCount: number}) => void} [options.onTerranRag]
+   * @param {boolean} [options.planning] Pre-pass plan on complex first turns (default true).
+   * @param {boolean} [options.taskHints] Append task-type constraints to the user message (default true).
+   * @param {(info: {plan: string, hints: Array<{id: string, constraint: string}>}) => void} [options.onPlan]
    */
   constructor({
     client,
@@ -92,6 +112,11 @@ export class AgentLoop {
     compaction = false,
     projectBootstrap = false,
     onBootstrap,
+    terranRag = false,
+    onTerranRag,
+    planning = true,
+    taskHints = true,
+    onPlan,
   } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
     if (!registry) throw new Error("AgentLoop requires a tool registry.");
@@ -103,6 +128,11 @@ export class AgentLoop {
     this.compaction = compaction;
     this.projectBootstrap = projectBootstrap;
     this.onBootstrap = onBootstrap;
+    this.terranRag = terranRag;
+    this.onTerranRag = onTerranRag;
+    this.planning = planning;
+    this.taskHints = taskHints;
+    this.onPlan = onPlan;
   }
 
   /**
@@ -121,7 +151,12 @@ export class AgentLoop {
       history && history.length > 0
         ? [...history]
         : [{ role: "system", content: this.systemPrompt }];
-    messages.push({ role: "user", content: goal });
+    let userContent = goal;
+    const hints = this.taskHints ? detectTaskHints(goal) : [];
+    const taskFocus = formatTaskConstraints(hints);
+    if (taskFocus) userContent = `${taskFocus}\n\n${userContent}`;
+
+    messages.push({ role: "user", content: userContent });
 
     if (this.projectBootstrap && isFreshTurn(history)) {
       const bootstrap = await gatherFirstTurnProjectContext({
@@ -132,11 +167,57 @@ export class AgentLoop {
         signal,
         onProgress: this.projectBootstrap.onProgress,
       });
-      messages[messages.length - 1].content = `${goal}\n\n${bootstrap.text}`;
+      userContent = `${userContent}\n\n${bootstrap.text}`;
       this.onBootstrap?.({ readme: bootstrap.readme, ragHits: bootstrap.ragHits });
     }
 
+    if (this.terranRag) {
+      const terran = await gatherTerranContext({
+        query: goal,
+        namespace: this.terranRag.namespace,
+        restUrl: this.terranRag.restUrl,
+        token: this.terranRag.token,
+        includeWebSearch: this.terranRag.includeWebSearch,
+        signal,
+        fetchImpl: this.terranRag.fetchImpl,
+      });
+      if (terran.text) {
+        userContent = `${userContent}\n\n${terran.text}`;
+        this.onTerranRag?.({ hitCount: terran.hitCount, webHitCount: terran.webHitCount });
+      } else if (terran.error && this.terranRag.onWarning) {
+        this.terranRag.onWarning(terran.error);
+      }
+    }
+
+    messages[messages.length - 1].content = userContent;
+
     const steps = [];
+    const freshTurn = isFreshTurn(history);
+
+    if (this.planning && freshTurn && isComplexGoal(goal) && !signal?.aborted) {
+      try {
+        const planMessages = [
+          ...messages,
+          { role: "user", content: PLANNING_USER_MESSAGE },
+        ];
+        const { message } = await chatWithRetry(this.client, {
+          messages: planMessages,
+          signal,
+        });
+        const plan = textOf(message.content).trim();
+        if (plan) {
+          messages.push({ role: "user", content: PLANNING_USER_MESSAGE });
+          messages.push({ role: "assistant", content: plan });
+          const planStep = { index: 0, kind: "plan", content: plan, toolCalls: [] };
+          steps.push(planStep);
+          this.onStep?.(planStep);
+          this.onPlan?.({ plan, hints });
+        }
+      } catch {
+        // Planning is best-effort — proceed without it.
+      }
+    }
+
     const tools = this.registry.schemas();
     // Actual context usage (prompt + completion tokens) from the last model
     // response — a far better compaction trigger than counting characters.
@@ -145,6 +226,7 @@ export class AgentLoop {
     // consecutive identical steps so we can break the cycle.
     let repeatedKey = "";
     let repeatedCount = 0;
+    let toolNudgeCount = 0;
 
     for (let index = 1; index <= this.maxSteps; index++) {
       if (signal?.aborted) {
@@ -170,16 +252,28 @@ export class AgentLoop {
 
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
       if (toolCalls.length === 0) {
+        const answerText = textOf(message.content);
+        const nudge = prematureFinalNudge({
+          goal,
+          answerText,
+          steps,
+          nudgeCount: toolNudgeCount,
+        });
+        if (nudge) {
+          toolNudgeCount += 1;
+          messages.push({ role: "user", content: nudge });
+          continue;
+        }
         const step = {
           index,
           kind: "final",
-          content: textOf(message.content),
+          content: answerText,
           toolCalls: [],
         };
         steps.push(step);
         this.onStep?.(step);
         return {
-          text: step.content,
+          text: answerText,
           stopReason: "completed",
           steps,
           messages,
@@ -244,7 +338,7 @@ export class AgentLoop {
         // keep text = ""
       }
     }
-    return { text, stopReason: "max-steps", steps, messages };
+    return { text: text ?? "", stopReason: "max-steps", steps, messages };
   }
 }
 

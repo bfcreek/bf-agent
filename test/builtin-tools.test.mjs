@@ -7,6 +7,9 @@ import { after, before, beforeEach, test } from "node:test";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
 import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot } from "../src/tools/fs.mjs";
+import { findDeleteCommand } from "../src/tools/shell.mjs";
+
+const IS_WINDOWS = process.platform === "win32";
 
 let root;
 let registry;
@@ -240,4 +243,77 @@ test("run_command rejects a cwd outside the workspace", async () => {
   const run = await registry.execute("run_command", { command: "node -v", cwd: ".." });
   assert.equal(run.ok, false);
   assert.match(run.error, /outside the workspace/);
+});
+
+test("findDeleteCommand flags deletion commands in any shell segment", () => {
+  for (const command of [
+    "rm file.txt",
+    "rm -rf build",
+    "Remove-Item junk-notes.txt",
+    "remove-item -Force junk.txt",
+    "del junk.txt",
+    "erase old.log",
+    "rmdir /s /q build",
+    "rd build",
+    "unlink file.txt",
+    "sudo rm -rf /tmp/x",
+    "/bin/rm file.txt",
+    "git rm tracked.txt",
+    "git clean -fd",
+    "find . -name '*.log' -delete",
+    "echo hi; rm file.txt",
+    "npm test && del artifacts.zip",
+    "Get-ChildItem *.tmp | Remove-Item",
+    "Get-ChildItem | ForEach-Object { Remove-Item $_ }",
+  ]) {
+    assert.ok(findDeleteCommand(command), `should flag: ${command}`);
+  }
+});
+
+test("findDeleteCommand leaves non-deletion commands alone", () => {
+  for (const command of [
+    "node -v",
+    "npm test",
+    "git status",
+    "git rm-remote", // not `git rm`
+    "grep -r 'rm' src",
+    "echo rm file.txt", // rm is an argument, not the command
+    "node scripts/rmdir-report.mjs",
+    "Move-Item a.txt b.txt",
+    "find . -name '*.log'",
+  ]) {
+    assert.equal(findDeleteCommand(command), null, `should not flag: ${command}`);
+  }
+});
+
+test("run_command blocks deletion commands when no approval handler is set", async () => {
+  await writeFile(path.join(root, "precious.txt"), "keep me", "utf8");
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item precious.txt" : "rm precious.txt",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /requires explicit user approval/);
+  assert.match(run.error, /ask the user/);
+  assert.equal(await readFile(path.join(root, "precious.txt"), "utf8"), "keep me");
+});
+
+test("run_command allows deletion once an approval handler has approved", async () => {
+  await writeFile(path.join(root, "doomed.txt"), "bye", "utf8");
+  registry.setApprovalHandler(() => true);
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item doomed.txt" : "rm doomed.txt",
+  });
+  assert.equal(run.ok, true);
+  assert.equal(run.result.exitCode, 0);
+  await assert.rejects(readFile(path.join(root, "doomed.txt"), "utf8"));
+});
+
+test("run_command still runs non-deletion commands without an approval handler", async () => {
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.log('harmless')"`,
+  });
+  assert.equal(run.ok, true);
+  assert.match(run.result.stdout, /harmless/);
 });
