@@ -21,7 +21,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const ok = (detail = "ok") => ({ pass: true, detail });
@@ -86,7 +86,10 @@ function runPython(cwd, script, args = []) {
   return spawnCommand(bin, [script, ...args], cwd, 30_000);
 }
 
-function runDotnet(cwd, args = ["run", "--nologo", "-v", "q"]) {
+function runDotnet(cwd, args = ["run", "-v", "q"]) {
+  // Do not pass `--nologo` after `run`: SDK 10 forwards unknown run flags as
+  // application args (`args[0] === "--nologo"`). Logo is already suppressed
+  // via DOTNET_NOLOGO in spawnCommand.
   return spawnCommand("dotnet", args, cwd, 120_000);
 }
 
@@ -141,6 +144,39 @@ function extractJsonArray(text) {
   const end = String(text).lastIndexOf("]");
   if (start < 0 || end <= start) throw new Error("no JSON array in output");
   return JSON.parse(String(text).slice(start, end + 1));
+}
+
+function stripDotnetNoise(text) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      if (/^build (succeeded|failed)\.?$/i.test(t)) return false;
+      if (/^time elapsed/i.test(t)) return false;
+      if (/\d+ (warning|error)\(s\)/i.test(t)) return false;
+      return true;
+    });
+}
+
+function runDotnetApp(dir, appArgs) {
+  return runDotnet(dir, ["run", "-v", "q", "--no-build", "--", ...appArgs]);
+}
+
+async function listCsharpSources(dir) {
+  const files = [];
+  async function walk(current) {
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "bin" || entry.name === "obj") continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith(".cs")) files.push(full);
+    }
+  }
+  await walk(dir);
+  return files;
 }
 
 function pythonMissing() {
@@ -843,7 +879,7 @@ export const SCENARIOS = [
     async precheck(dir) {
       const missing = dotnetMissing();
       if (missing) return missing;
-      const run = runDotnet(dir, ["run", "--nologo", "-v", "q", "--", "data/users.json", "--active"]);
+      const run = runDotnet(dir, ["run", "-v", "q", "--", "data/users.json", "--active"]);
       if (run.status !== 0) return fail(`dotnet run failed: ${commandOutput(run).slice(0, 300)}`);
       try {
         const users = extractJsonArray(run.stdout);
@@ -1069,6 +1105,98 @@ export const SCENARIOS = [
     integrity: { allowChanged: ["A.cs", "B.cs"], allowAdded: ["Slugify.cs"] },
   },
   {
+    name: "cs-catalog-cli",
+    tier: 5,
+    language: "csharp",
+    requires: "dotnet",
+    maxSteps: 20,
+    timeoutSeconds: 360,
+    goal: [
+      "This workspace has App.csproj and data/catalog.json (array of {sku, name, category, qty, price}).",
+      "Build a C# console catalog CLI. Do not add NuGet packages — use only the .NET base class library.",
+      "Split the code across at least two .cs files (for example Catalog.cs + Program.cs).",
+      "Commands, invoked as `dotnet run -- <args>`:",
+      "`list` prints every item, one per line, SKU ascending:",
+      "  <sku>  <name>  qty=<n>  $<price with two decimals>",
+      "`find <sku>` prints that item's line, or exactly `not found` if missing.",
+      "`total` prints `total: <sum>` where sum is qty*price across all items, two decimals (example: total: 86.00).",
+      "`low --threshold <n>` prints list lines for items with qty <= n, SKU ascending.",
+      "`category <name>` prints list lines for that category, SKU ascending.",
+      "Unknown command or missing args: print a usage line to stdout or stderr and exit non-zero.",
+      "Run `dotnet build` and `dotnet run -- list` to confirm before finishing.",
+    ].join(" "),
+    rubric: [
+      "dotnet build succeeds with no extra NuGet packages.",
+      "At least two .cs files exist.",
+      "list / find / total / low / category match the specified formats and values.",
+      "Unknown commands exit non-zero.",
+    ].join("\n"),
+    async setup(dir) {
+      await writeCsharpProject(dir);
+      await mkdir(path.join(dir, "data"), { recursive: true });
+      await writeFile(
+        path.join(dir, "data", "catalog.json"),
+        JSON.stringify(
+          [
+            { sku: "WID-1", name: "Widget", category: "parts", qty: 10, price: 2.5 },
+            { sku: "GAD-2", name: "Gadget", category: "parts", qty: 3, price: 9 },
+            { sku: "BOLT-9", name: "Bolt", category: "hardware", qty: 50, price: 0.2 },
+            { sku: "LMP-4", name: "Lamp", category: "home", qty: 1, price: 24 },
+          ],
+          null,
+          2,
+        ) + "\n",
+        "utf8",
+      );
+    },
+    async precheck(dir) {
+      const missing = dotnetMissing();
+      if (missing) return missing;
+      const sources = await listCsharpSources(dir);
+      if (sources.length < 2) return fail(`need 2+ .cs files, found ${sources.length}`);
+      const build = runDotnet(dir, ["build", "-v", "q"]);
+      if (build.status !== 0) return fail(`dotnet build failed: ${commandOutput(build).slice(0, 400)}`);
+
+      const listed = stripDotnetNoise(runDotnetApp(dir, ["list"]).stdout);
+      for (const sku of ["BOLT-9", "GAD-2", "LMP-4", "WID-1"]) {
+        if (!listed.some((line) => line.includes(sku))) {
+          return fail(`list missing ${sku}: ${listed.join(" | ")}`);
+        }
+      }
+
+      const found = stripDotnetNoise(runDotnetApp(dir, ["find", "GAD-2"]).stdout);
+      if (!found.some((line) => line.includes("GAD-2") && /qty\s*=\s*3/.test(line))) {
+        return fail(`find GAD-2 output: ${found.join(" | ")}`);
+      }
+      const missingSku = stripDotnetNoise(runDotnetApp(dir, ["find", "ZZ-0"]).stdout).map((line) =>
+        line.trim().toLowerCase(),
+      );
+      if (!missingSku.includes("not found")) return fail("find ZZ-0 should print not found");
+
+      const total = stripDotnetNoise(runDotnetApp(dir, ["total"]).stdout).map((line) => line.trim());
+      if (!total.some((line) => /^total:\s*86\.00$/.test(line))) {
+        return fail(`total expected 'total: 86.00', got ${total.join(" | ")}`);
+      }
+
+      const low = stripDotnetNoise(runDotnetApp(dir, ["low", "--threshold", "3"]).stdout);
+      if (!low.some((line) => line.includes("GAD-2"))) return fail("low missing GAD-2");
+      if (!low.some((line) => line.includes("LMP-4"))) return fail("low missing LMP-4");
+      if (low.some((line) => line.includes("WID-1") || line.includes("BOLT-9"))) {
+        return fail("low should not include WID-1 or BOLT-9");
+      }
+
+      const category = stripDotnetNoise(runDotnetApp(dir, ["category", "hardware"]).stdout);
+      if (!category.some((line) => line.includes("BOLT-9"))) return fail("category hardware missing BOLT-9");
+      if (category.some((line) => line.includes("WID-1") || line.includes("GAD-2") || line.includes("LMP-4"))) {
+        return fail("category hardware should only list BOLT-9");
+      }
+
+      const unknown = runDotnetApp(dir, ["nope"]);
+      if (unknown.status === 0) return fail("unknown command should exit non-zero");
+      return ok();
+    },
+  },
+  {
     name: "csv-summary",
     tier: 5,
     goal: [
@@ -1148,6 +1276,7 @@ export function scenariosFromTier(minTier) {
  * @param {string[]|null} [options.scenarioList]
  * @param {number|null} [options.maxTier]
  * @param {number|null} [options.minTier]
+ * @param {string[]|null} [options.languageFilter]
  * @param {BenchScenario[]} [scenarios]
  */
 export function selectScenarios(options, scenarios = SCENARIOS) {
@@ -1161,6 +1290,10 @@ export function selectScenarios(options, scenarios = SCENARIOS) {
   if (options.scenarioList?.length) {
     const allowed = new Set(options.scenarioList);
     list = list.filter((s) => allowed.has(s.name));
+  }
+  if (options.languageFilter?.length) {
+    const allowed = new Set(options.languageFilter);
+    list = list.filter((s) => allowed.has(s.language ?? "js"));
   }
   if (!explicitSelection) {
     if (options.maxTier != null) {

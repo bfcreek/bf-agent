@@ -25,6 +25,7 @@ export function buildRunKey(scenarioNames, options) {
     stopBelowScore: options.stopBelowScore,
     maxTier: options.maxTier,
     minTier: options.minTier,
+    languageFilter: options.languageFilter ?? null,
     judgeModel: options.judgeModel,
     planning: options.planning,
     taskHints: options.taskHints,
@@ -38,17 +39,19 @@ export function buildRunKey(scenarioNames, options) {
  * @param {object} options
  */
 export function describeRunSelection(scenarioNames, options) {
-  if (options.scenarioFilter) return `scenario ${options.scenarioFilter}`;
-  if (options.scenarioList?.length) {
-    return `scenarios: ${options.scenarioList.join(", ")}`;
-  }
-  if (options.maxTier != null && options.minTier == null) {
+  let label;
+  if (options.scenarioFilter) label = `scenario ${options.scenarioFilter}`;
+  else if (options.scenarioList?.length) label = `scenarios: ${options.scenarioList.join(", ")}`;
+  else if (options.maxTier != null && options.minTier == null) {
     const tierLabel = `tier ≤${options.maxTier}`;
-    return options.progression ? `${tierLabel} (progression)` : `${tierLabel} (flat)`;
+    label = options.progression ? `${tierLabel} (progression)` : `${tierLabel} (flat)`;
+  } else if (options.minTier != null) label = `tier ≥${options.minTier}`;
+  else label = options.progression ? `all scenarios (progression)` : `all scenarios (flat)`;
+
+  if (options.languageFilter?.length) {
+    return `language ${options.languageFilter.join("+")}, ${label}`;
   }
-  if (options.minTier != null) return `tier ≥${options.minTier}`;
-  if (options.progression) return `all scenarios (progression)`;
-  return `all scenarios (flat)`;
+  return label;
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   defaultConfig,
   loadBenchOptions,
   parseCliArgs,
+  parseLanguageFilter,
   resolveBenchConfigPath,
 } from "../evals/config.mjs";
 import {
@@ -143,6 +144,28 @@ test("selectScenarios honors --scenarios list over tier cap", () => {
     selected.map((s) => s.name),
     ["greet-module", "todo-cli"],
   );
+});
+
+test("parseLanguageFilter normalizes aliases", () => {
+  assert.deepEqual(parseLanguageFilter("cs"), ["csharp"]);
+  assert.deepEqual(parseLanguageFilter("python,csharp"), ["python", "csharp"]);
+  assert.deepEqual(parseLanguageFilter(["js", "javascript"]), ["js"]);
+  assert.throws(() => parseLanguageFilter("ruby"), /Unknown language/);
+});
+
+test("parseCliArgs --language filters the scenario set", () => {
+  const opts = parseCliArgs(["--language", "csharp"], defaultConfig());
+  assert.deepEqual(opts.languageFilter, ["csharp"]);
+  const selected = selectScenarios(opts);
+  assert.ok(selected.length > 0);
+  assert.ok(selected.every((s) => s.language === "csharp"));
+  assert.ok(selected.some((s) => s.name === "cs-catalog-cli"));
+});
+
+test("selectScenarios languageFilter keeps js scenarios without a language field", () => {
+  const selected = selectScenarios({ languageFilter: ["js"], maxTier: 1 });
+  assert.ok(selected.some((s) => s.name === "greet-module"));
+  assert.ok(selected.every((s) => (s.language ?? "js") === "js"));
 });
 
 test("agentAnswerText tolerates missing or non-string text", () => {
@@ -402,7 +425,7 @@ test("scenarios are ordered by increasing tier", () => {
   }
 });
 
-test("python and csharp scenarios cover tiers 1-4", () => {
+test("python and csharp scenarios cover tiers 1-5", () => {
   const python = SCENARIOS.filter((s) => s.language === "python");
   const csharp = SCENARIOS.filter((s) => s.language === "csharp");
   assert.deepEqual(
@@ -411,7 +434,7 @@ test("python and csharp scenarios cover tiers 1-4", () => {
   );
   assert.deepEqual(
     csharp.map((s) => `${s.tier}:${s.name}`),
-    ["1:cs-greet", "1:cs-find-export", "2:cs-fix-tests", "3:cs-json-filter", "4:cs-refactor"],
+    ["1:cs-greet", "1:cs-find-export", "2:cs-fix-tests", "3:cs-json-filter", "4:cs-refactor", "5:cs-catalog-cli"],
   );
   for (const scenario of [...python, ...csharp]) {
     assert.equal(typeof scenario.precheck, "function");
@@ -452,6 +475,91 @@ test("py-greet precheck passes a correct solution", async () => {
     if (!runtimeAvailable("python")) {
       assert.equal(result.pass, false);
       assert.match(result.detail, /python/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("cs-catalog-cli precheck compiles and checks CLI output", { timeout: 120_000 }, async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "cs-catalog-cli");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-catalog-"));
+  try {
+    await scenario.setup(dir);
+    await writeFile(
+      path.join(dir, "Catalog.cs"),
+      [
+        "using System.Text.Json;",
+        "public sealed record Item(string Sku, string Name, string Category, int Qty, decimal Price);",
+        "public static class Catalog {",
+        "  public static List<Item> Load(string path) {",
+        "    using var doc = JsonDocument.Parse(File.ReadAllText(path));",
+        "    var items = new List<Item>();",
+        "    foreach (var el in doc.RootElement.EnumerateArray()) {",
+        "      items.Add(new Item(",
+        "        el.GetProperty(\"sku\").GetString()!,",
+        "        el.GetProperty(\"name\").GetString()!,",
+        "        el.GetProperty(\"category\").GetString()!,",
+        "        el.GetProperty(\"qty\").GetInt32(),",
+        "        el.GetProperty(\"price\").GetDecimal()));",
+        "    }",
+        "    items.Sort((a, b) => string.CompareOrdinal(a.Sku, b.Sku));",
+        "    return items;",
+        "  }",
+        "  public static string Format(Item i) => $\"{i.Sku}  {i.Name}  qty={i.Qty}  ${i.Price:0.00}\";",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "Program.cs"),
+      [
+        "var items = Catalog.Load(Path.Combine(\"data\", \"catalog.json\"));",
+        "if (args.Length == 0) Usage();",
+        "switch (args[0]) {",
+        "  case \"list\":",
+        "    foreach (var i in items) Console.WriteLine(Catalog.Format(i));",
+        "    break;",
+        "  case \"find\":",
+        "    if (args.Length < 2) Usage();",
+        "    var found = items.Find(i => i.Sku == args[1]);",
+        "    Console.WriteLine(found is null ? \"not found\" : Catalog.Format(found));",
+        "    break;",
+        "  case \"total\":",
+        "    Console.WriteLine($\"total: {items.Sum(i => i.Qty * i.Price):0.00}\");",
+        "    break;",
+        "  case \"low\": {",
+        "    int? th = null;",
+        "    for (var i = 1; i < args.Length; i++) {",
+        "      if (args[i] == \"--threshold\" && i + 1 < args.Length) th = int.Parse(args[++i]);",
+        "    }",
+        "    if (th is null) Usage();",
+        "    foreach (var i in items.Where(x => x.Qty <= th.Value)) Console.WriteLine(Catalog.Format(i));",
+        "    break;",
+        "  }",
+        "  case \"category\":",
+        "    if (args.Length < 2) Usage();",
+        "    foreach (var i in items.Where(x => x.Category == args[1])) Console.WriteLine(Catalog.Format(i));",
+        "    break;",
+        "  default:",
+        "    Usage();",
+        "    break;",
+        "}",
+        "void Usage() {",
+        "  Console.WriteLine(\"usage: list | find <sku> | total | low --threshold <n> | category <name>\");",
+        "  Environment.Exit(1);",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("dotnet")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /dotnet/i);
     } else {
       assert.equal(result.pass, true, result.detail);
     }
@@ -531,6 +639,10 @@ test("describeRunSelection labels tier and scenario runs", () => {
   assert.equal(
     describeRunSelection(names, parseCliArgs(["--scenario", "safety-read-only"], defaultConfig())),
     "scenario safety-read-only",
+  );
+  assert.equal(
+    describeRunSelection(names, parseCliArgs(["--language", "csharp"], defaultConfig())),
+    "language csharp, tier ≤5 (progression)",
   );
 });
 

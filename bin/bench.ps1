@@ -1,6 +1,8 @@
-# Interactive dev-bench runner — pick tier or scenario, then run evals/dev-bench.mjs.
+# Interactive dev-bench runner — pick tier, scenario, or language, then run evals/dev-bench.mjs.
 # Usage: .\bin\bench.ps1
 #        .\bin\bench.ps1 -SkipJudge -KeepWorkspace
+#        .\bin\bench.ps1 -Language csharp
+#        .\bin\bench.ps1 -Language python -Flat
 #        .\bin\bench.ps1 -Resume
 #        .\bin\bench.ps1 -Reset
 
@@ -10,6 +12,8 @@ param(
     [switch]$Flat,
     [switch]$Resume,
     [switch]$Reset,
+    [ValidateSet("js", "javascript", "python", "py", "csharp", "cs")]
+    [string]$Language,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -38,7 +42,7 @@ function Test-NodeReady {
 function Get-ScenarioCatalog {
     Push-Location $RepoRoot
     try {
-        $json = & node --input-type=module -e "import { SCENARIOS } from './evals/scenarios.mjs'; console.log(JSON.stringify(SCENARIOS.map((s) => ({ name: s.name, tier: s.tier }))));"
+        $json = & node --input-type=module -e "import { SCENARIOS } from './evals/scenarios.mjs'; console.log(JSON.stringify(SCENARIOS.map((s) => ({ name: s.name, tier: s.tier, language: s.language ?? 'js' }))));"
         if ($LASTEXITCODE -ne 0 -or -not $json) {
             throw "Could not load scenarios from evals/scenarios.mjs"
         }
@@ -105,6 +109,51 @@ function Show-TierMenu {
     return @{ Mode = "tier"; Tier = [int]$choice }
 }
 
+function Convert-BenchLanguage {
+    param([string]$Value)
+
+    switch ($Value.ToLowerInvariant()) {
+        "js" { return "js" }
+        "javascript" { return "js" }
+        "python" { return "python" }
+        "py" { return "python" }
+        "csharp" { return "csharp" }
+        "cs" { return "csharp" }
+        default { throw "Unknown language '$Value'. Use js, python, or csharp." }
+    }
+}
+
+function Show-LanguageMenu {
+    Write-Host ""
+    Write-Host "  1) JavaScript"
+    Write-Host "  2) Python"
+    Write-Host "  3) C#"
+    Write-Host "  0) Back"
+    Write-Host ""
+
+    $choice = Read-MenuChoice -Prompt "Language" -ValidChoices @("0", "1", "2", "3")
+    if ($choice -eq "0") { return $null }
+
+    $language = switch ($choice) {
+        "1" { "js" }
+        "2" { "python" }
+        "3" { "csharp" }
+    }
+
+    if ($language -eq "python") {
+        $python = Get-Command python -ErrorAction SilentlyContinue
+        $py = Get-Command py -ErrorAction SilentlyContinue
+        if (-not $python -and -not $py) {
+            Write-Host "python was not found on PATH. Python scenarios will be skipped unless you name them." -ForegroundColor Yellow
+        }
+    }
+    if ($language -eq "csharp" -and -not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        Write-Host "dotnet was not found on PATH. C# scenarios will be skipped unless you name them." -ForegroundColor Yellow
+    }
+
+    return @{ Mode = "language"; Language = $language }
+}
+
 function Show-ScenarioMenu {
     param($Scenarios)
 
@@ -113,7 +162,7 @@ function Show-ScenarioMenu {
     for ($i = 0; $i -lt $Scenarios.Count; $i++) {
         $scenario = $Scenarios[$i]
         $num = $i + 1
-        Write-Host ("  {0,2}) {1,-22} (tier {2})" -f $num, $scenario.Name, $scenario.Tier)
+        Write-Host ("  {0,2}) {1,-24} (tier {2}, {3})" -f $num, $scenario.Name, $scenario.Tier, $scenario.Language)
     }
     Write-Host "  0) Back"
     Write-Host ""
@@ -147,6 +196,14 @@ function Build-BenchArgs {
             $args.Add("--scenario")
             $args.Add($Selection.Name)
         }
+        "language" {
+            if ($Flat) { $args.Add("--flat") }
+        }
+    }
+
+    if ($Selection.Language) {
+        $args.Add("--language")
+        $args.Add($Selection.Language)
     }
 
     if ($SkipJudge) { $args.Add("--skip-judge") }
@@ -190,23 +247,33 @@ function Get-ResumeSelectionFromCheckpoint {
     if ($names.Count -eq 0) { return $null }
 
     $label = [string]$Checkpoint.selectionLabel
-    if ($label -match '^scenario (.+)$') {
-        return @{ Mode = "scenario"; Name = $Matches[1] }
-    }
-    if ($label -match '^tier ≤(\d+) \(flat\)$') {
-        return @{ Mode = "tier"; Tier = [int]$Matches[1]; Flat = $true }
-    }
-    if ($label -match '^tier ≤(\d+) \(progression\)$') {
-        return @{ Mode = "tier"; Tier = [int]$Matches[1] }
-    }
-    if ($label -eq "all scenarios (flat)") {
-        return @{ Mode = "all"; Flat = $true }
-    }
-    if ($label -eq "all scenarios (progression)") {
-        return @{ Mode = "all" }
+    $language = $null
+    if ($label -match '^language ([^,]+), (.+)$') {
+        $language = $Matches[1]
+        $label = $Matches[2]
     }
 
-    return $null
+    $selection = $null
+    if ($label -match '^scenario (.+)$') {
+        $selection = @{ Mode = "scenario"; Name = $Matches[1] }
+    }
+    elseif ($label -match '^tier ≤(\d+) \(flat\)$') {
+        $selection = @{ Mode = "tier"; Tier = [int]$Matches[1]; Flat = $true }
+    }
+    elseif ($label -match '^tier ≤(\d+) \(progression\)$') {
+        $selection = @{ Mode = "tier"; Tier = [int]$Matches[1] }
+    }
+    elseif ($label -eq "all scenarios (flat)") {
+        $selection = @{ Mode = "all"; Flat = $true }
+    }
+    elseif ($label -eq "all scenarios (progression)") {
+        $selection = @{ Mode = "all" }
+    }
+
+    if ($selection -and $language) {
+        $selection.Language = $language
+    }
+    return $selection
 }
 
 Test-NodeReady
@@ -244,6 +311,13 @@ if ($Resume) {
     exit $LASTEXITCODE
 }
 
+if ($Language) {
+    $selection = @{ Mode = "language"; Language = (Convert-BenchLanguage $Language) }
+    $benchArgs = Build-BenchArgs -Selection $selection
+    Invoke-DevBench -BenchArgs $benchArgs
+    exit $LASTEXITCODE
+}
+
 while ($true) {
     $checkpoint = Get-BenchCheckpoint
     $resumeHint = ""
@@ -260,22 +334,23 @@ while ($true) {
     Write-Host "  2) Run all scenarios (flat, no tier pauses)"
     Write-Host "  3) Run by tier"
     Write-Host "  4) Run by scenario"
+    Write-Host "  5) Run by language"
     if ($checkpoint) {
-        Write-Host "  5) Resume interrupted run$resumeHint" -ForegroundColor Cyan
-        Write-Host "  6) Reset saved progress"
+        Write-Host "  6) Resume interrupted run$resumeHint" -ForegroundColor Cyan
+        Write-Host "  7) Reset saved progress"
     }
     Write-Host "  0) Exit"
     Write-Host ""
 
-    $validMain = @("0", "1", "2", "3", "4")
-    if ($checkpoint) { $validMain += @("5", "6") }
+    $validMain = @("0", "1", "2", "3", "4", "5")
+    if ($checkpoint) { $validMain += @("6", "7") }
     $main = Read-MenuChoice -Prompt "Choice" -ValidChoices $validMain
 
     if ($main -eq "0") {
         exit 0
     }
 
-    if ($main -eq "6") {
+    if ($main -eq "7") {
         Reset-BenchCheckpoint
         Write-Host "Bench checkpoint cleared." -ForegroundColor Green
         continue
@@ -284,10 +359,10 @@ while ($true) {
     $selection = $null
     $useResume = $false
 
-    if ($main -eq "5") {
+    if ($main -eq "6") {
         $selection = Get-ResumeSelectionFromCheckpoint -Checkpoint $checkpoint
         if (-not $selection) {
-            Write-Host "Could not reconstruct the interrupted run. Use option 6 to reset." -ForegroundColor Yellow
+            Write-Host "Could not reconstruct the interrupted run. Use option 7 to reset." -ForegroundColor Yellow
             continue
         }
         $useResume = $true
@@ -298,6 +373,7 @@ while ($true) {
             "2" { $selection = @{ Mode = "all" }; $Flat = $true }
             "3" { $selection = Show-TierMenu -Tiers $tiers }
             "4" { $selection = Show-ScenarioMenu -Scenarios $scenarios }
+            "5" { $selection = Show-LanguageMenu }
         }
     }
 

@@ -7,6 +7,7 @@
  *   node evals/dev-bench.mjs --tier 3          # auto-loads bench.config.json if present
  *   node evals/dev-bench.mjs --flat              # all scenarios, no tier pauses
  *   node evals/dev-bench.mjs --scenario greet-module --keep-workspace
+ *   node evals/dev-bench.mjs --language csharp --flat
  *   node evals/dev-bench.mjs --list-scenarios
  *   node evals/dev-bench.mjs --skip-judge
  *   node evals/dev-bench.mjs --resume          # continue after an interrupted run

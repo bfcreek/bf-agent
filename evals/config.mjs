@@ -36,6 +36,36 @@ export const CWD_CONFIG_NAME = "bench.config.json";
 import { defaultGatesConfig } from "./gates.mjs";
 import { DEFAULT_CHECKPOINT_REL } from "./checkpoint.mjs";
 
+const LANGUAGE_ALIASES = {
+  js: "js",
+  javascript: "js",
+  python: "python",
+  py: "python",
+  csharp: "csharp",
+  cs: "csharp",
+  "c#": "csharp",
+};
+
+/**
+ * @param {string|string[]|null|undefined} raw
+ * @returns {string[]|null}
+ */
+export function parseLanguageFilter(raw) {
+  if (raw == null || raw === "") return null;
+  const values = Array.isArray(raw) ? raw : String(raw).split(",");
+  const out = [];
+  for (const value of values) {
+    const key = String(value).trim().toLowerCase();
+    if (!key) continue;
+    const normalized = LANGUAGE_ALIASES[key];
+    if (!normalized) {
+      throw new Error(`Unknown language '${value}'. Use js, python, or csharp.`);
+    }
+    if (!out.includes(normalized)) out.push(normalized);
+  }
+  return out.length ? out : null;
+}
+
 /** @returns {BenchConfig} */
 export function defaultConfig() {
   return {
@@ -152,6 +182,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     timeoutSeconds: null,
     scenarioFilter: null,
     scenarioList: null,
+    languageFilter: null,
     maxTier: null,
     minTier: null,
     progression: null,
@@ -195,6 +226,10 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
       const raw = argv[++i];
       if (!raw) throw new Error("--scenarios requires a comma-separated list of names.");
       cli.scenarioList = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    } else if (arg === "--language" || arg === "--lang") {
+      const raw = argv[++i];
+      if (!raw) throw new Error("--language requires js, python, and/or csharp.");
+      cli.languageFilter = parseLanguageFilter(raw);
     } else if (arg === "--list-scenarios") {
       // handled in dev-bench.mjs before loadBenchOptions
     } else if (arg === "--tier") cli.maxTier = Number.parseInt(argv[++i], 10);
@@ -243,6 +278,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     timeoutSeconds: cli.timeoutSeconds ?? fileConfig.timeoutSeconds,
     scenarioFilter: cli.scenarioFilter ?? fileConfig.scenario ?? null,
     scenarioList: cli.scenarioList ?? fileConfig.scenarios,
+    languageFilter: cli.languageFilter ?? parseLanguageFilter(fileConfig.language) ?? null,
     maxTier: cli.maxTier ?? fileConfig.progression.maxTier,
     minTier: cli.minTier ?? null,
     progression: progressionEnabled,
