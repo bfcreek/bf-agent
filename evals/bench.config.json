@@ -1,5 +1,5 @@
 {
-  "models": ["qwen3:14b"],
+  "models": ["gpt-oss:20b-cloud"],
   "baseUrl": "http://127.0.0.1:11434",
   "maxSteps": 15,
   "timeoutSeconds": 240,

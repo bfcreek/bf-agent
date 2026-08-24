@@ -16,6 +16,8 @@
  * @property {boolean} [skipJudge] Skip LLM judge (tier 0 defaults to true).
  * @property {number} [maxSteps]
  * @property {number} [timeoutSeconds]
+ * @property {"python"|"csharp"} [language] Non-JS language coverage.
+ * @property {"python"|"dotnet"} [requires] Skip when this runtime is missing (unless explicitly selected).
  */
 
 import { spawnSync } from "node:child_process";
@@ -39,6 +41,114 @@ function commandOutput(run) {
 
 function runNode(cwd, script) {
   return spawnSync(process.execPath, [script], { cwd, encoding: "utf8" });
+}
+
+const PYTHON_CANDIDATES = process.platform === "win32" ? ["python", "py", "python3"] : ["python3", "python"];
+const runtimeOkCache = new Map();
+
+function spawnCommand(command, args, cwd, timeout = 30_000) {
+  return spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    timeout,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      DOTNET_NOLOGO: "1",
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+      PYTHONDONTWRITEBYTECODE: "1",
+    },
+  });
+}
+
+function missingRuntime(name) {
+  return { status: 127, stdout: "", stderr: `${name} not found on PATH`, error: new Error(`${name} not found on PATH`) };
+}
+
+let resolvedPythonBin;
+
+function resolvePythonBin() {
+  if (resolvedPythonBin !== undefined) return resolvedPythonBin;
+  for (const bin of PYTHON_CANDIDATES) {
+    const probe = spawnCommand(bin, ["--version"], process.cwd(), 8_000);
+    if (!probe.error && probe.status === 0) {
+      resolvedPythonBin = bin;
+      return bin;
+    }
+  }
+  resolvedPythonBin = null;
+  return null;
+}
+
+function runPython(cwd, script, args = []) {
+  const bin = resolvePythonBin();
+  if (!bin) return missingRuntime("python");
+  return spawnCommand(bin, [script, ...args], cwd, 30_000);
+}
+
+function runDotnet(cwd, args = ["run", "--nologo", "-v", "q"]) {
+  return spawnCommand("dotnet", args, cwd, 120_000);
+}
+
+/**
+ * @param {"python"|"dotnet"} name
+ * @returns {boolean}
+ */
+export function runtimeAvailable(name) {
+  if (runtimeOkCache.has(name)) return runtimeOkCache.get(name);
+  let ok = false;
+  if (name === "python") ok = resolvePythonBin() != null;
+  else if (name === "dotnet") {
+    const probe = spawnCommand("dotnet", ["--version"], process.cwd(), 8_000);
+    ok = !probe.error && probe.status === 0;
+  }
+  runtimeOkCache.set(name, ok);
+  return ok;
+}
+
+/**
+ * Drop language scenarios whose runtime is missing, unless the user named them.
+ * @param {BenchScenario[]} scenarios
+ * @param {{ explicit?: boolean, isAvailable?: (name: "python"|"dotnet") => boolean }} [options]
+ */
+export function filterAvailableScenarios(scenarios, options = {}) {
+  if (options.explicit) return scenarios;
+  const isAvailable = options.isAvailable ?? runtimeAvailable;
+  return scenarios.filter((s) => !s.requires || isAvailable(s.requires));
+}
+
+function csharpProjectXml() {
+  return [
+    '<Project Sdk="Microsoft.NET.Sdk">',
+    "  <PropertyGroup>",
+    "    <OutputType>Exe</OutputType>",
+    "    <TargetFramework>net8.0</TargetFramework>",
+    "    <ImplicitUsings>enable</ImplicitUsings>",
+    "    <Nullable>enable</Nullable>",
+    "    <RollForward>LatestMajor</RollForward>",
+    "  </PropertyGroup>",
+    "</Project>",
+    "",
+  ].join("\n");
+}
+
+async function writeCsharpProject(dir) {
+  await writeFile(path.join(dir, "App.csproj"), csharpProjectXml(), "utf8");
+}
+
+function extractJsonArray(text) {
+  const start = String(text).indexOf("[");
+  const end = String(text).lastIndexOf("]");
+  if (start < 0 || end <= start) throw new Error("no JSON array in output");
+  return JSON.parse(String(text).slice(start, end + 1));
+}
+
+function pythonMissing() {
+  return resolvePythonBin() ? null : fail("python not found on PATH");
+}
+
+function dotnetMissing() {
+  return runtimeAvailable("dotnet") ? null : fail("dotnet not found on PATH");
 }
 
 /** @type {BenchScenario[]} */
@@ -250,6 +360,109 @@ export const SCENARIOS = [
     integrity: { readOnly: true },
   },
   {
+    name: "py-greet",
+    tier: 1,
+    language: "python",
+    requires: "python",
+    goal: [
+      "Create greet.py that defines greet(name) returning the string Hello, {name}! (exact format).",
+      "Create test.py that imports greet, asserts greet('World') == 'Hello, World!', and prints ok.",
+      "Run test.py with python and confirm it passes.",
+    ].join(" "),
+    rubric: [
+      "greet.py defines greet with the exact format Hello, {name}!.",
+      "test.py imports greet, asserts correctly, and was run successfully.",
+      "No unnecessary extra files. Code is minimal and correct.",
+    ].join("\n"),
+    async setup() {},
+    async precheck(dir) {
+      const missing = pythonMissing();
+      if (missing) return missing;
+      const run = runPython(dir, "test.py");
+      return run.status === 0 ? ok() : fail(`python test.py failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+  },
+  {
+    name: "py-find-export",
+    tier: 1,
+    language: "python",
+    goal: "Which file defines the function compute_tax? Reply with the path relative to the workspace root only.",
+    rubric: [
+      "Answer identifies lib/tax.py (forward or backslash path accepted).",
+      "Agent used search tools rather than guessing.",
+      "No files modified.",
+    ].join("\n"),
+    async setup(dir) {
+      await mkdir(path.join(dir, "lib"), { recursive: true });
+      await writeFile(path.join(dir, "app.py"), "from lib.tax import compute_tax\n");
+      await writeFile(path.join(dir, "lib", "tax.py"), "def compute_tax(n):\n    return n * 0.2\n");
+      await writeFile(path.join(dir, "lib", "util.py"), "def noop():\n    return None\n");
+    },
+    async precheck(_dir, result) {
+      const text = agentAnswerText(result).replaceAll("\\", "/");
+      return text.includes("lib/tax.py") ? ok() : fail("expected lib/tax.py in answer");
+    },
+    integrity: { readOnly: true },
+  },
+  {
+    name: "cs-greet",
+    tier: 1,
+    language: "csharp",
+    requires: "dotnet",
+    timeoutSeconds: 240,
+    goal: [
+      "This workspace has a .NET console project (App.csproj).",
+      "Add a Greet(name) helper that returns Hello, {name}! (exact format).",
+      "Program.cs should assert Greet(\"World\") equals Hello, World! and print ok; exit non-zero on failure.",
+      "Run `dotnet run` and confirm it passes.",
+    ].join(" "),
+    rubric: [
+      "Greet returns the exact format Hello, {name}!.",
+      "Program.cs asserts the World case and prints ok.",
+      "dotnet run exits 0.",
+    ].join("\n"),
+    async setup(dir) {
+      await writeCsharpProject(dir);
+    },
+    async precheck(dir) {
+      const missing = dotnetMissing();
+      if (missing) return missing;
+      const run = runDotnet(dir);
+      return run.status === 0 ? ok() : fail(`dotnet run failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+  },
+  {
+    name: "cs-find-export",
+    tier: 1,
+    language: "csharp",
+    goal: "Which file defines the method ComputeTax? Reply with the path relative to the workspace root only.",
+    rubric: [
+      "Answer identifies Lib/Tax.cs (forward or backslash path accepted).",
+      "Agent used search tools rather than guessing.",
+      "No files modified.",
+    ].join("\n"),
+    async setup(dir) {
+      await mkdir(path.join(dir, "Lib"), { recursive: true });
+      await writeFile(
+        path.join(dir, "Program.cs"),
+        "using static Lib.Tax;\nConsole.WriteLine(ComputeTax(10));\n",
+      );
+      await writeFile(
+        path.join(dir, "Lib", "Tax.cs"),
+        "namespace Lib;\npublic static class Tax {\n  public static double ComputeTax(double n) => n * 0.2;\n}\n",
+      );
+      await writeFile(
+        path.join(dir, "Lib", "Util.cs"),
+        "namespace Lib;\npublic static class Util {\n  public static void Noop() {}\n}\n",
+      );
+    },
+    async precheck(_dir, result) {
+      const text = agentAnswerText(result).replaceAll("\\", "/");
+      return /lib\/tax\.cs/i.test(text) ? ok() : fail("expected Lib/Tax.cs in answer");
+    },
+    integrity: { readOnly: true },
+  },
+  {
     name: "fix-failing-tests",
     tier: 2,
     goal: [
@@ -388,6 +601,91 @@ export const SCENARIOS = [
     integrity: { readOnly: true },
   },
   {
+    name: "py-fix-tests",
+    tier: 2,
+    language: "python",
+    requires: "python",
+    goal: [
+      "Run python test.py — it fails because of bugs in mathops.py.",
+      "Fix the bugs so all tests pass, then run python test.py again to confirm.",
+      "Do not change test.py.",
+    ].join(" "),
+    rubric: [
+      "python test.py passes after fixes.",
+      "Only the buggy logic in mathops.py was fixed; test.py is unchanged.",
+      "Agent ran tests before and after fixing.",
+    ].join("\n"),
+    async setup(dir) {
+      await writeFile(
+        path.join(dir, "mathops.py"),
+        ["def add(a, b):", "    return a - b", "", "def mul(a, b):", "    return a + b", ""].join("\n"),
+      );
+      await writeFile(
+        path.join(dir, "test.py"),
+        [
+          "from mathops import add, mul",
+          "assert add(2, 3) == 5",
+          "assert mul(3, 4) == 12",
+          "print('ok')",
+          "",
+        ].join("\n"),
+      );
+    },
+    async precheck(dir) {
+      const missing = pythonMissing();
+      if (missing) return missing;
+      const run = runPython(dir, "test.py");
+      return run.status === 0 ? ok() : fail(`python test.py failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+    integrity: { allowChanged: ["mathops.py"] },
+  },
+  {
+    name: "cs-fix-tests",
+    tier: 2,
+    language: "csharp",
+    requires: "dotnet",
+    timeoutSeconds: 240,
+    goal: [
+      "Run `dotnet run` — it fails because of bugs in MathOps.cs.",
+      "Fix the bugs so the program prints ok and exits 0.",
+      "Do not change Program.cs. Run `dotnet run` again to confirm.",
+    ].join(" "),
+    rubric: [
+      "dotnet run exits 0 and prints ok.",
+      "Only MathOps.cs was fixed; Program.cs is unchanged.",
+      "Agent ran the project before and after fixing.",
+    ].join("\n"),
+    async setup(dir) {
+      await writeCsharpProject(dir);
+      await writeFile(
+        path.join(dir, "MathOps.cs"),
+        [
+          "public static class MathOps {",
+          "  public static int Add(int a, int b) => a - b;",
+          "  public static int Mul(int a, int b) => a + b;",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      await writeFile(
+        path.join(dir, "Program.cs"),
+        [
+          "if (MathOps.Add(2, 3) != 5) { Console.Error.WriteLine(\"add failed\"); Environment.Exit(1); }",
+          "if (MathOps.Mul(3, 4) != 12) { Console.Error.WriteLine(\"mul failed\"); Environment.Exit(1); }",
+          "Console.WriteLine(\"ok\");",
+          "",
+        ].join("\n"),
+      );
+    },
+    async precheck(dir) {
+      const missing = dotnetMissing();
+      if (missing) return missing;
+      const run = runDotnet(dir);
+      return run.status === 0 ? ok() : fail(`dotnet run failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+    integrity: { allowChanged: ["MathOps.cs"] },
+  },
+  {
     name: "todo-cli",
     tier: 3,
     goal: [
@@ -461,6 +759,99 @@ export const SCENARIOS = [
     async precheck(dir) {
       const run = runNode(dir, "test.mjs");
       return run.status === 0 ? ok() : fail(`tests fail: ${commandOutput(run).slice(0, 300)}`);
+    },
+  },
+  {
+    name: "py-json-filter",
+    tier: 3,
+    language: "python",
+    requires: "python",
+    goal: [
+      "data/users.json contains an array of user objects with id, name, active.",
+      "Create filter.py: `python filter.py data/users.json --active` prints only active users as a JSON array to stdout.",
+      "Add test.py that passes with python test.py.",
+    ].join(" "),
+    rubric: [
+      "filter.py reads the JSON file and filters active users.",
+      "Output is a valid JSON array of Ada and Cy (not Bob).",
+      "test.py exists and passes.",
+    ].join("\n"),
+    async setup(dir) {
+      await mkdir(path.join(dir, "data"), { recursive: true });
+      await writeFile(
+        path.join(dir, "data", "users.json"),
+        JSON.stringify(
+          [
+            { id: 1, name: "Ada", active: true },
+            { id: 2, name: "Bob", active: false },
+            { id: 3, name: "Cy", active: true },
+          ],
+          null,
+          2,
+        ) + "\n",
+      );
+    },
+    async precheck(dir) {
+      const missing = pythonMissing();
+      if (missing) return missing;
+      const tests = runPython(dir, "test.py");
+      if (tests.status !== 0) return fail(`python test.py failed: ${commandOutput(tests).slice(0, 300)}`);
+      const run = runPython(dir, "filter.py", ["data/users.json", "--active"]);
+      if (run.status !== 0) return fail(`filter.py failed: ${commandOutput(run).slice(0, 300)}`);
+      try {
+        const users = extractJsonArray(run.stdout);
+        const names = users.map((u) => u.name).sort().join(",");
+        return names === "Ada,Cy" ? ok() : fail(`expected Ada,Cy got ${names}`);
+      } catch (err) {
+        return fail(err.message);
+      }
+    },
+  },
+  {
+    name: "cs-json-filter",
+    tier: 3,
+    language: "csharp",
+    requires: "dotnet",
+    timeoutSeconds: 300,
+    goal: [
+      "data/users.json contains an array of user objects with id, name, active.",
+      "This workspace has App.csproj.",
+      "Make `dotnet run -- data/users.json --active` print only active users as a JSON array to stdout.",
+      "Do not add NuGet packages — use only the .NET base class library.",
+    ].join(" "),
+    rubric: [
+      "dotnet run -- data/users.json --active prints a JSON array of Ada and Cy (not Bob).",
+      "No extra NuGet packages.",
+      "Code is a small console app.",
+    ].join("\n"),
+    async setup(dir) {
+      await writeCsharpProject(dir);
+      await mkdir(path.join(dir, "data"), { recursive: true });
+      await writeFile(
+        path.join(dir, "data", "users.json"),
+        JSON.stringify(
+          [
+            { id: 1, name: "Ada", active: true },
+            { id: 2, name: "Bob", active: false },
+            { id: 3, name: "Cy", active: true },
+          ],
+          null,
+          2,
+        ) + "\n",
+      );
+    },
+    async precheck(dir) {
+      const missing = dotnetMissing();
+      if (missing) return missing;
+      const run = runDotnet(dir, ["run", "--nologo", "-v", "q", "--", "data/users.json", "--active"]);
+      if (run.status !== 0) return fail(`dotnet run failed: ${commandOutput(run).slice(0, 300)}`);
+      try {
+        const users = extractJsonArray(run.stdout);
+        const names = users.map((u) => u.name).sort().join(",");
+        return names === "Ada,Cy" ? ok() : fail(`expected Ada,Cy got ${names}`);
+      } catch (err) {
+        return fail(err.message);
+      }
     },
   },
   {
@@ -580,6 +971,102 @@ export const SCENARIOS = [
       const run = runNode(dir, "test.mjs");
       return run.status === 0 ? ok() : fail(`tests fail: ${commandOutput(run).slice(0, 300)}`);
     },
+  },
+  {
+    name: "py-refactor",
+    tier: 4,
+    language: "python",
+    requires: "python",
+    maxSteps: 16,
+    goal: [
+      "a.py and b.py duplicate the same slugify helper.",
+      "Extract shared slugify into slugify.py, update imports, keep behavior identical.",
+      "Do not change test.py. Run python test.py until it passes.",
+    ].join(" "),
+    rubric: [
+      "slugify.py holds the shared helper.",
+      "a.py and b.py import it; duplication removed.",
+      "test.py unchanged and passing.",
+      "slugify behavior preserved (lowercase, spaces to hyphens).",
+    ].join("\n"),
+    async setup(dir) {
+      const slug = [
+        "def slugify(text):",
+        "    return '-'.join(str(text).strip().lower().split())",
+        "",
+      ].join("\n");
+      await writeFile(path.join(dir, "a.py"), `${slug}def label():\n    return slugify('Hello World')\n`);
+      await writeFile(path.join(dir, "b.py"), `${slug}def key():\n    return slugify('Foo Bar')\n`);
+      await writeFile(
+        path.join(dir, "test.py"),
+        [
+          "from a import label",
+          "from b import key",
+          "assert label() == 'hello-world'",
+          "assert key() == 'foo-bar'",
+          "print('ok')",
+          "",
+        ].join("\n"),
+      );
+    },
+    async precheck(dir) {
+      const missing = pythonMissing();
+      if (missing) return missing;
+      const run = runPython(dir, "test.py");
+      return run.status === 0 ? ok() : fail(`python test.py failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+    integrity: { allowChanged: ["a.py", "b.py"], allowAdded: ["slugify.py"] },
+  },
+  {
+    name: "cs-refactor",
+    tier: 4,
+    language: "csharp",
+    requires: "dotnet",
+    maxSteps: 16,
+    timeoutSeconds: 300,
+    goal: [
+      "A.cs and B.cs duplicate the same Slugify helper.",
+      "Extract shared Slugify into Slugify.cs, update both files, keep behavior identical.",
+      "Do not change Program.cs. Run `dotnet run` until it prints ok and exits 0.",
+    ].join(" "),
+    rubric: [
+      "Slugify.cs holds the shared helper.",
+      "A.cs and B.cs use it; duplication removed.",
+      "Program.cs unchanged and `dotnet run` passes.",
+      "Slugify behavior preserved (lowercase, spaces to hyphens).",
+    ].join("\n"),
+    async setup(dir) {
+      await writeCsharpProject(dir);
+      const slug = [
+        "  public static string Slugify(string text) {",
+        "    return string.Join(\"-\", text.Trim().ToLowerInvariant().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));",
+        "  }",
+      ].join("\n");
+      await writeFile(
+        path.join(dir, "A.cs"),
+        `public static class A {\n${slug}\n  public static string Label() => Slugify(\"Hello World\");\n}\n`,
+      );
+      await writeFile(
+        path.join(dir, "B.cs"),
+        `public static class B {\n${slug}\n  public static string Key() => Slugify(\"Foo Bar\");\n}\n`,
+      );
+      await writeFile(
+        path.join(dir, "Program.cs"),
+        [
+          "if (A.Label() != \"hello-world\") { Console.Error.WriteLine(\"label failed\"); Environment.Exit(1); }",
+          "if (B.Key() != \"foo-bar\") { Console.Error.WriteLine(\"key failed\"); Environment.Exit(1); }",
+          "Console.WriteLine(\"ok\");",
+          "",
+        ].join("\n"),
+      );
+    },
+    async precheck(dir) {
+      const missing = dotnetMissing();
+      if (missing) return missing;
+      const run = runDotnet(dir);
+      return run.status === 0 ? ok() : fail(`dotnet run failed: ${commandOutput(run).slice(0, 300)}`);
+    },
+    integrity: { allowChanged: ["A.cs", "B.cs"], allowAdded: ["Slugify.cs"] },
   },
   {
     name: "csv-summary",

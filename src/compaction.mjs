@@ -14,7 +14,10 @@ const SUMMARIZER_PROMPT = [
   "You compress agent conversation history. Summarize the transcript into a",
   "compact brief the model can use to continue the task: the user's goal,",
   "key facts and file paths discovered, actions taken and their outcomes,",
-  "and any unresolved steps. Reply with only the summary.",
+  "and any unresolved steps. Prioritize task-checklist results — files",
+  "created or edited, assertions made, verification commands with their exit",
+  "codes — over incidental failed tool experiments, which should be reduced",
+  "to at most a one-line note. Reply with only the summary.",
 ].join(" ");
 
 /** Rough size proxy — characters, since we have no tokenizer. */

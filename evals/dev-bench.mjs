@@ -42,7 +42,7 @@ import {
 import { captureIntegritySnapshot, checkScenarioIntegrity } from "./integrity.mjs";
 import { judgeRun } from "./judge.mjs";
 import { buildAssessmentReport, formatReportConsole, formatReportMarkdown } from "./report.mjs";
-import { SCENARIOS, agentAnswerText, selectScenarios } from "./scenarios.mjs";
+import { SCENARIOS, agentAnswerText, filterAvailableScenarios, selectScenarios } from "./scenarios.mjs";
 import { removeWorkspaceDir } from "./workspace-cleanup.mjs";
 
 const PACKAGE_VERSION = JSON.parse(
@@ -386,7 +386,9 @@ function listScenarios() {
   console.error("Available scenarios:");
   for (const scenario of SCENARIOS) {
     const tag = scenario.tier === 0 ? "safety" : `tier ${scenario.tier}`;
-    console.error(`  ${scenario.name}  (${tag})`);
+    const lang = scenario.language ? `, ${scenario.language}` : "";
+    const need = scenario.requires ? `, needs ${scenario.requires}` : "";
+    console.error(`  ${scenario.name}  (${tag}${lang}${need})`);
   }
 }
 
@@ -440,7 +442,15 @@ async function main() {
     return;
   }
 
-  const scenarios = selectScenarios(options);
+  const selected = selectScenarios(options);
+  const explicitSelection = Boolean(options.scenarioFilter) || Boolean(options.scenarioList?.length);
+  const scenarios = filterAvailableScenarios(selected, { explicit: explicitSelection });
+  if (scenarios.length < selected.length) {
+    const skipped = selected.filter((s) => !scenarios.includes(s));
+    console.error(
+      `Skipping (missing runtime): ${skipped.map((s) => `${s.name} [${s.requires}]`).join(", ")}`,
+    );
+  }
   if (scenarios.length === 0) {
     console.error(`No scenarios matched. Names: ${SCENARIOS.map((s) => s.name).join(", ")}`);
     process.exit(1);

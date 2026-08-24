@@ -17,7 +17,7 @@ const TASK_HINT_RULES = [
     id: "test-fix",
     test: /\b(failing tests?|tests?\s+fail|\bit fails?\b|fix.{0,60}\btests?\b|(?:test|spec|suite).{0,40}\b(fail|fails|broken|error)\b)\b/i,
     constraint:
-      "Mandatory first step: run_command the failing test (e.g. node test.mjs) and record exit code/output before any edit_file or write_file. After the last fix, run the same command again. Checklist: reproduce → diagnose → fix → verify.",
+      "Mandatory first step: run_command the failing test (e.g. node test.mjs, python test.py, or dotnet run) and record exit code/output before any edit_file or write_file. After the last fix, run the same command again. Checklist: reproduce → diagnose → fix → verify.",
   },
   {
     id: "debug",
@@ -47,9 +47,9 @@ const TASK_HINT_RULES = [
   {
     id: "test-verify",
     test:
-      /\b(run|confirm).{0,50}\b(test\.mjs|tests?)\b.{0,30}\b(pass|succeed|ok)\b|\btest\.mjs\b.{0,40}\b(run|pass|confirm)\b/i,
+      /\b(run|confirm).{0,50}\b(test\.mjs|test\.py|tests?|dotnet\s+run)\b.{0,40}\b(pass|succeed|ok)\b|\b(test\.mjs|test\.py|dotnet\s+run)\b.{0,40}\b(run|pass|confirm)\b/i,
     constraint:
-      "Run the test script with run_command (e.g. node test.mjs) as your last tool step, then state the pass/fail output in your final answer. Do not claim success if the exit code is non-zero.",
+      "Run the test/verify command with run_command (e.g. node test.mjs, python test.py, or dotnet run) as your last tool step, then state the pass/fail output in your final answer. Do not claim success if the exit code is non-zero. Once it passes (exit 0), finish immediately — no further exploratory commands.",
   },
   {
     id: "cli-module",
@@ -123,8 +123,10 @@ const COMPLEX_GOAL_PATTERNS = [
 export const PLANNING_USER_MESSAGE = [
   "Before using any tools, write a short numbered plan (3–6 steps) for the task above.",
   "Name the specific tools you will use (read_file, grep_search, run_command, etc.).",
+  "Before the first edit, plan to read the target file and any existing tests that define the expected interface (flag names, signatures, output format).",
   "For fix/debug tasks use: reproduce (run failing command) → diagnose → fix all related sites in one change → verify.",
   "For create/CLI/server tasks include a final verify step that runs every named command and the tests; do not plan to claim success without that run.",
+  "End the plan at that verify step — once it passes, give the final answer with no extra exploratory commands.",
   "Do not call tools yet — reply with only the plan.",
 ].join(" ");
 
@@ -154,7 +156,7 @@ export const TOOL_NUDGE_EMPTY_ANSWER = [
 
 export const TOOL_NUDGE_VERIFY = [
   "Do not finish yet — run the verification command(s) the task requires with run_command",
-  "(e.g. node test.mjs and any named CLI invocation) and only claim success if the exit code is 0.",
+  "(e.g. node test.mjs, python test.py, or dotnet run, plus any named CLI invocation) and only claim success if the exit code is 0.",
 ].join(" ");
 
 export const TOOL_NUDGE_PRETEST = [
@@ -167,7 +169,7 @@ export const MUTATION_BLOCKED_PRETEST =
 
 const ACTION_GOAL =
   /\b(create|write|build|fix|edit|change|update|implement|modify|extract|refactor|rename|move|persist|include)\b/i;
-const RUN_TEST_GOAL = /\b(run|test)\b.{0,40}\b(node|npm|test|spec|\.mjs|\.js|\.ts)\b/i;
+const RUN_TEST_GOAL = /\b(run|test)\b.{0,40}\b(node|npm|python|py|dotnet|test|spec|\.mjs|\.js|\.ts|\.py|\.cs)\b/i;
 const ADD_FEATURE_GOAL = /\badd\b.{0,40}\b(cli|flag|route|feature|function|file|module|test|support)\b/i;
 const READ_GOAL =
   /\b(read|open)\b.{0,40}\b(\.md|\.json|\.env|readme|config)\b/i;
@@ -275,7 +277,7 @@ export function hasSuccessfulTestRun(calls) {
   return calls.some((c) => {
     if (c.name !== "run_command" || !c.ok) return false;
     const cmd = runCommandText(c);
-    if (!/\b(test\.mjs|npm\s+test|node\s+--test)\b/i.test(cmd) && !/\btest\b/i.test(cmd)) {
+    if (!/\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+(?:run|test)|pytest)\b/i.test(cmd) && !/\btest\b/i.test(cmd)) {
       return false;
     }
     const result = c.result;
@@ -312,11 +314,18 @@ export function mutatedBeforeTestRun(calls) {
 export function extractNamedNodeCommands(goal) {
   const text = String(goal ?? "");
   const found = [];
-  const re = /\bnode\s+[\w./-]+(?:\s+[\w./=-]+)*/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const cmd = m[0].replace(/\s+/g, " ").trim();
-    if (!found.includes(cmd)) found.push(cmd);
+  const patterns = [
+    /\bnode\s+[\w./-]+(?:\s+[\w./=-]+)*/gi,
+    /\bpython3?\s+[\w./-]+(?:\s+[\w./=-]+)*/gi,
+    /\bpy\s+[\w./-]+(?:\s+[\w./=-]+)*/gi,
+    /\bdotnet\s+(?:run|test)(?:\s+[\w./=-]+)*/gi,
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(text))) {
+      const cmd = m[0].replace(/\s+/g, " ").trim();
+      if (!found.includes(cmd)) found.push(cmd);
+    }
   }
   return found;
 }
@@ -328,7 +337,7 @@ export function extractNamedNodeCommands(goal) {
 export function goalRequiresTestVerify(goal) {
   const hints = detectTaskHints(goal);
   if (hints.some((h) => h.id === "test-fix" || h.id === "test-verify")) return true;
-  return /\brun\b.{0,40}\b(test\.mjs|tests?)\b/i.test(String(goal ?? ""));
+  return /\brun\b.{0,50}\b(test\.mjs|test\.py|tests?|dotnet\s+run)\b/i.test(String(goal ?? ""));
 }
 
 /**
@@ -412,13 +421,13 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
   }
 
   // Named node commands in the goal should appear in a successful run_command.
-  const named = extractNamedNodeCommands(goal).filter((c) => !/\btest\.mjs\b/i.test(c));
+  const named = extractNamedNodeCommands(goal).filter((c) => !/\btest\.(mjs|py)\b/i.test(c));
   if (named.length > 0 && claimsSuccess) {
     const missing = named.filter((cmd) => {
       const needle = cmd.toLowerCase();
       return !calls.some((c) => {
         if (c.name !== "run_command" || !c.ok) return false;
-        return runCommandText(c).toLowerCase().includes(needle.replace(/^node\s+/, ""));
+        return runCommandText(c).toLowerCase().includes(needle.replace(/^(node|python3?|py)\s+/, ""));
       });
     });
     // Only nudge when a non-test CLI was named and never run (e.g. filter.mjs --active).

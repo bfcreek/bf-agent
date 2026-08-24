@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -27,7 +27,7 @@ import {
   persistAgentArtifacts,
 } from "../evals/agent-artifacts.mjs";
 import { buildAssessmentReport, formatReportConsole } from "../evals/report.mjs";
-import { SCENARIOS, agentAnswerText, selectScenarios } from "../evals/scenarios.mjs";
+import { SCENARIOS, agentAnswerText, filterAvailableScenarios, runtimeAvailable, selectScenarios } from "../evals/scenarios.mjs";
 import { captureWorkspaceSnapshot } from "../evals/workspace-snapshot.mjs";
 import { removeWorkspaceDir } from "../evals/workspace-cleanup.mjs";
 
@@ -399,6 +399,111 @@ test("tier 0 safety scenarios exist and skip judge", () => {
 test("scenarios are ordered by increasing tier", () => {
   for (let i = 1; i < SCENARIOS.length; i++) {
     assert.ok(SCENARIOS[i].tier >= SCENARIOS[i - 1].tier, `${SCENARIOS[i].name} tier order`);
+  }
+});
+
+test("python and csharp scenarios cover tiers 1-4", () => {
+  const python = SCENARIOS.filter((s) => s.language === "python");
+  const csharp = SCENARIOS.filter((s) => s.language === "csharp");
+  assert.deepEqual(
+    python.map((s) => `${s.tier}:${s.name}`),
+    ["1:py-greet", "1:py-find-export", "2:py-fix-tests", "3:py-json-filter", "4:py-refactor"],
+  );
+  assert.deepEqual(
+    csharp.map((s) => `${s.tier}:${s.name}`),
+    ["1:cs-greet", "1:cs-find-export", "2:cs-fix-tests", "3:cs-json-filter", "4:cs-refactor"],
+  );
+  for (const scenario of [...python, ...csharp]) {
+    assert.equal(typeof scenario.precheck, "function");
+    if (scenario.name.endsWith("find-export")) {
+      assert.equal(scenario.requires, undefined);
+    } else {
+      assert.ok(scenario.requires === "python" || scenario.requires === "dotnet");
+    }
+  }
+});
+
+test("filterAvailableScenarios drops missing runtimes unless explicitly selected", () => {
+  const none = filterAvailableScenarios(SCENARIOS, { isAvailable: () => false });
+  assert.equal(none.some((s) => s.requires), false);
+  assert.ok(none.some((s) => s.name === "greet-module"));
+
+  const explicit = filterAvailableScenarios(SCENARIOS, { explicit: true, isAvailable: () => false });
+  assert.ok(explicit.some((s) => s.name === "py-greet"));
+  assert.ok(explicit.some((s) => s.name === "cs-greet"));
+});
+
+test("py-greet precheck passes a correct solution", async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "py-greet");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-py-greet-"));
+  try {
+    await scenario.setup(dir);
+    await writeFile(
+      path.join(dir, "greet.py"),
+      "def greet(name):\n    return f'Hello, {name}!'\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "test.py"),
+      "from greet import greet\nassert greet('World') == 'Hello, World!'\nprint('ok')\n",
+      "utf8",
+    );
+    const result = await scenario.precheck(dir, { text: "ok" });
+    if (!runtimeAvailable("python")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /python/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("cs-greet precheck passes a correct solution", { timeout: 120_000 }, async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "cs-greet");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-greet-"));
+  try {
+    await scenario.setup(dir);
+    await writeFile(
+      path.join(dir, "Program.cs"),
+      [
+        "string Greet(string name) => $\"Hello, {name}!\";",
+        "if (Greet(\"World\") != \"Hello, World!\") Environment.Exit(1);",
+        "Console.WriteLine(\"ok\");",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const result = await scenario.precheck(dir, { text: "ok" });
+    if (!runtimeAvailable("dotnet")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /dotnet/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("py-find-export and cs-find-export prechecks accept workspace-relative paths", async () => {
+  const py = SCENARIOS.find((s) => s.name === "py-find-export");
+  const cs = SCENARIOS.find((s) => s.name === "cs-find-export");
+  const pyDir = await mkdtemp(path.join(os.tmpdir(), "halo-py-find-"));
+  const csDir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-find-"));
+  try {
+    await py.setup(pyDir);
+    await cs.setup(csDir);
+    assert.equal((await py.precheck(pyDir, { text: "lib/tax.py" })).pass, true);
+    assert.equal((await py.precheck(pyDir, { text: "lib\\tax.py" })).pass, true);
+    assert.equal((await py.precheck(pyDir, { text: "nope.py" })).pass, false);
+    assert.equal((await cs.precheck(csDir, { text: "Lib/Tax.cs" })).pass, true);
+    assert.equal((await cs.precheck(csDir, { text: "lib\\tax.cs" })).pass, true);
+    assert.equal((await cs.precheck(csDir, { text: "Util.cs" })).pass, false);
+  } finally {
+    await rm(pyDir, { recursive: true, force: true });
+    await rm(csDir, { recursive: true, force: true });
   }
 });
 

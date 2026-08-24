@@ -17,6 +17,60 @@ const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 300;
 
 /**
+ * Interpreters and shells that open an interactive REPL when launched with
+ * no script or inline code. The tool runs commands with no TTY input, so a
+ * REPL can never receive input — it just hangs until the timeout.
+ */
+const REPL_COMMAND_NAMES = new Set([
+  "node",
+  "deno",
+  "bun",
+  "python",
+  "python3",
+  "py",
+  "ipython",
+  "irb",
+  "pry",
+  "ghci",
+  "lua",
+  "php",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+]);
+
+/** Flags that request an interactive session — never useful here. */
+const INTERACTIVE_ONLY_FLAGS = new Set(["-i", "--interactive"]);
+
+/**
+ * Detect command segments that would start an interactive REPL or shell:
+ * a bare interpreter (`node`, `python`, `bash`, …) with no script path,
+ * no inline code, and no other arguments (or only interactive flags).
+ * Such commands hang until the timeout, wasting an entire tool step.
+ *
+ * @param {string} command
+ * @returns {string|null} The offending segment, or null when none found.
+ */
+export function findInteractiveCommand(command) {
+  const segments = String(command ?? "").split(/(?:\|\||&&|[;|&\n(){}`]|\$\()/);
+  for (const raw of segments) {
+    const segment = raw.trim();
+    if (!segment) continue;
+    const base = commandBaseName(segment);
+    if (!base || !REPL_COMMAND_NAMES.has(base)) continue;
+    const args = segmentWords(segment).slice(1);
+    if (args.length === 0 || args.every((a) => INTERACTIVE_ONLY_FLAGS.has(a.toLowerCase()))) {
+      return segment;
+    }
+  }
+  return null;
+}
+
+/**
  * Command names (PowerShell and POSIX, incl. aliases) that delete files.
  * Compared against the first word of each shell segment, basename only.
  */
@@ -153,7 +207,9 @@ export function registerShellTools(registry, { workspaceRoot }) {
     requiresApproval: true,
     description:
       `Run a command through the system shell (${SHELL_NAME}; use ${IS_WINDOWS ? "PowerShell" : "POSIX sh"} syntax) ` +
-      "in the workspace directory and return its exit code, stdout, and stderr. " +
+      "in the workspace directory and return its status ('success' or 'FAILED with exit code N'), " +
+      "exit code, stdout, and stderr. Commands run with no input, so never launch a bare " +
+      "interpreter or shell (node, python, bash) without a script or inline code. " +
       `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s).`,
     parameters: {
       type: "object",
@@ -172,6 +228,16 @@ export function registerShellTools(registry, { workspaceRoot }) {
     },
     async execute({ command, cwd, timeout_seconds }) {
       if (!command || !command.trim()) throw new Error("command must not be empty.");
+      // A REPL can never succeed here (no TTY input), so this gate applies
+      // even when a human approved the call — it saves a guaranteed timeout.
+      const interactive = findInteractiveCommand(command);
+      if (interactive) {
+        throw new Error(
+          `'${interactive}' starts an interactive REPL/shell, which hangs until the timeout ` +
+            "because commands run with no input. Run a script file instead (e.g. node script.mjs, " +
+            'python script.py) or pass inline code (e.g. node -e "...", python -c "...").',
+        );
+      }
       // Deletion gate for unattended runs (in ask mode, reaching execute
       // means the human already approved this exact call). Deletes the user
       // explicitly asked for go ahead; contradictions and ambiguity are
@@ -247,7 +313,15 @@ function runCommand(command, { cwd, timeoutMs }) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // `status` leads the result so a failure cannot be mistaken for
+      // success just because the tool call itself succeeded (ok: true).
+      const status = timedOut
+        ? `TIMED OUT after ${Math.round(timeoutMs / 1000)}s and was killed — treat this as a failure; do not re-run the same command unchanged`
+        : code === 0
+          ? "success"
+          : `FAILED with exit code ${code}`;
       resolve({
+        status,
         exitCode: code,
         timedOut,
         stdout: truncateMiddle(stdout),

@@ -15,6 +15,7 @@ import {
   classifyDeleteCommand,
   extractDeleteTargets,
   findDeleteCommand,
+  findInteractiveCommand,
 } from "../src/tools/shell.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -216,6 +217,7 @@ test("run_command captures stdout and exit code", async () => {
     command: `node -e "console.log('hi from tool')"`,
   });
   assert.equal(run.ok, true);
+  assert.equal(run.result.status, "success");
   assert.equal(run.result.exitCode, 0);
   assert.equal(run.result.timedOut, false);
   assert.match(run.result.stdout, /hi from tool/);
@@ -226,6 +228,7 @@ test("run_command reports non-zero exit codes and stderr", async () => {
     command: `node -e "console.error('bad'); process.exit(3)"`,
   });
   assert.equal(run.ok, true);
+  assert.equal(run.result.status, "FAILED with exit code 3");
   assert.equal(run.result.exitCode, 3);
   assert.match(run.result.stderr, /bad/);
 });
@@ -247,12 +250,54 @@ test("run_command kills commands that exceed the timeout", async () => {
   });
   assert.equal(run.ok, true);
   assert.equal(run.result.timedOut, true);
+  assert.match(run.result.status, /TIMED OUT after 1s/);
+  assert.match(run.result.status, /treat this as a failure/);
 });
 
 test("run_command rejects a cwd outside the workspace", async () => {
   const run = await registry.execute("run_command", { command: "node -v", cwd: ".." });
   assert.equal(run.ok, false);
   assert.match(run.error, /outside the workspace/);
+});
+
+test("findInteractiveCommand flags bare interpreters and shells", () => {
+  for (const command of [
+    "node",
+    "python",
+    "python3",
+    "bash",
+    "pwsh",
+    "node -i",
+    "python --interactive",
+    "echo hi; node",
+    "cd src && python",
+  ]) {
+    assert.ok(findInteractiveCommand(command), `should flag: ${command}`);
+  }
+});
+
+test("findInteractiveCommand leaves script and inline invocations alone", () => {
+  for (const command of [
+    "node script.mjs",
+    "node test.mjs --verbose",
+    `node -e "console.log('hi')"`,
+    `python -c "print('hi')"`,
+    "python script.py",
+    "node --version",
+    "bash -c 'ls'",
+    "npm test",
+    "git status",
+    "dotnet run",
+  ]) {
+    assert.equal(findInteractiveCommand(command), null, `should not flag: ${command}`);
+  }
+});
+
+test("run_command refuses commands that would open an interactive REPL", async () => {
+  const run = await registry.execute("run_command", { command: "node" });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /interactive REPL/);
+  assert.match(run.error, /node -e/);
 });
 
 test("findDeleteCommand flags deletion commands in any shell segment", () => {

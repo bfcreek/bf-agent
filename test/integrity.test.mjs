@@ -40,6 +40,21 @@ test("captureIntegritySnapshot skips .halo-agent directory", async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+test("captureIntegritySnapshot skips bin, obj, and __pycache__ directories", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-integrity-build-"));
+  await mkdir(path.join(dir, "bin", "Debug"), { recursive: true });
+  await mkdir(path.join(dir, "obj"), { recursive: true });
+  await mkdir(path.join(dir, "src", "__pycache__"), { recursive: true });
+  await writeFile(path.join(dir, "bin", "Debug", "App.dll"), "dll", "utf8");
+  await writeFile(path.join(dir, "obj", "project.assets.json"), "{}", "utf8");
+  await writeFile(path.join(dir, "src", "__pycache__", "mod.cpython-313.pyc"), "pyc", "utf8");
+  await writeFile(path.join(dir, "App.cs"), "class App {}", "utf8");
+  const snap = await captureIntegritySnapshot(dir);
+  assert.equal(snap.size, 1);
+  assert.ok(snap.has("App.cs"));
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("assertIntegrity detects unexpected changes", () => {
   const before = new Map([["a.txt", "hash1"]]);
   const after = new Map([["a.txt", "hash2"]]);

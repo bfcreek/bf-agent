@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-const DEFAULT_SKIP_DIRS = new Set([".halo-agent"]);
+const DEFAULT_SKIP_DIRS = new Set([".halo-agent", "bin", "obj", "__pycache__", ".vs", ".pytest_cache"]);
 
 /**
  * @typedef {object} IntegrityRules
@@ -53,8 +53,9 @@ function isExcluded(rel, exclude) {
   for (const pattern of exclude) {
     if (matchesExclude(rel, pattern)) return true;
   }
+  const parts = rel.split("/");
   for (const dir of DEFAULT_SKIP_DIRS) {
-    if (rel === dir || rel.startsWith(`${dir}/`)) return true;
+    if (parts.includes(dir)) return true;
   }
   return false;
 }

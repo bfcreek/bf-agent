@@ -86,6 +86,12 @@ test("detectTaskHints matches path-answer and test-verify goals", () => {
   const testGoal =
     "Create test.mjs and run test.mjs with node and confirm it passes.";
   assert.ok(detectTaskHints(testGoal).some((h) => h.id === "test-verify"));
+
+  const pyGoal = "Create test.py and run test.py with python and confirm it passes.";
+  assert.ok(detectTaskHints(pyGoal).some((h) => h.id === "test-verify"));
+
+  const csGoal = "Fix the bugs, then run `dotnet run` and confirm it passes.";
+  assert.ok(detectTaskHints(csGoal).some((h) => h.id === "test-verify"));
 });
 
 test("detectTaskHints matches rename, CLI, server, and extract-shared goals", () => {
@@ -218,6 +224,14 @@ test("extractNamedNodeCommands finds CLI invocations in the goal", () => {
     "Create filter.mjs: node filter.mjs data/users.json --active prints JSON.",
   );
   assert.ok(cmds.some((c) => /filter\.mjs/.test(c)));
+
+  const py = extractNamedNodeCommands(
+    "Create filter.py: python filter.py data/users.json --active prints JSON.",
+  );
+  assert.ok(py.some((c) => /filter\.py/.test(c)));
+
+  const cs = extractNamedNodeCommands("Make `dotnet run -- data/users.json --active` print JSON.");
+  assert.ok(cs.some((c) => /dotnet\s+run/.test(c)));
 });
 
 test("isGptOssModel recognizes gpt-oss variants", () => {

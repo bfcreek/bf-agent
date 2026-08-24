@@ -211,7 +211,11 @@ export function registerSearchTools(registry, { workspaceRoot }) {
         return `No matches for /${pattern}/ in ${candidates.length} file(s) searched.`;
       }
       const notes = [];
-      if (hitLimit) notes.push(`stopped at ${maxMatches} matches — narrow the pattern or path for more`);
+      if (hitLimit)
+        notes.push(
+          `stopped at ${maxMatches} matches — more may exist; do not assume these are the only ` +
+            "occurrences. Re-run with a higher max_results or a narrower pattern/path to see the rest",
+        );
       if (scanTruncated) notes.push(`only the first ${MAX_FILES_SCANNED} files were scanned`);
       const header = `${matches.length} match(es) in ${filesWithMatches} file(s)${notes.length ? ` (${notes.join("; ")})` : ""}:`;
       return truncateOutput([header, ...matches].join("\n"));
