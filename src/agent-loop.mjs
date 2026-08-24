@@ -8,12 +8,12 @@ import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
   detectTaskHints,
+  finalAnswerNudge,
   formatTaskConstraints,
   isComplexGoal,
+  mutationBlockedUntilPretest,
   PLANNING_USER_MESSAGE,
-  prematureFinalNudge,
 } from "./prompt-enhancements.mjs";
-import { gatherTerranContext } from "./terran-client.mjs";
 
 /**
  * Sent as a final user message when the loop runs out of steps, so the run
@@ -30,6 +30,21 @@ const WRAP_UP_PROMPT = [
 const MAX_REPEATED_STEPS = 2;
 
 /**
+ * How many times to recover when Ollama rejects a malformed tool call
+ * (`error parsing tool call`). gpt-oss and similar models sometimes leak
+ * reasoning into the tool-call channel; a nudge + retry usually clears it.
+ */
+const MAX_TOOL_CALL_PARSE_RECOVERIES = 2;
+
+const TOOL_CALL_PARSE_NUDGE = [
+  "Your previous response was rejected: it mixed free-form text into the",
+  "tool-call channel (Ollama could not parse the tool call).",
+  "Call tools using the native tool-calling format only — function name plus",
+  "JSON arguments matching the schema. Put reasoning in thinking, not inside",
+  "the tool call. Retry the tool call now.",
+].join(" ");
+
+/**
  * Written for small local models, which need procedural guidance, not just
  * permission to use tools: each rule below maps to a known failure mode
  * (guessing instead of reading, re-reading files instead of searching,
@@ -43,12 +58,41 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Ground answers in facts from tools; never guess. For questions about this",
   "  project, use the README and auto-retrieved passages from the first turn,",
   "  then read_file, grep_search, or search_project for more detail.",
+  "- For current events, upstream docs, release notes, or anything outside",
+  "  this workspace, use web_search, then fetch_url on promising links.",
+  "  Pass a query to fetch_url so micro-RAG returns relevant passages instead",
+  "  of the whole page.",
   "- To find where something is defined or used, use grep_search or find_files",
   "  instead of reading files one at a time.",
   "- Read a file before editing it. Use edit_file for changes to existing",
   "  files; use write_file only for new files or full rewrites.",
   "- After changing files, verify the result: re-read the changed part, or run",
   "  the project's tests or build with run_command when the task calls for it.",
+  "- When the task mentions failing tests, your first tool step must be",
+  "  run_command with that test command; do not edit until you have seen the",
+  "  failure exit code and output. After the last edit, run the tests again.",
+  "- Before claiming success, run every command the task names (e.g. node",
+  "  test.mjs, a CLI invocation documented in a README) with run_command.",
+  "  Only claim pass/success when the exit code is 0.",
+  "- Files ending in .mjs are ES modules: use import/export, never require or",
+  "  module.exports.",
+  "- When a .mjs file is both a CLI entry and importable, guard top-level CLI",
+  "  code with import.meta.url === pathToFileURL(process.argv[1]).href (or keep",
+  "  lib and bin separate) so importing from tests does not call process.exit.",
+  "  Prefer tests that spawn the CLI (or assert stdout) over importing a CLI",
+  "  module that exits on load.",
+  "- When a task says a server listens on a port, the entry module must call",
+  "  listen when executed directly (same import.meta.url main check), not only",
+  "  export a start helper for tests.",
+  "- When renaming or fixing a misspelled identifier, update every declaration,",
+  "  export, and reference in one edit_file call (set replace_all when the old",
+  "  string is the typo alone). Then verify once.",
+  "- When extracting a shared module, write the shared file first, then update",
+  "  importers, then run tests. When a sample/fixture file is named, read it",
+  "  before writing the implementation.",
+  "- In your final answer, mention only files you actually created or edited;",
+  "  do not claim you added tests or docs you did not write. If tests were",
+  "  already present and left unchanged, say so.",
   "- Deleting files is destructive. Delete a file only when the user",
   "  explicitly named it for deletion, and never delete a file the user asked",
   "  to keep. If the task implies deleting files the user did not name (e.g.",
@@ -99,11 +143,6 @@ export class AgentLoop {
    *   the user message before the model is called. `{ workspaceRoot, client?,
    *   embeddingModel?, onProgress? }`.
    * @param {(info: {readme: boolean, ragHits: number}) => void} [options.onBootstrap]
-   * @param {object|false} [options.terranRag]
-   *   On every user message, search Aura Terran via Direct RAG REST and append
-   *   hits to the user turn. `{ namespace?, restUrl?, token? }`. When REST is
-   *   not running, the run continues without Terran context (no error).
-   * @param {(info: {hitCount: number}) => void} [options.onTerranRag]
    * @param {boolean} [options.planning] Pre-pass plan on complex first turns (default true).
    * @param {boolean} [options.taskHints] Append task-type constraints to the user message (default true).
    * @param {(info: {plan: string, hints: Array<{id: string, constraint: string}>}) => void} [options.onPlan]
@@ -117,8 +156,6 @@ export class AgentLoop {
     compaction = false,
     projectBootstrap = false,
     onBootstrap,
-    terranRag = false,
-    onTerranRag,
     planning = true,
     taskHints = true,
     onPlan,
@@ -133,8 +170,6 @@ export class AgentLoop {
     this.compaction = compaction;
     this.projectBootstrap = projectBootstrap;
     this.onBootstrap = onBootstrap;
-    this.terranRag = terranRag;
-    this.onTerranRag = onTerranRag;
     this.planning = planning;
     this.taskHints = taskHints;
     this.onPlan = onPlan;
@@ -177,24 +212,6 @@ export class AgentLoop {
       });
       userContent = `${userContent}\n\n${bootstrap.text}`;
       this.onBootstrap?.({ readme: bootstrap.readme, ragHits: bootstrap.ragHits });
-    }
-
-    if (this.terranRag) {
-      const terran = await gatherTerranContext({
-        query: goal,
-        namespace: this.terranRag.namespace,
-        restUrl: this.terranRag.restUrl,
-        token: this.terranRag.token,
-        includeWebSearch: this.terranRag.includeWebSearch,
-        signal,
-        fetchImpl: this.terranRag.fetchImpl,
-      });
-      if (terran.text) {
-        userContent = `${userContent}\n\n${terran.text}`;
-        this.onTerranRag?.({ hitCount: terran.hitCount, webHitCount: terran.webHitCount });
-      } else if (terran.error && this.terranRag.onWarning) {
-        this.terranRag.onWarning(terran.error);
-      }
     }
 
     messages[messages.length - 1].content = userContent;
@@ -253,7 +270,11 @@ export class AgentLoop {
         messages = compacted;
       }
 
-      const { message, raw } = await chatWithRetry(this.client, { messages, tools, signal });
+      const { message, raw } = await chatWithParseRecovery(this.client, {
+        messages,
+        tools,
+        signal,
+      });
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
       messages.push(normalizeAssistantMessage(message));
@@ -261,7 +282,7 @@ export class AgentLoop {
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
       if (toolCalls.length === 0) {
         const answerText = textOf(message.content);
-        const nudge = prematureFinalNudge({
+        const nudge = finalAnswerNudge({
           goal,
           answerText,
           steps,
@@ -299,6 +320,9 @@ export class AgentLoop {
       for (const call of toolCalls) {
         const name = call?.function?.name ?? "";
         const args = call?.function?.arguments ?? {};
+        const pretestBlock = refuseRepeat
+          ? null
+          : mutationBlockedUntilPretest({ goal, toolName: name, steps });
         const outcome = refuseRepeat
           ? {
               ok: false,
@@ -307,7 +331,9 @@ export class AgentLoop {
                 "it was not executed again. Do something different: change the arguments, " +
                 "use another tool, or give your final answer now.",
             }
-          : await this.registry.execute(name, args);
+          : pretestBlock
+            ? { ok: false, error: pretestBlock }
+            : await this.registry.execute(name, args);
         executed.push({ name, args, ...outcome });
         messages.push({
           role: "tool",
@@ -350,9 +376,21 @@ export class AgentLoop {
   }
 }
 
+/** Ollama 500 when the model contaminates the tool-call channel with prose. */
+export function isToolCallParseError(err) {
+  return (
+    err?.name === "OllamaClientError" &&
+    typeof err.status === "number" &&
+    err.status >= 500 &&
+    /error parsing tool call/i.test(String(err.message ?? ""))
+  );
+}
+
 /**
  * One retry on transient client failures (network unreachable, 5xx). A
  * single mid-task hiccup should not kill a run that already did real work.
+ * Tool-call parse failures are not transient — {@link chatWithParseRecovery}
+ * handles those with a model nudge.
  */
 async function chatWithRetry(client, request) {
   try {
@@ -361,9 +399,37 @@ async function chatWithRetry(client, request) {
     if (err?.name === "AbortError" || request.signal?.aborted) throw err;
     if (err?.name !== "OllamaClientError") throw err;
     if (typeof err.status === "number" && err.status < 500) throw err;
+    if (isToolCallParseError(err)) throw err;
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (request.signal?.aborted) throw err;
     return client.chat(request);
+  }
+}
+
+/**
+ * When Ollama rejects a malformed tool call, nudge the model and retry
+ * instead of aborting the whole agent run.
+ *
+ * @param {object} client
+ * @param {object} request
+ * @param {Array<object>} request.messages Mutated in place when recovering.
+ * @param {Array<object>} [request.tools]
+ * @param {AbortSignal} [request.signal]
+ */
+async function chatWithParseRecovery(client, request) {
+  const { messages, tools, signal } = request;
+  let recoveries = 0;
+  while (true) {
+    try {
+      return await chatWithRetry(client, { messages, tools, signal });
+    } catch (err) {
+      if (signal?.aborted || err?.name === "AbortError") throw err;
+      if (!isToolCallParseError(err) || recoveries >= MAX_TOOL_CALL_PARSE_RECOVERIES) {
+        throw err;
+      }
+      recoveries += 1;
+      messages.push({ role: "user", content: TOOL_CALL_PARSE_NUDGE });
+    }
   }
 }
 

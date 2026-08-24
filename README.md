@@ -57,8 +57,6 @@ Options:
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
 | `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); its tools appear as `mcp_<name>` |
-| `--terran` | off | Search Aura Terran corpora for each user message via Direct RAG REST |
-| `--ns <namespace>` | all corpora | Terran corpus namespace (`--terran` implied) |
 | `--quiet` | off | Suppress step trace; print only the final answer |
 | `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
 | `--no-plan` | off | Skip the planning pre-pass on complex goals |
@@ -130,6 +128,8 @@ setups that need different wiring. External MCP tools bridge in via
 | `list_dir` | List a directory; subdirectory names end with `/` |
 | `grep_search` | Regex search over file contents (`path:line: text`); prunes `node_modules`, `.git`, etc., skips binaries |
 | `find_files` | Find files by glob (`*.mjs`, `src/**/*.js`) |
+| `web_search` | Search the public web via DuckDuckGo (titles, URLs, snippets) |
+| `fetch_url` | Fetch a page and return text; optional `query` runs micro-RAG for top passages |
 | `write_file` | Create or overwrite a file, creating parent directories |
 | `edit_file` | Replace an exact snippet in a file (unique match or `replace_all`) |
 | `run_command` | Run a shell command with captured output and a hard timeout |
@@ -264,6 +264,8 @@ release gate — run while iterating on the runtime.
 | `src/tools/builtin.mjs` | Registers the standard tool set (diagnostics + file + shell) |
 | `src/tools/fs.mjs` | Workspace-scoped file tools and path/output guards |
 | `src/tools/search.mjs` | `grep_search` and `find_files` over the workspace tree |
+| `src/tools/web-search.mjs` | `web_search` via DuckDuckGo HTML results |
+| `src/tools/fetch-url.mjs` | `fetch_url` with HTML extract + micro-RAG |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
 | `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), scenarios, judge |

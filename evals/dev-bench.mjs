@@ -103,11 +103,13 @@ async function runScenario({ scenario, model, options }) {
 
   /** @type {{pass: boolean|null, detail: string}} */
   let integrity = { pass: null, detail: "no integrity rules" };
+  /** @type {Awaited<ReturnType<typeof captureIntegritySnapshot>>|null} */
+  let integrityBefore = null;
 
   try {
     if (!options.judgeOnly) {
       await scenario.setup(dir);
-      const integrityBefore = scenario.integrity
+      integrityBefore = scenario.integrity
         ? await captureIntegritySnapshot(dir)
         : null;
 
@@ -173,14 +175,35 @@ async function runScenario({ scenario, model, options }) {
       seconds: (Date.now() - startedAt) / 1000,
     };
   } catch (err) {
+    const errDetail = `runner error: ${err?.message ?? err}`;
+    // Still score workspace integrity when the agent crashed mid-run — a
+    // parse/transport failure must not invent an integrity miss if nothing
+    // on disk changed. Precheck stays null when the scenario has none.
+    if (integrityBefore) {
+      try {
+        integrity = await checkScenarioIntegrity(dir, integrityBefore, scenario.integrity);
+      } catch (integErr) {
+        integrity = {
+          pass: false,
+          detail: `${errDetail}; integrity check failed: ${integErr?.message ?? integErr}`,
+        };
+      }
+    } else if (scenario.integrity) {
+      integrity = { pass: false, detail: errDetail };
+    }
+
+    const precheck = scenario.precheck
+      ? { pass: false, detail: errDetail }
+      : { pass: null, detail: "no precheck" };
+
     return {
       scenario: scenario.name,
       tier: scenario.tier,
       model,
       workspace: dir,
       keptWorkspace: options.keepWorkspace || Boolean(options.judgeOnly),
-      precheck: { pass: false, detail: `runner error: ${err?.message ?? err}` },
-      integrity: { pass: false, detail: `runner error: ${err?.message ?? err}` },
+      precheck,
+      integrity,
       agent: {
         stopReason: agentResult.stopReason ?? "error",
         steps: agentResult.steps?.length ?? 0,

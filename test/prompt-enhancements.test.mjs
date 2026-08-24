@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  completionVerifyNudge,
   detectTaskHints,
+  extractNamedNodeCommands,
+  finalAnswerNudge,
   formatTaskConstraints,
   isComplexGoal,
   isGptOssModel,
+  mutationBlockedUntilPretest,
+  mutatedBeforeTestRun,
   prematureFinalNudge,
   resolveThinkSetting,
 } from "../src/prompt-enhancements.mjs";
@@ -13,6 +18,7 @@ import {
 test("detectTaskHints matches test-fix and debug goals", () => {
   const hints = detectTaskHints("fix the failing test in auth.spec.mjs");
   assert.ok(hints.some((h) => h.id === "test-fix"));
+  assert.match(hints.find((h) => h.id === "test-fix").constraint, /Mandatory first step/);
 
   const debug = detectTaskHints("debug why the login endpoint is not working");
   assert.ok(debug.some((h) => h.id === "debug"));
@@ -80,6 +86,138 @@ test("detectTaskHints matches path-answer and test-verify goals", () => {
   const testGoal =
     "Create test.mjs and run test.mjs with node and confirm it passes.";
   assert.ok(detectTaskHints(testGoal).some((h) => h.id === "test-verify"));
+});
+
+test("detectTaskHints matches rename, CLI, server, and extract-shared goals", () => {
+  const rename = detectTaskHints(
+    "handler is misspelled handeler in server.mjs. Fix the typo.",
+  );
+  assert.ok(rename.some((h) => h.id === "rename-typo"));
+
+  const cli = detectTaskHints(
+    "Create filter.mjs: node filter.mjs data/users.json --active prints active users.",
+  );
+  assert.ok(cli.some((h) => h.id === "cli-module"));
+
+  const server = detectTaskHints(
+    "Create server.mjs that listens on port 0 with GET /health.",
+  );
+  assert.ok(server.some((h) => h.id === "http-server"));
+
+  const extract = detectTaskHints(
+    "Extract shared slugify into src/slugify.mjs and update imports.",
+  );
+  assert.ok(extract.some((h) => h.id === "extract-shared"));
+});
+
+test("mutationBlockedUntilPretest blocks edits before a test run", () => {
+  const goal = "Run node test.mjs — it fails. Fix the bugs so all tests pass.";
+  assert.match(
+    mutationBlockedUntilPretest({
+      goal,
+      toolName: "edit_file",
+      steps: [],
+    }) ?? "",
+    /Blocked/,
+  );
+  assert.equal(
+    mutationBlockedUntilPretest({
+      goal,
+      toolName: "edit_file",
+      steps: [
+        {
+          toolCalls: [
+            { name: "run_command", args: { command: "node test.mjs" }, ok: true, result: { exitCode: 1 } },
+          ],
+        },
+      ],
+    }),
+    null,
+  );
+  assert.equal(
+    mutationBlockedUntilPretest({ goal, toolName: "read_file", steps: [] }),
+    null,
+  );
+});
+
+test("completionVerifyNudge requires post-fix verify for test-fix goals", () => {
+  const goal =
+    "Run node test.mjs — it fails because of bugs. Fix the bugs so all tests pass, then run test.mjs again.";
+  const nudge = completionVerifyNudge({
+    goal,
+    answerText: "Fixed and all tests passed.",
+    steps: [
+      {
+        toolCalls: [
+          { name: "run_command", args: { command: "node test.mjs" }, ok: true, result: { exitCode: 1 } },
+          {
+            name: "edit_file",
+            args: { path: "lib/math.mjs", old_string: "a", new_string: "b" },
+            ok: true,
+          },
+        ],
+      },
+    ],
+    nudgeCount: 0,
+  });
+  assert.ok(nudge);
+  assert.match(nudge, /verification|run_command/i);
+});
+
+test("completionVerifyNudge allows finish after successful post-fix test run", () => {
+  const goal =
+    "Run node test.mjs — it fails. Fix bugs, then run test.mjs again to confirm.";
+  assert.equal(
+    completionVerifyNudge({
+      goal,
+      answerText: "All tests passed.",
+      steps: [
+        {
+          toolCalls: [
+            { name: "run_command", args: { command: "node test.mjs" }, ok: true, result: { exitCode: 1 } },
+            { name: "edit_file", args: { path: "x.mjs", old_string: "a", new_string: "b" }, ok: true },
+            { name: "run_command", args: { command: "node test.mjs" }, ok: true, result: { exitCode: 0 } },
+          ],
+        },
+      ],
+      nudgeCount: 0,
+    }),
+    null,
+  );
+});
+
+test("finalAnswerNudge prefers premature tool nudge over verify", () => {
+  const msg = finalAnswerNudge({
+    goal: "Create greet.mjs and run node test.mjs",
+    answerText: "done",
+    steps: [],
+    nudgeCount: 0,
+  });
+  assert.match(msg, /without calling any tools/);
+});
+
+test("mutatedBeforeTestRun detects edit-before-reproduce", () => {
+  assert.equal(
+    mutatedBeforeTestRun([
+      { name: "edit_file", ok: true },
+      { name: "run_command", ok: true },
+    ]),
+    true,
+  );
+  assert.equal(
+    mutatedBeforeTestRun([
+      { name: "run_command", ok: true },
+      { name: "edit_file", ok: true },
+    ]),
+    false,
+  );
+});
+
+test("extractNamedNodeCommands finds CLI invocations in the goal", () => {
+  const cmds = extractNamedNodeCommands(
+    "Create filter.mjs: node filter.mjs data/users.json --active prints JSON.",
+  );
+  assert.ok(cmds.some((c) => /filter\.mjs/.test(c)));
 });
 
 test("isGptOssModel recognizes gpt-oss variants", () => {

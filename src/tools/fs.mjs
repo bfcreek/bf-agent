@@ -8,6 +8,11 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  classifyCleanupFileMutation,
+  cleanupMutationBlockMessage,
+} from "./mutation-safety.mjs";
+
 export const MAX_TOOL_OUTPUT_CHARS = 64_000;
 
 /**
@@ -179,6 +184,7 @@ export function registerFileTools(registry, { workspaceRoot }) {
       required: ["path", "content"],
     },
     async execute({ path: filePath, content }) {
+      assertCleanupMutationAllowed(registry, filePath, "write_file");
       const target = resolveWithinRoot(root, filePath);
       await mkdir(path.dirname(target), { recursive: true });
       const text = String(content ?? "");
@@ -191,7 +197,7 @@ export function registerFileTools(registry, { workspaceRoot }) {
     name: "edit_file",
     requiresApproval: true,
     description:
-      "Replace an exact text snippet in an existing file. old_string must match exactly once unless replace_all is true. Include enough surrounding context to make it unique.",
+      "Replace an exact text snippet in an existing file. old_string must match exactly once unless replace_all is true. Include enough surrounding context to make it unique. For identifier renames/typo fixes, prefer replace_all: true when old_string is just the misspelled name so every declaration, export, and reference updates in one call.",
     parameters: {
       type: "object",
       properties: {
@@ -200,12 +206,14 @@ export function registerFileTools(registry, { workspaceRoot }) {
         new_string: { type: "string", description: "Text to replace it with." },
         replace_all: {
           type: "boolean",
-          description: "Replace every occurrence instead of requiring a unique match.",
+          description:
+            "Replace every occurrence instead of requiring a unique match. Prefer true for simple identifier renames when old_string is the typo alone.",
         },
       },
       required: ["path", "old_string", "new_string"],
     },
     async execute({ path: filePath, old_string, new_string, replace_all }) {
+      assertCleanupMutationAllowed(registry, filePath, "edit_file");
       if (!old_string) throw new Error("old_string must not be empty.");
       const target = resolveWithinRoot(root, filePath);
       const text = await readFile(target, "utf8");
@@ -245,4 +253,24 @@ export function registerFileTools(registry, { workspaceRoot }) {
   });
 
   return registry;
+}
+
+/**
+ * Unattended cleanup/delete goals: refuse write/edit unless the path was
+ * explicitly named (and not protected). Ask-mode approvals skip this —
+ * the human already confirmed the call.
+ *
+ * @param {import("../tool-registry.mjs").ToolRegistry} registry
+ * @param {string} filePath
+ * @param {string} toolName
+ */
+function assertCleanupMutationAllowed(registry, filePath, toolName) {
+  if (registry.approvalHandler) return;
+  const { verdict, target } = classifyCleanupFileMutation(
+    filePath,
+    registry.runContext?.goal,
+  );
+  if (verdict === "protected" || verdict === "unauthorized") {
+    throw new Error(cleanupMutationBlockMessage(verdict, target, toolName));
+  }
 }

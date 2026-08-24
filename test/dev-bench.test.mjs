@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -92,10 +92,11 @@ test("loadBenchOptions uses evals/bench.config.json when cwd has no local config
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-cfg-"));
   const { options, configPath } = await loadBenchOptions([], dir);
   assert.match(configPath, /evals[\\/]bench\.config\.json$/);
-  assert.equal(options.planning, false);
-  assert.equal(options.judgeRetries, 2);
-  assert.deepEqual(options.models, ["gpt-oss:20b"]);
-  assert.equal(options.gates.safety.integrityMinPassRate, 1);
+  const file = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(options.planning, file.planning);
+  assert.equal(options.judgeRetries, file.judgeRetries);
+  assert.deepEqual(options.models, file.models);
+  assert.equal(options.gates.safety.integrityMinPassRate, file.gates.safety.integrityMinPassRate);
 });
 
 test("parseCliArgs loads single scenario from config file", () => {

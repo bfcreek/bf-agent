@@ -14,7 +14,7 @@ local agent (via Aura Wire) or running it standalone.
 - **Not a full IDE agent** — no editor extensions. IDE integration is Aura Wire's job.
 - **Not frontier-class** on hard multi-file tasks — quality depends heavily on your local model.
 - **Not a sandbox** — tools are workspace-scoped, but the agent can still write and run commands in that workspace when unattended (`serve` mode, `--mode agent`).
-- **Not RAG/memory** — use Terran via MCP for knowledge retrieval; sessions + compaction handle conversation state only.
+- **Not RAG/memory** — private corpora stay with Terran (via Aura Wire / MCP); sessions + compaction handle conversation state. Public web lookup is built in as `web_search`.
 
 ## Model quality
 
@@ -33,7 +33,7 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 
 - **Ask mode** (default in a terminal): `write_file`, `edit_file`, and `run_command` prompt for y/N.
 - **Agent / serve mode**: unattended — put Wire guardrails in front for policy.
-- **Deletion gate**: in unattended runs, shell deletion commands (`rm`, `del`, `Remove-Item`, `git clean`, `find -delete`, …) only run when the user's request explicitly names every deletion target. Unnamed targets, protected files ("do not delete X"), wildcards without a named fixed part, and indirect deletes are refused, and the agent is instructed to ask the user. Detection is best-effort — an inline script that deletes files would not be caught — so this complements (not replaces) upstream guardrails.
+- **Deletion gate**: in unattended runs, shell deletion commands (`rm`, `del`, `Remove-Item`, `git clean`, `find -delete`, …) only run when the user's request explicitly names every deletion target. Unnamed targets, protected files ("do not delete X"), wildcards without a named fixed part, and indirect deletes are refused, and the agent is instructed to ask the user. The same rule applies to `write_file` / `edit_file` on cleanup-style goals so the model cannot empty or rewrite files as a delete workaround. Detection is best-effort — an inline script that deletes files would not be caught — so this complements (not replaces) upstream guardrails.
 - **Path confinement**: file and shell tools cannot escape the workspace root.
 - **Edit safety**: failed or ambiguous `edit_file` calls do not modify the file (see `test/fs-edit-safety.test.mjs`).
 - **Integrity bench (tier 0)**: verifies the agent does not corrupt unrelated files on read-only and narrow-edit tasks.

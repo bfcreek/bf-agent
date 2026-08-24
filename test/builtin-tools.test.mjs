@@ -9,6 +9,9 @@ import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
 import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot } from "../src/tools/fs.mjs";
 import {
+  classifyCleanupFileMutation,
+} from "../src/tools/mutation-safety.mjs";
+import {
   classifyDeleteCommand,
   extractDeleteTargets,
   findDeleteCommand,
@@ -41,6 +44,8 @@ test("all builtin tools are registered", () => {
     "edit_file",
     "grep_search",
     "find_files",
+    "web_search",
+    "fetch_url",
     "run_command",
   ]) {
     assert.ok(registry.has(name), `missing tool: ${name}`);
@@ -343,6 +348,64 @@ test("classifyDeleteCommand does not match partial file names", () => {
   const goal = "Delete junk-notes.txt.";
   assert.equal(classifyDeleteCommand("rm notes.txt", goal).verdict, "unauthorized");
   assert.equal(classifyDeleteCommand("rm junk", goal).verdict, "unauthorized");
+});
+
+test("classifyCleanupFileMutation blocks unnamed writes on cleanup goals", () => {
+  const goal =
+    "Clean up unused files in this project. important.mjs is required — do not delete or modify it.";
+  assert.equal(classifyCleanupFileMutation("junk-notes.txt", goal).verdict, "unauthorized");
+  assert.equal(classifyCleanupFileMutation("helper.mjs", goal).verdict, "unauthorized");
+  assert.equal(classifyCleanupFileMutation("important.mjs", goal).verdict, "protected");
+  assert.equal(classifyCleanupFileMutation("config.json", "Set debug to true.").verdict, "none");
+});
+
+test("classifyCleanupFileMutation authorizes files the goal explicitly names", () => {
+  const goal = "Delete the file junk-notes.txt from this workspace. Do not change any other file.";
+  assert.equal(classifyCleanupFileMutation("junk-notes.txt", goal).verdict, "authorized");
+  assert.equal(classifyCleanupFileMutation("important.mjs", goal).verdict, "unauthorized");
+});
+
+test("write_file blocks cleanup workarounds when unattended", async () => {
+  await writeFile(path.join(root, "junk-notes.txt"), "maybe delete me?\n", "utf8");
+  registry.setRunContext({
+    goal:
+      "Clean up unused files in this project. important.mjs is required — do not delete or modify it.",
+  });
+
+  const write = await registry.execute("write_file", {
+    path: "junk-notes.txt",
+    content: "",
+  });
+  assert.equal(write.ok, false);
+  assert.match(write.error, /cleanup\/delete|did not explicitly name/i);
+  assert.equal(await readFile(path.join(root, "junk-notes.txt"), "utf8"), "maybe delete me?\n");
+});
+
+test("edit_file blocks protected files on cleanup goals", async () => {
+  await writeFile(path.join(root, "important.mjs"), "export const version = 1;\n", "utf8");
+  registry.setRunContext({
+    goal:
+      "Clean up unused files. important.mjs is required — do not delete or modify it.",
+  });
+
+  const edit = await registry.execute("edit_file", {
+    path: "important.mjs",
+    old_string: "version = 1",
+    new_string: "version = 2",
+  });
+  assert.equal(edit.ok, false);
+  assert.match(edit.error, /keep that file/i);
+  assert.equal(await readFile(path.join(root, "important.mjs"), "utf8"), "export const version = 1;\n");
+});
+
+test("write_file still works for ordinary non-cleanup goals", async () => {
+  registry.setRunContext({ goal: 'Open config.json and set "debug" to true.' });
+  const write = await registry.execute("write_file", {
+    path: "config.json",
+    content: '{"debug":true}\n',
+  });
+  assert.equal(write.ok, true);
+  assert.equal(await readFile(path.join(root, "config.json"), "utf8"), '{"debug":true}\n');
 });
 
 test("run_command deletes a file the goal explicitly names, unattended", async () => {

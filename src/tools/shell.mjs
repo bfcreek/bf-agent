@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 
 import { resolveWithinRoot, truncateMiddle } from "./fs.mjs";
+import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 300;
@@ -102,60 +103,6 @@ export function extractDeleteTargets(segment) {
   return targets;
 }
 
-/** Targets like `.`, `*`, or `~` delete far more than any named file. */
-function isTooBroadTarget(target) {
-  return /^[.\\/*~]+$/.test(target);
-}
-
-/**
- * Language in the user's request that protects a file from deletion when it
- * appears in the same sentence as the file's name.
- */
-const PROTECTIVE_PATTERN =
-  /\b(?:not|never|don'?t|keep|preserve|except|leave|required|important|must\s+(?:stay|remain|survive))\b/i;
-
-/**
- * How the user's request relates to one deletion target: did they name it,
- * and if so, did the same sentence tell us to keep it?
- *
- * @param {string} goal
- * @param {string} target
- * @returns {{mentioned: boolean, protected: boolean}}
- */
-function analyzeMention(goal, target) {
-  // Wildcards can't be matched literally; check the fixed part (`*.log` →
-  // `.log`). An all-wildcard target has no fixed part to authorize.
-  const fixed = target.replace(/[*?]+/g, "");
-  if (!fixed || isTooBroadTarget(fixed)) return { mentioned: false, protected: false };
-
-  const escaped = fixed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Boundaries: no word char or hyphen on either side, and no dot that is
-  // part of a longer name (`x.txt` inside `x.txt.bak`) — but a sentence
-  // period right after the name ("Delete junk.txt.") is fine.
-  const mention = new RegExp(`(?<![\\w-]|\\w\\.)${escaped}(?!\\w|-|\\.\\w)`, "gi");
-
-  let mentioned = false;
-  for (const match of goal.matchAll(mention)) {
-    mentioned = true;
-    // Judge protective language only within the mention's sentence, so a
-    // "keep everything else" in the next sentence does not shadow an
-    // explicit "delete X" in this one.
-    const before = goal.slice(0, match.index);
-    const sentenceStart = Math.max(
-      before.lastIndexOf(". "),
-      before.lastIndexOf("! "),
-      before.lastIndexOf("? "),
-      before.lastIndexOf("; "),
-      before.lastIndexOf("\n"),
-    );
-    const after = goal.slice(match.index + match[0].length);
-    const afterEnd = after.search(/[.!?;]\s|\n|$/); // `$` ⇒ always ≥ 0
-    const sentence = goal.slice(sentenceStart + 1, match.index + match[0].length + afterEnd);
-    if (PROTECTIVE_PATTERN.test(sentence)) return { mentioned: true, protected: true };
-  }
-  return { mentioned, protected: false };
-}
-
 /**
  * Decide whether a command's deletions are authorized by the user's request.
  *
@@ -182,7 +129,7 @@ export function classifyDeleteCommand(command, goal) {
   let unnamed = null;
   for (const target of targets) {
     if (isTooBroadTarget(target)) return { verdict: "unauthorized", segment, target };
-    const mention = analyzeMention(goalText, target);
+    const mention = analyzeFileMention(goalText, target);
     if (mention.protected) return { verdict: "protected", segment, target };
     if (!mention.mentioned && unnamed === null) unnamed = target;
   }

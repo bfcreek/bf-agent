@@ -39,16 +39,13 @@ test("normalizeConfigValues maps CLI names to internal options", () => {
     model: "llama3.2",
     "base-url": "http://example:11434",
     "max-steps": 5,
-    ns: "general",
-    web: true,
+    "no-index": true,
   });
   assert.deepEqual(errors, []);
   assert.equal(values.model, "llama3.2");
   assert.equal(values.baseUrl, "http://example:11434");
   assert.equal(values.maxSteps, 5);
-  assert.equal(values.terranNamespace, "general");
-  assert.equal(values.terranWeb, true);
-  assert.equal(values.terran, true);
+  assert.equal(values.noIndex, true);
 });
 
 test("normalizeConfigValues reports invalid values", () => {

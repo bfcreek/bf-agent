@@ -31,9 +31,6 @@ const CONFIG_TEMPLATE = `# halo-agent user configuration
 # no-index: false
 # no-plan: false
 # no-hints: false
-# terran: false
-# ns: general
-# web: false
 # json: false
 # mcp:
 #   - "npx -y some-mcp-server"
@@ -165,7 +162,6 @@ export function normalizeConfigValues(raw) {
       case "session":
       case "embed-model":
       case "think":
-      case "ns":
         setString(key, configKeyToOption(key), value);
         break;
       case "max-steps": {
@@ -188,8 +184,6 @@ export function normalizeConfigValues(raw) {
       }
       case "quiet":
       case "no-index":
-      case "terran":
-      case "web":
       case "json":
       case "no-plan":
       case "no-hints":
@@ -211,9 +205,6 @@ export function normalizeConfigValues(raw) {
         errors.push(`Unknown config key '${key}'.`);
     }
   }
-
-  if (values.terranWeb) values.terran = true;
-  if (values.terranNamespace !== undefined) values.terran = true;
 
   if (values.mode !== undefined && values.mode !== "ask" && values.mode !== "agent") {
     errors.push(`config 'mode' must be 'ask' or 'agent', got '${values.mode}'.`);
@@ -253,10 +244,6 @@ function configKeyToOption(key) {
       return "noPlan";
     case "no-hints":
       return "noHints";
-    case "ns":
-      return "terranNamespace";
-    case "web":
-      return "terranWeb";
     default:
       return key;
   }
@@ -350,9 +337,6 @@ export function getBuiltinDefaults() {
     embedModel: "nomic-embed-text",
     noIndex: false,
     json: false,
-    terran: false,
-    terranNamespace: undefined,
-    terranWeb: false,
     think: DEFAULT_THINK,
     noPlan: false,
     noHints: false,

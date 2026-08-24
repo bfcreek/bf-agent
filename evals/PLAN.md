@@ -12,7 +12,7 @@ This plan covers benchmark hardening, minimum score gates, file-integrity (anti-
 | --- | --- |
 | **halo-agent** | Free local agent runtime (CLI + SDK + `serve`) |
 | **Aura Wire** | Paid `/v1` door, routing, guardrails, IDE integration |
-| **Terran** | Paid/usage RAG via MCP |
+| **Terran** | Paid/usage RAG via Aura Wire / MCP (not embedded in halo-agent) |
 
 halo-agent is the **built-in local agent** for simple tasks. Wire routes complex or frontier work to cloud providers. halo-agent must not be marketed or routed as "ready" until bench gates pass on the reference model.
 

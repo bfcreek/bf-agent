@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import http from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 
-import { AgentLoop } from "../src/agent-loop.mjs";
+import { AgentLoop, isToolCallParseError } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /** Client that replays a scripted sequence of assistant messages. */
@@ -253,6 +252,79 @@ test("client errors with a 4xx status are not retried", async () => {
   assert.equal(failing.attempts, 1);
 });
 
+test("tool-call parse 500s are nudged and recovered", async () => {
+  let phase = 0;
+  const client = {
+    async chat({ messages }) {
+      phase++;
+      if (phase === 1) {
+        const err = new Error(
+          `Ollama /api/chat returned 500: {"error":"error parsing tool call: raw='thinking...{\\"pattern\\":\\"x\\"}"}`,
+        );
+        err.name = "OllamaClientError";
+        err.status = 500;
+        throw err;
+      }
+      if (phase === 2) {
+        const nudged = messages.some(
+          (m) => m.role === "user" && /tool-call channel/i.test(m.content ?? ""),
+        );
+        assert.ok(nudged, "expected a parse-recovery nudge in messages");
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [toolCall("add", { a: 1, b: 2 })],
+          },
+          raw: {},
+        };
+      }
+      return { message: { role: "assistant", content: "3" }, raw: {} };
+    },
+  };
+
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+  const result = await loop.run("add 1 and 2");
+
+  assert.equal(result.text, "3");
+  assert.equal(result.steps[0].toolCalls[0].result, 3);
+  assert.equal(phase, 3);
+});
+
+test("tool-call parse errors exhaust recoveries then throw", async () => {
+  const failing = {
+    attempts: 0,
+    async chat() {
+      this.attempts++;
+      const err = new Error(
+        'Ollama /api/chat returned 500: {"error":"error parsing tool call: raw=\'x\'"}',
+      );
+      err.name = "OllamaClientError";
+      err.status = 500;
+      throw err;
+    },
+  };
+  const loop = new AgentLoop({ client: failing, registry: makeRegistry() });
+
+  await assert.rejects(() => loop.run("go"), /error parsing tool call/);
+  // Initial attempt + 2 recoveries = 3
+  assert.equal(failing.attempts, 3);
+});
+
+test("isToolCallParseError detects Ollama parse failures", () => {
+  const err = new Error(
+    'Ollama /api/chat returned 500: {"error":"error parsing tool call: raw=\'x\'"}',
+  );
+  err.name = "OllamaClientError";
+  err.status = 500;
+  assert.equal(isToolCallParseError(err), true);
+
+  const other = new Error("Ollama /api/chat returned 500: boom");
+  other.name = "OllamaClientError";
+  other.status = 500;
+  assert.equal(isToolCallParseError(other), false);
+});
+
 test("string tool arguments (JSON) are parsed before execution", async () => {
   const client = new FakeClient([
     { role: "assistant", content: "", tool_calls: [toolCall("add", '{"a":4,"b":6}')] },
@@ -360,7 +432,7 @@ test("complex goals get a planning pre-pass before tools", async () => {
   const client = new FakeClient([
     { role: "assistant", content: "1. grep_search for foo\n2. read_file src/foo.mjs\n3. edit" },
     { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
-    { role: "assistant", content: "done" },
+    { role: "assistant", content: "The feature outline is ready for review." },
   ]);
   const loop = new AgentLoop({ client, registry: makeRegistry() });
 
@@ -374,9 +446,9 @@ test("complex goals get a planning pre-pass before tools", async () => {
 
 test("task hints are injected into the user message", async () => {
   const client = new FakeClient([
-    { role: "assistant", content: "ok" },
-    { role: "assistant", content: "ok" },
-    { role: "assistant", content: "ok" },
+    { role: "assistant", content: "Inspecting the failure next." },
+    { role: "assistant", content: "Inspecting the failure next." },
+    { role: "assistant", content: "Inspecting the failure next." },
   ]);
   const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
 
@@ -384,7 +456,7 @@ test("task hints are injected into the user message", async () => {
 
   const user = client.calls[0].messages.find((m) => m.role === "user");
   assert.match(user.content, /## Task focus/);
-  assert.match(user.content, /Run the relevant tests first/);
+  assert.match(user.content, /Mandatory first step/);
 });
 
 test("planning and hints can be disabled", async () => {
@@ -412,15 +484,105 @@ test("premature final without tools is nudged to use tools", async () => {
     { role: "assistant", content: "I created greet.mjs for you." },
     { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
     { role: "assistant", content: "Done — files created and test passed." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("add", { a: 0, b: 0 })],
+    },
+    { role: "assistant", content: "Created greet.mjs; tests already present and passing." },
   ]);
   const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
 
   const result = await loop.run("Create greet.mjs and test.mjs, then run node test.mjs.");
 
-  assert.equal(result.steps.length, 2);
-  assert.equal(result.steps[0].kind, "tool-calls");
-  assert.equal(result.steps[1].kind, "final");
+  assert.equal(result.stopReason, "completed");
   assert.match(client.calls[1].messages.at(-1).content, /without calling any tools/);
+  // After a non-test tool call plus a success claim, verify nudge should fire.
+  assert.ok(
+    client.calls.some((c) =>
+      c.messages.some(
+        (m) => m.role === "user" && /verification command|run_command/i.test(m.content),
+      ),
+    ),
+  );
+});
+
+test("test-fix goals block edit_file until a pretest run_command", async () => {
+  const registry = makeRegistry();
+  registry.register({
+    name: "edit_file",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+    execute: () => ({ replacements: 1 }),
+  });
+  let runs = 0;
+  registry.register({
+    name: "run_command",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string" } },
+      required: ["command"],
+    },
+    execute: () => {
+      runs += 1;
+      return {
+        exitCode: runs === 1 ? 1 : 0,
+        stdout: runs === 1 ? "fail" : "ok",
+        stderr: "",
+      };
+    },
+  });
+
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        toolCall("edit_file", { path: "lib/math.mjs", old_string: "a-b", new_string: "a+b" }),
+      ],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "node test.mjs" })],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        toolCall("edit_file", { path: "lib/math.mjs", old_string: "a-b", new_string: "a+b" }),
+      ],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "node test.mjs" })],
+    },
+    { role: "assistant", content: "Fixed the bugs; node test.mjs passed." },
+  ]);
+  const loop = new AgentLoop({ client, registry, planning: false, maxSteps: 8 });
+
+  const result = await loop.run(
+    "Run node test.mjs — it fails because of bugs in lib/math.mjs. Fix the bugs so all tests pass.",
+  );
+
+  const firstEdit = result.steps[0].toolCalls[0];
+  assert.equal(firstEdit.name, "edit_file");
+  assert.equal(firstEdit.ok, false);
+  assert.match(firstEdit.error, /Blocked/);
+
+  const secondEdit = result.steps[2].toolCalls[0];
+  assert.equal(secondEdit.name, "edit_file");
+  assert.equal(secondEdit.ok, true);
+  assert.equal(result.stopReason, "completed");
+  assert.match(result.text, /passed/);
 });
 
 test("empty answer on a read question is nudged", async () => {
@@ -437,47 +599,4 @@ test("empty answer on a read question is nudged", async () => {
 
   assert.equal(result.text, "8080");
   assert.match(client.calls[1].messages.at(-1).content, /empty/i);
-});
-
-test("terranRag injects corpus context into the user message", async () => {
-  const server = http.createServer(async (req, res) => {
-    if (req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", service: "aura-context-hub-rest" }));
-      return;
-    }
-    if (req.url?.startsWith("/admin/corpus-search")) {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          results: [{ content: "Terran hit text.", score: 0.5, metadata: { fileName: "doc.md" } }],
-          warnings: [],
-          scope: { mode: "single", namespace: "general" },
-        }),
-      );
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
-  await new Promise((resolve) => server.listen(0, resolve));
-  const { port } = server.address();
-
-  const client = new FakeClient([{ role: "assistant", content: "answer" }]);
-  const loop = new AgentLoop({
-    client,
-    registry: makeRegistry(),
-    terranRag: { restUrl: `http://127.0.0.1:${port}` },
-  });
-
-  try {
-    const result = await loop.run("what is the policy?");
-    assert.equal(result.text, "answer");
-    const user = client.calls[0].messages.find((m) => m.role === "user");
-    assert.match(user.content, /what is the policy\?/);
-    assert.match(user.content, /Terran corpus context/);
-    assert.match(user.content, /Terran hit text/);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
 });

@@ -7,7 +7,6 @@
  * const agent = await createAgent({ model: "qwen3-coder:30b" });
  * const { text } = await agent.run("summarize src/agent-loop.mjs");
  */
-
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
 import { buildProjectContext } from "./project-index.mjs";
@@ -16,19 +15,11 @@ import { OllamaClient } from "./ollama-client.mjs";
 import { configureClientModel } from "./prompt-enhancements.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
-import {
-  assertTerranInstalled,
-  assertTerranReady,
-  detectTerranInstalled,
-  detectTerranRunning,
-  gatherTerranContext,
-  makeTerranRagOptions,
-  terranCorpusSearch,
-  TerranError,
-} from "./terran-client.mjs";
 
 export { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+
 export { buildEnvironmentContext, buildSystemPrompt } from "./context-builder.mjs";
+
 export {
   buildProjectContext,
   chunkText,
@@ -41,6 +32,7 @@ export {
   searchProjectIndex,
   DEFAULT_EMBEDDING_MODEL,
 } from "./project-index.mjs";
+
 export {
   compactMessages,
   estimateTokens,
@@ -49,7 +41,9 @@ export {
   DEFAULT_KEEP_RECENT,
   DEFAULT_MAX_CHARS,
 } from "./compaction.mjs";
+
 export { McpClient, McpError, registerMcpTools } from "./mcp-client.mjs";
+
 export {
   assertToolCapable,
   detectCapabilities,
@@ -68,6 +62,7 @@ export {
   resolveModelDetected,
   suggestModel,
 } from "./model-routing.mjs";
+
 export {
   DEFAULT_NUM_CTX,
   DEFAULT_TEMPERATURE,
@@ -75,21 +70,32 @@ export {
   OllamaClient,
   OllamaClientError,
 } from "./ollama-client.mjs";
+
 export {
   COMPLEX_GOAL_MIN_WORDS,
   PLANNING_USER_MESSAGE,
+  completionVerifyNudge,
   configureClientModel,
   detectTaskHints,
+  finalAnswerNudge,
   formatTaskConstraints,
   isComplexGoal,
   isGptOssModel,
+  mutationBlockedUntilPretest,
+  prematureFinalNudge,
   resolveThinkSetting,
 } from "./prompt-enhancements.mjs";
+
 export { createOpenAIServer } from "./openai-server.mjs";
+
 export { changedFilesFromSteps, SessionStore } from "./session-store.mjs";
+
 export { ToolRegistry } from "./tool-registry.mjs";
+
 export { registerBuiltinTools } from "./tools/builtin.mjs";
+
 export { registerProjectSearchTool } from "./tools/project-search.mjs";
+
 export {
   MAX_TOOL_OUTPUT_CHARS,
   registerFileTools,
@@ -98,20 +104,30 @@ export {
   truncateMiddle,
   truncateOutput,
 } from "./tools/fs.mjs";
+
 export { globToRegExp, registerSearchTools } from "./tools/search.mjs";
+
 export { registerShellTools } from "./tools/shell.mjs";
+
 export {
-  assertTerranInstalled,
-  assertTerranReady,
-  detectTerranInstalled,
-  detectTerranRunning,
-  gatherTerranContext,
-  makeTerranRagOptions,
-  terranCorpusSearch,
-  formatTerranHits,
-  TerranError,
-  DEFAULT_TERRAN_REST_PORT,
-} from "./terran-client.mjs";
+  assertFetchableUrl,
+  bodyToText,
+  fetchUrlContent,
+  htmlToText,
+  lexicalScore,
+  microRagPage,
+  registerFetchUrlTool,
+} from "./tools/fetch-url.mjs";
+
+export {
+  decodeHtmlEntities,
+  formatWebSearchResults,
+  parseDuckDuckGoHtml,
+  registerWebSearchTool,
+  searchDuckDuckGo,
+  stripTags,
+  unwrapDuckDuckGoUrl,
+} from "./tools/web-search.mjs";
 
 /**
  * One-call agent setup: Ollama client, builtin tools, context-built system
@@ -138,15 +154,13 @@ export {
  * @param {boolean} [options.projectIndex] Build/search local project index (default true).
  * @param {string} [options.embeddingModel] Embedding model for project index.
  * @param {boolean} [options.projectBootstrap] First-turn README/RAG injection (default true).
- * @param {boolean} [options.terran] Search Aura Terran corpora on every user message.
- * @param {string} [options.terranNamespace] Optional Terran corpus namespace.
- * @param {boolean} [options.terranWeb] Blend Terran web search into corpus REST calls.
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
  * @param {boolean} [options.planning] Planning pre-pass on complex first turns (default true).
  * @param {boolean} [options.taskHints] Task-type constraint hints (default true).
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).
  */
+
 export async function createAgent({
   model = "auto",
   baseUrl,
@@ -160,9 +174,6 @@ export async function createAgent({
   builtinTools = true,
   projectIndex = true,
   projectBootstrap = true,
-  terran = false,
-  terranNamespace,
-  terranWeb = false,
   embeddingModel,
   systemPrompt,
   planning = true,
@@ -170,7 +181,6 @@ export async function createAgent({
   think,
   client,
 } = {}) {
-  if (terran) await assertTerranReady({ includeWebSearch: terranWeb });
   let resolvedModel = model;
   const resolvedClient =
     client ??
@@ -210,7 +220,6 @@ export async function createAgent({
   }
   for (const tool of tools ?? []) registry.register(tool);
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
-
   const prompt =
     systemPrompt ??
     (await buildSystemPrompt({
@@ -223,7 +232,6 @@ export async function createAgent({
         index: projectIndex,
       }),
     }));
-
   const loop = new AgentLoop({
     client: resolvedClient,
     registry,
@@ -240,11 +248,7 @@ export async function createAgent({
           embeddingModel,
         }
       : false,
-    terranRag: terran
-      ? makeTerranRagOptions({ namespace: terranNamespace, includeWebSearch: terranWeb })
-      : false,
   });
-
   return {
     loop,
     registry,

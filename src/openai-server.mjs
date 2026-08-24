@@ -23,7 +23,6 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
  * @param {number} [options.maxSteps]
  * @param {string} [options.defaultModel] Reported in responses when the request omits `model`.
  * @param {object|false} [options.projectBootstrap] First-turn README/RAG bootstrap.
- * @param {object|false} [options.terranRag] Terran corpus RAG on every user message.
  * @returns {http.Server}
  */
 export function createOpenAIServer({
@@ -33,7 +32,6 @@ export function createOpenAIServer({
   maxSteps = 10,
   defaultModel = "unknown",
   projectBootstrap = false,
-  terranRag = false,
 }) {
   return http.createServer(async (req, res) => {
     try {
@@ -43,7 +41,7 @@ export function createOpenAIServer({
       }
       if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
         return await handleChatCompletions(
-          { client, registry, systemPrompt, maxSteps, defaultModel, projectBootstrap, terranRag },
+          { client, registry, systemPrompt, maxSteps, defaultModel, projectBootstrap },
           req,
           res,
         );
@@ -118,7 +116,6 @@ async function handleChatCompletions(options, req, res) {
     maxSteps: options.maxSteps,
     compaction: {},
     projectBootstrap: options.projectBootstrap,
-    terranRag: options.terranRag,
   });
   const result = await loop.run(goal, { history });
 

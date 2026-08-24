@@ -25,11 +25,6 @@ import { DEFAULT_NUM_CTX, DEFAULT_THINK, OllamaClient, OllamaClientError } from 
 import { configureClientModel } from "./prompt-enhancements.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
-import {
-  assertTerranReady,
-  makeTerranRagOptions,
-  TerranError,
-} from "./terran-client.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 import {
@@ -124,21 +119,6 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       case "--no-index":
         options.noIndex = true;
         break;
-      case "--terran":
-        options.terran = true;
-        break;
-      case "--web":
-        options.terranWeb = true;
-        options.terran = true;
-        break;
-      case "--ns": {
-        const ns = value(arg, ++i);
-        if (ns !== undefined) {
-          options.terranNamespace = ns;
-          options.terran = true;
-        }
-        break;
-      }
       case "--json":
         options.json = true;
         break;
@@ -233,9 +213,6 @@ Options:
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --embed-model <name> Embedding model for project index (default nomic-embed-text)
   --no-index           Skip building the local project vector index
-  --terran             Search Aura Terran corpora for each user message (Direct RAG REST)
-  --ns <namespace>     Terran corpus namespace (implies --terran)
-  --web                Blend Terran web search into corpus REST calls (implies --terran)
   --think <mode>       Native model reasoning: auto (default), true, false/off,
                        or low|medium|high|max (for thinking models / gpt-oss)
   --no-plan            Skip the planning pre-pass on complex goals
@@ -255,12 +232,11 @@ Examples:
   halo-agent models
   halo-agent models --json --base-url http://127.0.0.1:11434
   halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
-  halo-agent "what is our refund policy?" --terran --ns general
-  halo-agent "latest Node.js LTS release notes" --terran --web
+  halo-agent "what is the latest Node.js LTS version?"
 
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
-  3  Ollama error   4  MCP attach failed   5  Terran unavailable`);
+  3  Ollama error   4  MCP attach failed`);
 }
 
 function makeProjectBootstrap(options, client) {
@@ -270,18 +246,6 @@ function makeProjectBootstrap(options, client) {
     embeddingModel: options.embedModel,
     onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
   };
-}
-
-function makeTerranRag(options) {
-  if (!options.terran) return false;
-  const rag = makeTerranRagOptions({
-    namespace: options.terranNamespace,
-    includeWebSearch: options.terranWeb,
-  });
-  if (!options.quiet) {
-    rag.onWarning = (message) => console.error(`[terran] ${message}`);
-  }
-  return rag;
 }
 
 function makeApprovalPrompt() {
@@ -404,19 +368,6 @@ async function main() {
     return;
   }
 
-  if (options.terran) {
-    try {
-      await assertTerranReady({ includeWebSearch: options.terranWeb });
-    } catch (err) {
-      if (err instanceof TerranError) {
-        console.error(err.message);
-        process.exitCode = 5;
-        return;
-      }
-      throw err;
-    }
-  }
-
   const client = new OllamaClient({
     baseUrl: options.baseUrl,
     model: options.model,
@@ -499,7 +450,6 @@ async function main() {
       maxSteps: options.maxSteps,
       defaultModel: options.model,
       projectBootstrap: makeProjectBootstrap(options, client),
-      terranRag: makeTerranRag(options),
     });
     server.listen(options.port, () => {
       const { port } = server.address();
@@ -525,7 +475,6 @@ async function main() {
     planning: !options.noPlan,
     taskHints: !options.noHints,
     projectBootstrap: makeProjectBootstrap(options, client),
-    terranRag: makeTerranRag(options),
     onBootstrap: options.quiet
       ? undefined
       : ({ readme, ragHits }) => {
@@ -533,14 +482,6 @@ async function main() {
           if (readme) parts.push("README");
           if (ragHits > 0) parts.push(`${ragHits} indexed passage(s)`);
           if (parts.length > 0) console.error(`[bootstrap] auto-retrieved ${parts.join(" + ")}`);
-        },
-    onTerranRag: options.quiet
-      ? undefined
-      : ({ hitCount, webHitCount }) => {
-          const parts = [];
-          if (hitCount > 0) parts.push(`${hitCount} corpus passage(s)`);
-          if (webHitCount > 0) parts.push(`${webHitCount} web result(s)`);
-          if (parts.length > 0) console.error(`[terran] auto-retrieved ${parts.join(" + ")}`);
         },
   });
 
