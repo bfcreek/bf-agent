@@ -34,7 +34,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  */
 
 import { defaultGatesConfig } from "./gates.mjs";
-import { DEFAULT_CHECKPOINT_REL } from "./checkpoint.mjs";
+import { DEFAULT_CHECKPOINT_REL, checkpointRelForLanguage } from "./checkpoint.mjs";
 
 const LANGUAGE_ALIASES = {
   js: "js",
@@ -270,6 +270,12 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     ? false
     : cli.progression ?? fileConfig.progression.enabled;
 
+  const languageFilter = cli.languageFilter ?? parseLanguageFilter(fileConfig.language) ?? null;
+  const checkpointPath = cli.checkpointPath
+    ?? (languageFilter?.length
+      ? checkpointRelForLanguage(languageFilter, fileConfig.checkpointPath)
+      : fileConfig.checkpointPath);
+
   return {
     configPath: cli.configPath ?? null,
     models: cli.models ?? fileConfig.models,
@@ -278,7 +284,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     timeoutSeconds: cli.timeoutSeconds ?? fileConfig.timeoutSeconds,
     scenarioFilter: cli.scenarioFilter ?? fileConfig.scenario ?? null,
     scenarioList: cli.scenarioList ?? fileConfig.scenarios,
-    languageFilter: cli.languageFilter ?? parseLanguageFilter(fileConfig.language) ?? null,
+    languageFilter,
     maxTier: cli.maxTier ?? fileConfig.progression.maxTier,
     minTier: cli.minTier ?? null,
     progression: progressionEnabled,
@@ -301,7 +307,8 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,
     capabilityJson: cli.noReport ? null : cli.capabilityJson ?? fileConfig.report.capability,
     publicJson: cli.noReport ? null : cli.publicJson ?? fileConfig.report.public,
-    checkpointPath: cli.checkpointPath ?? fileConfig.checkpointPath,
+    checkpointPath,
+    checkpointExplicit: Boolean(cli.checkpointPath),
     resume: cli.resume,
     reset: cli.reset,
   };

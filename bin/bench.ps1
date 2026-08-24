@@ -4,7 +4,9 @@
 #        .\bin\bench.ps1 -Language csharp
 #        .\bin\bench.ps1 -Language python -Flat
 #        .\bin\bench.ps1 -Resume
+#        .\bin\bench.ps1 -Resume -Language csharp
 #        .\bin\bench.ps1 -Reset
+#        .\bin\bench.ps1 -Reset -Language python
 
 param(
     [switch]$SkipJudge,
@@ -21,7 +23,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BenchScript = Join-Path $RepoRoot "evals\dev-bench.mjs"
-$CheckpointPath = Join-Path $RepoRoot ".halo-agent\bench-checkpoint.json"
+$CheckpointDir = Join-Path $RepoRoot ".halo-agent"
 
 function Test-NodeReady {
     $node = Get-Command node -ErrorAction SilentlyContinue
@@ -53,20 +55,69 @@ function Get-ScenarioCatalog {
     }
 }
 
-function Get-BenchCheckpoint {
-    if (-not (Test-Path $CheckpointPath)) { return $null }
-    try {
-        return Get-Content $CheckpointPath -Raw | ConvertFrom-Json
+function Get-CheckpointLanguage {
+    param($Checkpoint)
+
+    if ($null -eq $Checkpoint) { return $null }
+    if ($null -ne $Checkpoint.languageFilter) {
+        $langs = @($Checkpoint.languageFilter | Where-Object { $_ })
+        if ($langs.Count -gt 0) { return ($langs -join ",") }
     }
-    catch {
+    $label = [string]$Checkpoint.selectionLabel
+    if ($label -match '^language ([^,]+), ') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Get-BenchCheckpoints {
+    if (-not (Test-Path $CheckpointDir)) { return @() }
+    $items = @()
+    foreach ($file in @(Get-ChildItem -Path $CheckpointDir -File -Filter "bench-checkpoint*.json" -ErrorAction SilentlyContinue)) {
+        try {
+            $data = Get-Content $file.FullName -Raw | ConvertFrom-Json
+        }
+        catch {
+            continue
+        }
+        if (-not $data) { continue }
+        $items += [pscustomobject]@{
+            Path = $file.FullName
+            Language = Get-CheckpointLanguage $data
+            Data = $data
+        }
+    }
+    return @($items)
+}
+
+function Get-BenchCheckpoint {
+    param([string]$Language)
+
+    $all = @(Get-BenchCheckpoints)
+    if ($Language) {
+        $normalized = Convert-BenchLanguage $Language
+        $match = @(
+            $all | Where-Object {
+                $_.Language -and ($_.Language -eq $normalized -or $_.Language -eq $Language)
+            }
+        )
+        if ($match.Count -ge 1) { return $match[0] }
         return $null
     }
+    if ($all.Count -eq 1) { return $all[0] }
+    return $null
 }
 
 function Reset-BenchCheckpoint {
+    param([string]$Language)
+
     Push-Location $RepoRoot
     try {
-        & node $BenchScript --reset
+        $resetArgs = @("--reset")
+        if ($Language) {
+            $resetArgs += @("--language", (Convert-BenchLanguage $Language))
+        }
+        & node $BenchScript @resetArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to reset bench checkpoint (exit $LASTEXITCODE)"
         }
@@ -246,10 +297,10 @@ function Get-ResumeSelectionFromCheckpoint {
     $names = @($Checkpoint.scenarioNames)
     if ($names.Count -eq 0) { return $null }
 
+    $language = Get-CheckpointLanguage $Checkpoint
     $label = [string]$Checkpoint.selectionLabel
-    $language = $null
     if ($label -match '^language ([^,]+), (.+)$') {
-        $language = $Matches[1]
+        if (-not $language) { $language = $Matches[1] }
         $label = $Matches[2]
     }
 
@@ -276,10 +327,58 @@ function Get-ResumeSelectionFromCheckpoint {
     return $selection
 }
 
+function Format-ResumeHint {
+    param($Checkpoints)
+
+    if ($Checkpoints.Count -eq 0) { return "" }
+    if ($Checkpoints.Count -eq 1) {
+        $cp = $Checkpoints[0].Data
+        $completed = @($cp.completedNames).Count
+        $total = @($cp.scenarioNames).Count
+        return " ($completed/$total done: $($cp.selectionLabel))"
+    }
+
+    $bits = foreach ($item in $Checkpoints) {
+        $done = @($item.Data.completedNames).Count
+        $total = @($item.Data.scenarioNames).Count
+        $lang = if ($item.Language) { $item.Language } else { "all" }
+        "${lang} $done/$total"
+    }
+    return " ($($bits -join '; '))"
+}
+
+function Show-ResumeMenu {
+    param($Checkpoints)
+
+    if ($Checkpoints.Count -eq 0) { return $null }
+    if ($Checkpoints.Count -eq 1) {
+        return Get-ResumeSelectionFromCheckpoint -Checkpoint $Checkpoints[0].Data
+    }
+
+    Write-Host ""
+    Write-Host "Interrupted runs:"
+    $valid = @("0")
+    for ($i = 0; $i -lt $Checkpoints.Count; $i++) {
+        $item = $Checkpoints[$i]
+        $done = @($item.Data.completedNames).Count
+        $total = @($item.Data.scenarioNames).Count
+        $lang = if ($item.Language) { $item.Language } else { "all" }
+        $num = $i + 1
+        Write-Host ("  {0}) {1,-8} {2}/{3}  {4}" -f $num, $lang, $done, $total, $item.Data.selectionLabel)
+        $valid += [string]$num
+    }
+    Write-Host "  0) Back"
+    Write-Host ""
+
+    $choice = Read-MenuChoice -Prompt "Resume" -ValidChoices $valid
+    if ($choice -eq "0") { return $null }
+    return Get-ResumeSelectionFromCheckpoint -Checkpoint $Checkpoints[[int]$choice - 1].Data
+}
+
 Test-NodeReady
 
 if ($Reset) {
-    Reset-BenchCheckpoint
+    Reset-BenchCheckpoint -Language $Language
     Write-Host "Bench checkpoint cleared." -ForegroundColor Green
     if (-not $Resume) {
         exit 0
@@ -288,13 +387,30 @@ if ($Reset) {
 
 $scenarios = Get-ScenarioCatalog
 $tiers = ($scenarios.Tier | Sort-Object -Unique)
-$checkpoint = Get-BenchCheckpoint
 
 if ($Resume) {
-    if (-not $checkpoint) {
-        Write-Host "No saved bench progress to resume." -ForegroundColor Yellow
+    $item = Get-BenchCheckpoint -Language $Language
+    if (-not $item) {
+        $all = @(Get-BenchCheckpoints)
+        if ($Language) {
+            Write-Host "No saved $Language bench progress to resume." -ForegroundColor Yellow
+        }
+        elseif ($all.Count -gt 1) {
+            Write-Host "Multiple language checkpoints found. Resume one with -Language:" -ForegroundColor Yellow
+            foreach ($cp in $all) {
+                $done = @($cp.Data.completedNames).Count
+                $total = @($cp.Data.scenarioNames).Count
+                $lang = if ($cp.Language) { $cp.Language } else { "all" }
+                Write-Host "  $lang  $done/$total  $($cp.Data.selectionLabel)"
+            }
+            Write-Host "Example: .\bin\bench.ps1 -Resume -Language csharp"
+        }
+        else {
+            Write-Host "No saved bench progress to resume." -ForegroundColor Yellow
+        }
         exit 1
     }
+    $checkpoint = $item.Data
     $selection = Get-ResumeSelectionFromCheckpoint -Checkpoint $checkpoint
     if (-not $selection) {
         Write-Host "Could not reconstruct the interrupted run from the checkpoint." -ForegroundColor Yellow
@@ -319,13 +435,8 @@ if ($Language) {
 }
 
 while ($true) {
-    $checkpoint = Get-BenchCheckpoint
-    $resumeHint = ""
-    if ($checkpoint) {
-        $completed = @($checkpoint.completedNames).Count
-        $total = @($checkpoint.scenarioNames).Count
-        $resumeHint = " ($completed/$total done: $($checkpoint.selectionLabel))"
-    }
+    $checkpoints = @(Get-BenchCheckpoints)
+    $resumeHint = Format-ResumeHint $checkpoints
 
     Write-Host ""
     Write-Host "=== halo-agent dev bench ===" -ForegroundColor Green
@@ -335,7 +446,7 @@ while ($true) {
     Write-Host "  3) Run by tier"
     Write-Host "  4) Run by scenario"
     Write-Host "  5) Run by language"
-    if ($checkpoint) {
+    if ($checkpoints.Count -gt 0) {
         Write-Host "  6) Resume interrupted run$resumeHint" -ForegroundColor Cyan
         Write-Host "  7) Reset saved progress"
     }
@@ -343,7 +454,7 @@ while ($true) {
     Write-Host ""
 
     $validMain = @("0", "1", "2", "3", "4", "5")
-    if ($checkpoint) { $validMain += @("6", "7") }
+    if ($checkpoints.Count -gt 0) { $validMain += @("6", "7") }
     $main = Read-MenuChoice -Prompt "Choice" -ValidChoices $validMain
 
     if ($main -eq "0") {
@@ -360,9 +471,8 @@ while ($true) {
     $useResume = $false
 
     if ($main -eq "6") {
-        $selection = Get-ResumeSelectionFromCheckpoint -Checkpoint $checkpoint
+        $selection = Show-ResumeMenu -Checkpoints $checkpoints
         if (-not $selection) {
-            Write-Host "Could not reconstruct the interrupted run. Use option 7 to reset." -ForegroundColor Yellow
             continue
         }
         $useResume = $true

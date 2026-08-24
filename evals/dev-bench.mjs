@@ -25,11 +25,15 @@ import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
 import { loadBenchOptions } from "./config.mjs";
 import {
+  DEFAULT_CHECKPOINT_REL,
   buildCheckpointRecord,
   buildRunKey,
   checkpointMatchesRun,
+  clearAllCheckpoints,
   clearCheckpoint,
   describeRunSelection,
+  languageFilterFromCheckpoint,
+  listCheckpoints,
   loadCheckpoint,
   resolveCheckpointPath,
   saveCheckpoint,
@@ -401,18 +405,31 @@ async function main() {
   }
 
   const { options, configPath } = await loadBenchOptions(argv);
-  const checkpointPath = resolveCheckpointPath(options.checkpointPath);
+  let checkpointPath = resolveCheckpointPath(options.checkpointPath);
 
   if (options.reset) {
-    await clearCheckpoint(checkpointPath);
-    console.error(`checkpoint cleared: ${checkpointPath}`);
+    if (!options.languageFilter?.length && !options.checkpointExplicit) {
+      const cleared = await clearAllCheckpoints();
+      if (cleared.length === 0) {
+        await clearCheckpoint(checkpointPath);
+        console.error(`checkpoint cleared: ${checkpointPath}`);
+      } else {
+        for (const clearedPath of cleared) {
+          console.error(`checkpoint cleared: ${clearedPath}`);
+        }
+      }
+    } else {
+      await clearCheckpoint(checkpointPath);
+      console.error(`checkpoint cleared: ${checkpointPath}`);
+    }
+    const valueFlags = new Set(["--checkpoint", "--language", "--lang"]);
     const onlyReset =
       argv.length === 0 ||
       argv.every(
         (arg, index) =>
           arg === "--reset" ||
-          arg === "--checkpoint" ||
-          (index > 0 && argv[index - 1] === "--checkpoint"),
+          valueFlags.has(arg) ||
+          (index > 0 && valueFlags.has(argv[index - 1])),
       );
     if (onlyReset) return;
   }
@@ -421,6 +438,44 @@ async function main() {
     console.error(`config: ${configPath}`);
   } else {
     console.error("config: (built-in defaults)");
+  }
+
+  let resumeCheckpoint = null;
+  if (options.resume) {
+    resumeCheckpoint = await loadCheckpoint(checkpointPath);
+    if (!resumeCheckpoint && options.languageFilter?.length && !options.checkpointExplicit) {
+      const fallbackPath = resolveCheckpointPath(DEFAULT_CHECKPOINT_REL);
+      if (fallbackPath !== checkpointPath) {
+        const fallback = await loadCheckpoint(fallbackPath);
+        const langs = languageFilterFromCheckpoint(fallback);
+        if (langs && langs.join("\0") === options.languageFilter.join("\0")) {
+          resumeCheckpoint = fallback;
+          checkpointPath = fallbackPath;
+        }
+      }
+    }
+    if (!resumeCheckpoint && !options.languageFilter?.length && !options.checkpointExplicit) {
+      const found = await listCheckpoints();
+      if (found.length === 1) {
+        resumeCheckpoint = found[0].record;
+        checkpointPath = found[0].path;
+        const langs = languageFilterFromCheckpoint(found[0].record);
+        if (langs?.length) options.languageFilter = langs;
+      } else if (found.length > 1) {
+        console.error("Multiple language checkpoints found. Resume one with --language:");
+        for (const item of found) {
+          const langs = item.languageFilter?.join("+") ?? "all";
+          const done = item.record.completedNames?.length ?? 0;
+          const total = item.record.scenarioNames?.length ?? 0;
+          console.error(`  ${langs}  ${done}/${total}  (${item.record.selectionLabel ?? item.fileName})`);
+        }
+        process.exit(1);
+      }
+    }
+    if (resumeCheckpoint && !options.languageFilter?.length) {
+      const langs = languageFilterFromCheckpoint(resumeCheckpoint);
+      if (langs?.length) options.languageFilter = langs;
+    }
   }
 
   validateScenarioSelection(options);
@@ -460,7 +515,7 @@ async function main() {
   const scenarioNames = scenarios.map((s) => s.name);
   const runKey = buildRunKey(scenarioNames, options);
   const selectionLabel = describeRunSelection(scenarioNames, options);
-  let checkpoint = options.resume ? await loadCheckpoint(checkpointPath) : null;
+  let checkpoint = options.resume ? resumeCheckpoint : await loadCheckpoint(checkpointPath);
 
   if (options.resume) {
     if (!checkpoint) {
@@ -509,6 +564,7 @@ async function main() {
         completedNames,
         results,
         startedAt: resumeStartedAt,
+        languageFilter: options.languageFilter,
         resolvedModel: model,
         stoppedAtTier: stopped,
         stopReason: reason,

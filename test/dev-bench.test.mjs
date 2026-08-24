@@ -14,9 +14,13 @@ import {
 import {
   buildCheckpointRecord,
   buildRunKey,
+  checkpointRelForLanguage,
   checkpointMatchesRun,
+  clearAllCheckpoints,
   clearCheckpoint,
   describeRunSelection,
+  languageFilterFromCheckpoint,
+  listCheckpoints,
   loadCheckpoint,
   saveCheckpoint,
   shouldStopBench,
@@ -156,10 +160,25 @@ test("parseLanguageFilter normalizes aliases", () => {
 test("parseCliArgs --language filters the scenario set", () => {
   const opts = parseCliArgs(["--language", "csharp"], defaultConfig());
   assert.deepEqual(opts.languageFilter, ["csharp"]);
+  assert.match(opts.checkpointPath.replaceAll("\\", "/"), /bench-checkpoint-csharp\.json$/);
+  assert.equal(opts.checkpointExplicit, false);
   const selected = selectScenarios(opts);
   assert.ok(selected.length > 0);
   assert.ok(selected.every((s) => s.language === "csharp"));
   assert.ok(selected.some((s) => s.name === "cs-catalog-cli"));
+});
+
+test("parseCliArgs --language uses a per-language checkpoint unless --checkpoint is set", () => {
+  const python = parseCliArgs(["--language", "python"], defaultConfig());
+  const csharp = parseCliArgs(["--language", "csharp"], defaultConfig());
+  const js = parseCliArgs(["--language", "js"], defaultConfig());
+  const explicit = parseCliArgs(["--language", "csharp", "--checkpoint", "tmp/custom.json"], defaultConfig());
+  const all = parseCliArgs([], defaultConfig());
+  assert.notEqual(python.checkpointPath, csharp.checkpointPath);
+  assert.notEqual(python.checkpointPath, js.checkpointPath);
+  assert.notEqual(python.checkpointPath, all.checkpointPath);
+  assert.equal(explicit.checkpointPath, "tmp/custom.json");
+  assert.equal(explicit.checkpointExplicit, true);
 });
 
 test("selectScenarios languageFilter keeps js scenarios without a language field", () => {
@@ -646,6 +665,70 @@ test("describeRunSelection labels tier and scenario runs", () => {
   );
 });
 
+test("checkpointRelForLanguage isolates js, python, and csharp files", () => {
+  assert.equal(checkpointRelForLanguage(null), ".halo-agent/bench-checkpoint.json");
+  assert.equal(checkpointRelForLanguage(["csharp"]), ".halo-agent/bench-checkpoint-csharp.json");
+  assert.equal(checkpointRelForLanguage(["python"]), ".halo-agent/bench-checkpoint-python.json");
+  assert.equal(checkpointRelForLanguage(["js"]), ".halo-agent/bench-checkpoint-js.json");
+  assert.equal(
+    checkpointRelForLanguage(["csharp", "python"]),
+    ".halo-agent/bench-checkpoint-csharp+python.json",
+  );
+});
+
+test("languageFilterFromCheckpoint reads stored filter or selection label", () => {
+  assert.deepEqual(languageFilterFromCheckpoint({ languageFilter: ["python"] }), ["python"]);
+  assert.deepEqual(
+    languageFilterFromCheckpoint({ selectionLabel: "language csharp, tier ≤5 (progression)" }),
+    ["csharp"],
+  );
+  assert.equal(languageFilterFromCheckpoint({ selectionLabel: "tier ≤5 (progression)" }), null);
+});
+
+test("listCheckpoints and clearAllCheckpoints keep language files independent", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-langs-"));
+  try {
+    const pythonPath = path.join(dir, "bench-checkpoint-python.json");
+    const csharpPath = path.join(dir, "bench-checkpoint-csharp.json");
+    await saveCheckpoint(
+      pythonPath,
+      buildCheckpointRecord({
+        runKey: "py",
+        selectionLabel: "language python, tier ≤5 (progression)",
+        scenarioNames: ["py-greet"],
+        completedNames: ["py-greet"],
+        results: [],
+        startedAt: "2026-01-01T00:00:00.000Z",
+        languageFilter: ["python"],
+      }),
+    );
+    await saveCheckpoint(
+      csharpPath,
+      buildCheckpointRecord({
+        runKey: "cs",
+        selectionLabel: "language csharp, tier ≤5 (progression)",
+        scenarioNames: ["cs-greet"],
+        completedNames: [],
+        results: [],
+        startedAt: "2026-01-01T00:00:00.000Z",
+        languageFilter: ["csharp"],
+      }),
+    );
+    const listed = await listCheckpoints(dir);
+    assert.equal(listed.length, 2);
+    assert.ok(listed.some((item) => item.languageFilter?.[0] === "python"));
+    assert.ok(listed.some((item) => item.languageFilter?.[0] === "csharp"));
+    await clearCheckpoint(pythonPath);
+    assert.equal(await loadCheckpoint(pythonPath), null);
+    assert.equal((await loadCheckpoint(csharpPath)).runKey, "cs");
+    const cleared = await clearAllCheckpoints(dir);
+    assert.ok(cleared.some((p) => p.endsWith("bench-checkpoint-csharp.json")));
+    assert.equal(await loadCheckpoint(csharpPath), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("checkpoint save/load round-trip and clear", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-cp-"));
   const checkpointPath = path.join(dir, "bench-checkpoint.json");
@@ -672,6 +755,7 @@ test("parseCliArgs accepts --resume and --reset", () => {
   assert.equal(opts.resume, true);
   assert.equal(opts.reset, true);
   assert.equal(opts.checkpointPath, "tmp/checkpoint.json");
+  assert.equal(opts.checkpointExplicit, true);
 });
 
 test("isUsableVerdict rejects invalid judge JSON", () => {

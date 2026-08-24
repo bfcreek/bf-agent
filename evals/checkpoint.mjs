@@ -4,11 +4,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const CHECKPOINT_VERSION = 1;
 export const DEFAULT_CHECKPOINT_REL = ".halo-agent/bench-checkpoint.json";
+const CHECKPOINT_FILE_RE = /^bench-checkpoint(?:-(.+))?\.json$/;
 
 /**
  * Stable key for a bench run — changes when scenario set or core options differ.
@@ -59,6 +60,91 @@ export function describeRunSelection(scenarioNames, options) {
  */
 export function resolveCheckpointPath(checkpointPath = DEFAULT_CHECKPOINT_REL) {
   return path.resolve(checkpointPath);
+}
+
+/**
+ * Per-language checkpoint next to the default file.
+ * `--language csharp` → `.halo-agent/bench-checkpoint-csharp.json`
+ *
+ * @param {string[]|null|undefined} languageFilter
+ * @param {string} [baseRel]
+ */
+export function checkpointRelForLanguage(languageFilter, baseRel = DEFAULT_CHECKPOINT_REL) {
+  const langs = Array.isArray(languageFilter) ? languageFilter.filter(Boolean) : [];
+  const posixBase = String(baseRel).replaceAll("\\", "/");
+  if (!langs.length) return posixBase;
+  const dir = path.posix.dirname(posixBase);
+  const file = `bench-checkpoint-${[...langs].sort().join("+")}.json`;
+  return dir === "." ? file : `${dir}/${file}`;
+}
+
+/**
+ * @param {object|null} checkpoint
+ * @returns {string[]|null}
+ */
+export function languageFilterFromCheckpoint(checkpoint) {
+  if (checkpoint?.languageFilter?.length) return [...checkpoint.languageFilter];
+  const label = String(checkpoint?.selectionLabel ?? "");
+  const match = label.match(/^language ([^,]+), /);
+  if (!match) return null;
+  const langs = match[1].split("+").map((part) => part.trim()).filter(Boolean);
+  return langs.length ? langs : null;
+}
+
+/**
+ * @param {string} [dirRel]
+ * @returns {Promise<{path: string, fileName: string, languageKey: string|null, languageFilter: string[]|null, record: object}[]>}
+ */
+export async function listCheckpoints(dirRel = path.posix.dirname(DEFAULT_CHECKPOINT_REL)) {
+  const dir = path.resolve(dirRel);
+  let names;
+  try {
+    names = await readdir(dir);
+  } catch (err) {
+    if (err?.code === "ENOENT") return [];
+    throw err;
+  }
+
+  const found = [];
+  for (const fileName of names) {
+    const match = fileName.match(CHECKPOINT_FILE_RE);
+    if (!match) continue;
+    const fullPath = path.join(dir, fileName);
+    const record = await loadCheckpoint(fullPath);
+    if (!record) continue;
+    found.push({
+      path: fullPath,
+      fileName,
+      languageKey: match[1] ?? null,
+      languageFilter: languageFilterFromCheckpoint(record) ?? (match[1] ? match[1].split("+") : null),
+      record,
+    });
+  }
+  return found;
+}
+
+/**
+ * @param {string} [dirRel]
+ * @returns {Promise<string[]>} Cleared absolute paths.
+ */
+export async function clearAllCheckpoints(dirRel = path.posix.dirname(DEFAULT_CHECKPOINT_REL)) {
+  const dir = path.resolve(dirRel);
+  let names;
+  try {
+    names = await readdir(dir);
+  } catch (err) {
+    if (err?.code === "ENOENT") return [];
+    throw err;
+  }
+
+  const cleared = [];
+  for (const fileName of names) {
+    if (!CHECKPOINT_FILE_RE.test(fileName)) continue;
+    const fullPath = path.join(dir, fileName);
+    await clearCheckpoint(fullPath);
+    cleared.push(fullPath);
+  }
+  return cleared;
 }
 
 /**
@@ -122,6 +208,7 @@ export function checkpointMatchesRun(checkpoint, runKey, scenarioNames) {
  * @param {string[]} params.completedNames
  * @param {object[]} params.results
  * @param {string} params.startedAt
+ * @param {string[]|null} [params.languageFilter]
  * @param {string|null} [params.resolvedModel]
  * @param {number|null} [params.stoppedAtTier]
  * @param {string|null} [params.stopReason]
@@ -133,6 +220,7 @@ export function buildCheckpointRecord({
   completedNames,
   results,
   startedAt,
+  languageFilter = null,
   resolvedModel = null,
   stoppedAtTier = null,
   stopReason = null,
@@ -146,6 +234,7 @@ export function buildCheckpointRecord({
     results,
     startedAt,
     updatedAt: new Date().toISOString(),
+    languageFilter: languageFilter?.length ? [...languageFilter] : null,
     resolvedModel,
     stoppedAtTier,
     stopReason,
