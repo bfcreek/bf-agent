@@ -5,6 +5,14 @@
 
 import { spawn } from "node:child_process";
 
+import {
+  ARTIFACTS_JSON,
+  ARTIFACTS_JUDGE_PROMPT,
+  ARTIFACTS_STEPS_TXT,
+  formatStepSummary,
+  persistAgentArtifacts,
+  persistJudgePrompt,
+} from "./agent-artifacts.mjs";
 import { captureWorkspaceSnapshot, formatSnapshotForPrompt } from "./workspace-snapshot.mjs";
 import { agentAnswerText } from "./scenarios.mjs";
 
@@ -48,6 +56,7 @@ export function buildAgentSpawn(agentBin, args) {
  * @param {number} [input.options.timeoutSeconds]
  */
 export async function judgeRun({ scenario, agentResult, workspaceDir, options = {} }) {
+  await persistAgentArtifacts(workspaceDir, agentResult);
   const snapshot = await captureWorkspaceSnapshot(workspaceDir);
   const retries = options.retries ?? 2;
   let lastRaw = "";
@@ -69,10 +78,11 @@ export async function judgeRun({ scenario, agentResult, workspaceDir, options = 
     if (isUsableVerdict(lastVerdict)) return lastVerdict;
   }
 
-  return lastVerdict;
+  const detail = lastVerdict?.summary || "Judge response was not valid JSON.";
+  throw new Error(detail);
 }
 
-function isUsableVerdict(verdict) {
+export function isUsableVerdict(verdict) {
   return verdict.grade !== "?" && verdict.summary !== "Judge response was not valid JSON.";
 }
 
@@ -115,12 +125,17 @@ function formatAgentStepsForJudge(agentResult) {
  */
 function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
   const steps = formatAgentStepsForJudge(agentResult);
+  const stepSummary = formatStepSummary(agentResult);
   return [
     "## Task",
     scenario.goal,
     "",
     "## Rubric",
     scenario.rubric,
+    "",
+    "## Agent step summary",
+    stepSummary,
+    `(Full trace: read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT} in the workspace snapshot below.)`,
     "",
     "## Agent final answer",
     agentAnswerText(agentResult) || "(empty)",
@@ -167,6 +182,7 @@ export function buildJudgePrompt({ scenario, agentResult, snapshot }) {
   return [
     "You are grading an AI coding agent (halo-agent) that ran against a task in a temp workspace.",
     "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
+    `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering and process criteria.`,
     "",
     buildJudgeGradingContext({ scenario, agentResult, snapshot }),
     "",
@@ -252,16 +268,26 @@ function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+/** Short CLI prompt — full grading context lives in {@link ARTIFACTS_JUDGE_PROMPT}. */
+export function buildJudgeInvocationPrompt() {
+  return [
+    "You are grading an AI coding agent (halo-agent) that ran against a task in a temp workspace.",
+    `Read the full grading instructions, rubric, agent trace, and workspace snapshot from ${ARTIFACTS_JUDGE_PROMPT} in this workspace.`,
+    `For detailed tool-call traces, also read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT}.`,
+    "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
+    "Reply with ONLY a single JSON object matching the schema described in the prompt file — no markdown fences.",
+  ].join("\n");
+}
+
 /**
+ * Build argv for the Cursor CLI judge. Exported for tests (Windows cmd line limit).
  * @param {object} options
- * @param {string} options.prompt
  * @param {string} options.workspaceDir
  * @param {string} options.model
- * @param {string} options.agentBin
- * @param {number} options.timeoutSeconds
+ * @param {string} [options.invocationPrompt]
  */
-export function runCursorAgent({ prompt, workspaceDir, model, agentBin, timeoutSeconds }) {
-  const args = [
+export function buildCursorAgentArgs({ workspaceDir, model, invocationPrompt = buildJudgeInvocationPrompt() }) {
+  return [
     "--print",
     "--trust",
     "--mode",
@@ -272,8 +298,21 @@ export function runCursorAgent({ prompt, workspaceDir, model, agentBin, timeoutS
     "json",
     "--workspace",
     workspaceDir,
-    prompt,
+    invocationPrompt,
   ];
+}
+
+/**
+ * @param {object} options
+ * @param {string} options.prompt
+ * @param {string} options.workspaceDir
+ * @param {string} options.model
+ * @param {string} options.agentBin
+ * @param {number} options.timeoutSeconds
+ */
+export async function runCursorAgent({ prompt, workspaceDir, model, agentBin, timeoutSeconds }) {
+  await persistJudgePrompt(workspaceDir, prompt);
+  const args = buildCursorAgentArgs({ workspaceDir, model });
 
   return new Promise((resolve, reject) => {
     const { command, args: spawnArgs } = buildAgentSpawn(agentBin, args);

@@ -32,6 +32,20 @@ const TASK_HINT_RULES = [
       "Use grep_search or find_files to locate symbols before reading files one at a time.",
   },
   {
+    id: "path-answer",
+    test:
+      /\b(reply with|answer with)\b.{0,40}\b(just|only)\b.{0,40}\b(number|path)\b|\bwhich file\b.{0,40}\b(path|relative)\b|\brelative to the workspace\b/i,
+    constraint:
+      "Reply with only the requested value (path or number) — no quotes, explanation, or extra text.",
+  },
+  {
+    id: "test-verify",
+    test:
+      /\b(run|confirm).{0,50}\b(test\.mjs|tests?)\b.{0,30}\b(pass|succeed|ok)\b|\btest\.mjs\b.{0,40}\b(run|pass|confirm)\b/i,
+    constraint:
+      "Run the test script with run_command (e.g. node test.mjs) as your last tool step, then state the pass/fail output in your final answer.",
+  },
+  {
     id: "config-edit",
     test: /\b(config\.json|\.json)\b.{0,40}\b(change|edit|update|set|flip|modify)\b|\bchange\b.{0,40}\b(debug|true|false)\b/i,
     constraint:

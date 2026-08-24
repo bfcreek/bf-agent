@@ -10,7 +10,22 @@ import {
   parseCliArgs,
   resolveBenchConfigPath,
 } from "../evals/config.mjs";
-import { buildAgentSpawn, buildJudgePrompt, buildJudgeRetryPrompt, parseJudgeResponse } from "../evals/judge.mjs";
+import {
+  buildCheckpointRecord,
+  buildRunKey,
+  checkpointMatchesRun,
+  clearCheckpoint,
+  describeRunSelection,
+  loadCheckpoint,
+  saveCheckpoint,
+  shouldStopBench,
+} from "../evals/checkpoint.mjs";
+import { buildAgentSpawn, buildCursorAgentArgs, buildJudgeInvocationPrompt, buildJudgePrompt, buildJudgeRetryPrompt, isUsableVerdict, parseJudgeResponse } from "../evals/judge.mjs";
+import {
+  buildAgentArtifacts,
+  formatStepSummary,
+  persistAgentArtifacts,
+} from "../evals/agent-artifacts.mjs";
 import { buildAssessmentReport, formatReportConsole } from "../evals/report.mjs";
 import { SCENARIOS, agentAnswerText, selectScenarios } from "../evals/scenarios.mjs";
 import { captureWorkspaceSnapshot } from "../evals/workspace-snapshot.mjs";
@@ -225,18 +240,47 @@ test("buildAgentSpawn routes through cmd.exe on Windows", () => {
   }
 });
 
-test("buildJudgePrompt includes goal, rubric, and workspace", async () => {
+test("buildCursorAgentArgs keeps invocation under Windows command-line limit", () => {
+  const workspaceDir = "C:\\Users\\joe\\AppData\\Local\\Temp\\halo-bench-abcdefghijklmnop";
+  const args = buildCursorAgentArgs({ workspaceDir, model: "auto" });
+  const { command, args: spawnArgs } = buildAgentSpawn("agent", args);
+  const cmdLine = [command, ...spawnArgs].join(" ");
+  assert.ok(cmdLine.length < 8191, `cmd line ${cmdLine.length} chars exceeds Windows limit`);
+  assert.ok(!args.at(-1).includes("## Workspace snapshot"), "full judge prompt must not be on argv");
+  assert.match(args.at(-1), /judge-prompt\.txt/);
+});
+
+test("buildJudgeInvocationPrompt references artifact files", () => {
+  const invocation = buildJudgeInvocationPrompt();
+  assert.match(invocation, /\.halo-bench\/judge-prompt\.txt/);
+  assert.match(invocation, /\.halo-bench\/agent-artifacts\.json/);
+  assert.match(invocation, /JSON object/);
+});
+
+test("buildJudgePrompt includes goal, rubric, workspace, and step summary", async () => {
   const scenario = SCENARIOS.find((s) => s.name === "greet-module");
   assert.ok(scenario);
   const snapshot = await captureWorkspaceSnapshot(process.cwd(), { maxFiles: 3 });
-  const prompt = buildJudgePrompt({
-    scenario,
-    agentResult: { text: "done", stopReason: "completed", steps: [], messages: [] },
-    snapshot,
-  });
+  const agentResult = {
+    text: "done",
+    stopReason: "completed",
+    steps: [
+      {
+        index: 1,
+        kind: "tool-calls",
+        content: "",
+        toolCalls: [{ name: "write_file", args: { path: "greet.mjs" }, ok: true }],
+      },
+    ],
+    messages: [],
+  };
+  const prompt = buildJudgePrompt({ scenario, agentResult, snapshot });
   assert.match(prompt, /greet\.mjs/);
   assert.match(prompt, /Rubric/);
   assert.match(prompt, /Workspace snapshot/);
+  assert.match(prompt, /## Agent step summary/);
+  assert.match(prompt, /write_file/);
+  assert.match(prompt, /\.halo-bench\/agent-artifacts\.json/);
 });
 
 test("buildJudgeRetryPrompt includes full grading context and step trace", async () => {
@@ -297,10 +341,38 @@ test("buildJudgeRetryPrompt matches primary prompt grading sections", async () =
   };
   const primary = buildJudgePrompt({ scenario, agentResult, snapshot });
   const retry = buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRaw: "{bad}" });
-  for (const section of ["## Task", "## Rubric", "## Agent final answer", "## Agent steps", "## Workspace snapshot"]) {
+  for (const section of [
+    "## Task",
+    "## Rubric",
+    "## Agent step summary",
+    "## Agent final answer",
+    "## Agent steps",
+    "## Workspace snapshot",
+  ]) {
     assert.ok(primary.includes(section), `primary missing ${section}`);
     assert.ok(retry.includes(section), `retry missing ${section}`);
   }
+});
+
+test("persistAgentArtifacts writes json and step trace files", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-art-"));
+  const agentResult = {
+    text: "lib/tax.mjs",
+    stopReason: "completed",
+    steps: [
+      {
+        index: 1,
+        kind: "tool-calls",
+        content: "",
+        toolCalls: [{ name: "grep_search", args: { pattern: "computeTax" }, ok: true }],
+      },
+    ],
+    messages: [],
+  };
+  const artifacts = await persistAgentArtifacts(dir, agentResult);
+  assert.equal(artifacts.finalAnswer, "lib/tax.mjs");
+  assert.deepEqual(artifacts.toolCallOrder, ["grep_search"]);
+  assert.equal(formatStepSummary(agentResult), buildAgentArtifacts(agentResult).stepSummary);
 });
 
 test("every scenario has unique name, tier, goal, rubric, setup", () => {
@@ -327,4 +399,75 @@ test("scenarios are ordered by increasing tier", () => {
   for (let i = 1; i < SCENARIOS.length; i++) {
     assert.ok(SCENARIOS[i].tier >= SCENARIOS[i - 1].tier, `${SCENARIOS[i].name} tier order`);
   }
+});
+
+test("buildRunKey changes when scenario set or core options differ", () => {
+  const names = ["safety-read-only", "safety-read-value"];
+  const base = parseCliArgs(["--tier", "0"], defaultConfig());
+  const keyA = buildRunKey(names, base);
+  const keyB = buildRunKey(["safety-read-only"], base);
+  const keyC = buildRunKey(names, parseCliArgs(["--tier", "0", "--skip-judge"], defaultConfig()));
+  assert.notEqual(keyA, keyB);
+  assert.notEqual(keyA, keyC);
+  assert.equal(buildRunKey(names, base), keyA);
+});
+
+test("describeRunSelection labels tier and scenario runs", () => {
+  const names = ["safety-read-only"];
+  assert.equal(
+    describeRunSelection(names, parseCliArgs(["--tier", "0"], defaultConfig())),
+    "tier ≤0 (progression)",
+  );
+  assert.equal(
+    describeRunSelection(names, parseCliArgs(["--tier", "0", "--flat"], defaultConfig())),
+    "tier ≤0 (flat)",
+  );
+  assert.equal(
+    describeRunSelection(names, parseCliArgs(["--scenario", "safety-read-only"], defaultConfig())),
+    "scenario safety-read-only",
+  );
+});
+
+test("checkpoint save/load round-trip and clear", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-cp-"));
+  const checkpointPath = path.join(dir, "bench-checkpoint.json");
+  const record = buildCheckpointRecord({
+    runKey: "abc123",
+    selectionLabel: "tier ≤0 (progression)",
+    scenarioNames: ["a", "b"],
+    completedNames: ["a"],
+    results: [{ scenario: "a", tier: 0 }],
+    startedAt: "2026-01-01T00:00:00.000Z",
+  });
+  await saveCheckpoint(checkpointPath, record);
+  const loaded = await loadCheckpoint(checkpointPath);
+  assert.equal(loaded.runKey, "abc123");
+  assert.deepEqual(loaded.completedNames, ["a"]);
+  assert.ok(checkpointMatchesRun(loaded, "abc123", ["a", "b"]));
+  assert.equal(checkpointMatchesRun(loaded, "other", ["a", "b"]), false);
+  await clearCheckpoint(checkpointPath);
+  assert.equal(await loadCheckpoint(checkpointPath), null);
+});
+
+test("parseCliArgs accepts --resume and --reset", () => {
+  const opts = parseCliArgs(["--resume", "--reset", "--checkpoint", "tmp/checkpoint.json"], defaultConfig());
+  assert.equal(opts.resume, true);
+  assert.equal(opts.reset, true);
+  assert.equal(opts.checkpointPath, "tmp/checkpoint.json");
+});
+
+test("isUsableVerdict rejects invalid judge JSON", () => {
+  const bad = parseJudgeResponse("not json");
+  assert.equal(isUsableVerdict(bad), false);
+  const good = parseJudgeResponse('{"score": 80, "grade": "B", "summary": "ok"}');
+  assert.equal(isUsableVerdict(good), true);
+});
+
+test("shouldStopBench stops on runner or judge errors only", () => {
+  assert.equal(shouldStopBench({ error: "Cursor agent exited 1" }), true);
+  assert.equal(
+    shouldStopBench({ precheck: { pass: false }, integrity: { pass: false } }),
+    false,
+  );
+  assert.equal(shouldStopBench({ verdict: { score: 0, grade: "F" } }), false);
 });

@@ -1,11 +1,15 @@
 # Interactive dev-bench runner — pick tier or scenario, then run evals/dev-bench.mjs.
 # Usage: .\bin\bench.ps1
 #        .\bin\bench.ps1 -SkipJudge -KeepWorkspace
+#        .\bin\bench.ps1 -Resume
+#        .\bin\bench.ps1 -Reset
 
 param(
     [switch]$SkipJudge,
     [switch]$KeepWorkspace,
     [switch]$Flat,
+    [switch]$Resume,
+    [switch]$Reset,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -13,6 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BenchScript = Join-Path $RepoRoot "evals\dev-bench.mjs"
+$CheckpointPath = Join-Path $RepoRoot ".halo-agent\bench-checkpoint.json"
 
 function Test-NodeReady {
     $node = Get-Command node -ErrorAction SilentlyContinue
@@ -38,6 +43,29 @@ function Get-ScenarioCatalog {
             throw "Could not load scenarios from evals/scenarios.mjs"
         }
         return @($json | ConvertFrom-Json)
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Get-BenchCheckpoint {
+    if (-not (Test-Path $CheckpointPath)) { return $null }
+    try {
+        return Get-Content $CheckpointPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Reset-BenchCheckpoint {
+    Push-Location $RepoRoot
+    try {
+        & node $BenchScript --reset
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to reset bench checkpoint (exit $LASTEXITCODE)"
+        }
     }
     finally {
         Pop-Location
@@ -99,7 +127,10 @@ function Show-ScenarioMenu {
 }
 
 function Build-BenchArgs {
-    param($Selection)
+    param(
+        $Selection,
+        [switch]$UseResume
+    )
 
     $args = [System.Collections.Generic.List[string]]::new()
 
@@ -120,13 +151,21 @@ function Build-BenchArgs {
 
     if ($SkipJudge) { $args.Add("--skip-judge") }
     if ($KeepWorkspace) { $args.Add("--keep-workspace") }
+    if ($UseResume) { $args.Add("--resume") }
     if ($ExtraArgs) { $args.AddRange($ExtraArgs) }
 
     return $args.ToArray()
 }
 
 function Invoke-DevBench {
-    param([string[]]$BenchArgs)
+    param(
+        [string[]]$BenchArgs,
+        [switch]$UseResume
+    )
+
+    if ($UseResume -and ($BenchArgs -notcontains "--resume")) {
+        $BenchArgs = @($BenchArgs) + @("--resume")
+    }
 
     Write-Host ""
     Write-Host "Running: node evals/dev-bench.mjs $($BenchArgs -join ' ')" -ForegroundColor Cyan
@@ -142,11 +181,78 @@ function Invoke-DevBench {
     }
 }
 
+function Get-ResumeSelectionFromCheckpoint {
+    param($Checkpoint)
+
+    if (-not $Checkpoint) { return $null }
+
+    $names = @($Checkpoint.scenarioNames)
+    if ($names.Count -eq 0) { return $null }
+
+    $label = [string]$Checkpoint.selectionLabel
+    if ($label -match '^scenario (.+)$') {
+        return @{ Mode = "scenario"; Name = $Matches[1] }
+    }
+    if ($label -match '^tier ≤(\d+) \(flat\)$') {
+        return @{ Mode = "tier"; Tier = [int]$Matches[1]; Flat = $true }
+    }
+    if ($label -match '^tier ≤(\d+) \(progression\)$') {
+        return @{ Mode = "tier"; Tier = [int]$Matches[1] }
+    }
+    if ($label -eq "all scenarios (flat)") {
+        return @{ Mode = "all"; Flat = $true }
+    }
+    if ($label -eq "all scenarios (progression)") {
+        return @{ Mode = "all" }
+    }
+
+    return $null
+}
+
 Test-NodeReady
+
+if ($Reset) {
+    Reset-BenchCheckpoint
+    Write-Host "Bench checkpoint cleared." -ForegroundColor Green
+    if (-not $Resume) {
+        exit 0
+    }
+}
+
 $scenarios = Get-ScenarioCatalog
 $tiers = ($scenarios.Tier | Sort-Object -Unique)
+$checkpoint = Get-BenchCheckpoint
+
+if ($Resume) {
+    if (-not $checkpoint) {
+        Write-Host "No saved bench progress to resume." -ForegroundColor Yellow
+        exit 1
+    }
+    $selection = Get-ResumeSelectionFromCheckpoint -Checkpoint $checkpoint
+    if (-not $selection) {
+        Write-Host "Could not reconstruct the interrupted run from the checkpoint." -ForegroundColor Yellow
+        Write-Host "Use -Reset to clear it, then start a new run from the menu."
+        exit 1
+    }
+    if ($selection.Flat) { $Flat = $true }
+    $completed = @($checkpoint.completedNames).Count
+    $total = @($checkpoint.scenarioNames).Count
+    Write-Host ""
+    Write-Host "Resuming: $completed / $total scenario(s) already completed ($($checkpoint.selectionLabel))" -ForegroundColor Cyan
+    $benchArgs = Build-BenchArgs -Selection $selection -UseResume
+    Invoke-DevBench -BenchArgs $benchArgs -UseResume
+    exit $LASTEXITCODE
+}
 
 while ($true) {
+    $checkpoint = Get-BenchCheckpoint
+    $resumeHint = ""
+    if ($checkpoint) {
+        $completed = @($checkpoint.completedNames).Count
+        $total = @($checkpoint.scenarioNames).Count
+        $resumeHint = " ($completed/$total done: $($checkpoint.selectionLabel))"
+    }
+
     Write-Host ""
     Write-Host "=== halo-agent dev bench ===" -ForegroundColor Green
     Write-Host ""
@@ -154,28 +260,54 @@ while ($true) {
     Write-Host "  2) Run all scenarios (flat, no tier pauses)"
     Write-Host "  3) Run by tier"
     Write-Host "  4) Run by scenario"
+    if ($checkpoint) {
+        Write-Host "  5) Resume interrupted run$resumeHint" -ForegroundColor Cyan
+        Write-Host "  6) Reset saved progress"
+    }
     Write-Host "  0) Exit"
     Write-Host ""
 
-    $main = Read-MenuChoice -Prompt "Choice" -ValidChoices @("0", "1", "2", "3", "4")
+    $validMain = @("0", "1", "2", "3", "4")
+    if ($checkpoint) { $validMain += @("5", "6") }
+    $main = Read-MenuChoice -Prompt "Choice" -ValidChoices $validMain
 
     if ($main -eq "0") {
         exit 0
     }
 
+    if ($main -eq "6") {
+        Reset-BenchCheckpoint
+        Write-Host "Bench checkpoint cleared." -ForegroundColor Green
+        continue
+    }
+
     $selection = $null
-    switch ($main) {
-        "1" { $selection = @{ Mode = "all" } }
-        "2" { $selection = @{ Mode = "all" }; $Flat = $true }
-        "3" { $selection = Show-TierMenu -Tiers $tiers }
-        "4" { $selection = Show-ScenarioMenu -Scenarios $scenarios }
+    $useResume = $false
+
+    if ($main -eq "5") {
+        $selection = Get-ResumeSelectionFromCheckpoint -Checkpoint $checkpoint
+        if (-not $selection) {
+            Write-Host "Could not reconstruct the interrupted run. Use option 6 to reset." -ForegroundColor Yellow
+            continue
+        }
+        $useResume = $true
+    }
+    else {
+        switch ($main) {
+            "1" { $selection = @{ Mode = "all" } }
+            "2" { $selection = @{ Mode = "all" }; $Flat = $true }
+            "3" { $selection = Show-TierMenu -Tiers $tiers }
+            "4" { $selection = Show-ScenarioMenu -Scenarios $scenarios }
+        }
     }
 
     if (-not $selection) {
         continue
     }
 
-    $benchArgs = Build-BenchArgs -Selection $selection
-    Invoke-DevBench -BenchArgs $benchArgs
+    if ($selection.Flat) { $Flat = $true }
+
+    $benchArgs = Build-BenchArgs -Selection $selection -UseResume:$useResume
+    Invoke-DevBench -BenchArgs $benchArgs -UseResume:$useResume
     exit $LASTEXITCODE
 }

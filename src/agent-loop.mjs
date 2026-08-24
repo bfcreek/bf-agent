@@ -56,6 +56,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  exactly which files may be removed.",
   "- If a tool call fails, read the error and change your approach. Never",
   "  repeat a call that just failed with the same arguments.",
+  "- When the user asks for only a path, number, or other single value, reply",
+  "  with that value alone unless they asked for more.",
+  "- When creating or fixing tests, run them with run_command before finishing",
+  "  and report whether they passed in your final answer.",
   "- Keep going until the task is done, then reply to the user in plain text",
   "  with no tool calls. State what you did and what, if anything, remains.",
 ].join("\n");

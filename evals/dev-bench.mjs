@@ -9,6 +9,8 @@
  *   node evals/dev-bench.mjs --scenario greet-module --keep-workspace
  *   node evals/dev-bench.mjs --list-scenarios
  *   node evals/dev-bench.mjs --skip-judge
+ *   node evals/dev-bench.mjs --resume          # continue after an interrupted run
+ *   node evals/dev-bench.mjs --reset           # clear saved progress
  *
  * Requires: Ollama + a tool model for halo-agent; Cursor CLI (`agent`) for judging.
  */
@@ -21,6 +23,17 @@ import { createAgent } from "../src/index.mjs";
 import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
 import { loadBenchOptions } from "./config.mjs";
+import {
+  buildCheckpointRecord,
+  buildRunKey,
+  checkpointMatchesRun,
+  clearCheckpoint,
+  describeRunSelection,
+  loadCheckpoint,
+  resolveCheckpointPath,
+  saveCheckpoint,
+  shouldStopBench,
+} from "./checkpoint.mjs";
 import {
   buildCapabilityProfile,
   buildPublicBenchmark,
@@ -235,22 +248,73 @@ function printTierProgress(tier, tierResults, avg) {
   console.error(`── tier ${tier} complete: avg ${avg != null ? avg.toFixed(1) : "n/a"}/100 (${tierResults.length} scenario(s)) ──`);
 }
 
-async function runAllScenarios(scenarios, model, options) {
-  const results = [];
+async function runAllScenarios(scenarios, model, options, resumeState = null) {
+  const completedNames = new Set(resumeState?.completedNames ?? []);
+  const results = [...(resumeState?.results ?? [])];
   const groups = options.progression ? groupByTier(scenarios) : [[null, scenarios]];
-  let stoppedAtTier = null;
-  let stopReason = null;
+  let stoppedAtTier = resumeState?.stoppedAtTier ?? null;
+  let stopReason = resumeState?.stopReason ?? null;
+
+  if (completedNames.size > 0) {
+    console.error(
+      `  resuming: ${completedNames.size}/${scenarios.length} scenario(s) already completed`,
+    );
+  }
 
   for (const [tier, tierScenarios] of groups) {
     if (tier != null) console.error(`== tier ${tier} (${tierScenarios.length} scenario(s)) ==`);
 
     const tierResults = [];
     for (const scenario of tierScenarios) {
+      if (completedNames.has(scenario.name)) {
+        const existing = results.find((row) => row.scenario === scenario.name);
+        if (existing) tierResults.push(existing);
+        console.error(`  skipping: ${scenario.name} (completed)`);
+        continue;
+      }
+
       console.error(`  running: ${scenario.name}...`);
       const row = await runScenario({ scenario, model, options });
       printProgress(row);
-      tierResults.push(row);
+
+      // Replace any prior failed attempt so resume can retry this scenario.
+      const prior = results.findIndex((r) => r.scenario === scenario.name);
+      if (prior >= 0) results.splice(prior, 1);
       results.push(row);
+      tierResults.push(row);
+
+      if (!shouldStopBench(row)) {
+        completedNames.add(scenario.name);
+      }
+
+      if (resumeState?.onProgress) {
+        await resumeState.onProgress({
+          results,
+          completedNames: [...completedNames],
+          stoppedAtTier,
+          stopReason,
+        });
+      }
+
+      if (shouldStopBench(row)) {
+        stopReason = `Stopped after ${row.scenario}: ${row.error}`;
+        console.error(`  ${stopReason}`);
+        if (resumeState?.onProgress) {
+          await resumeState.onProgress({
+            results,
+            completedNames: [...completedNames],
+            stoppedAtTier: tier ?? stoppedAtTier,
+            stopReason,
+          });
+        }
+        return {
+          results,
+          stoppedAtTier: tier ?? stoppedAtTier,
+          stopReason,
+          completedNames: [...completedNames],
+          stoppedOnError: true,
+        };
+      }
     }
 
     if (options.progression && tier != null && !options.skipJudge) {
@@ -265,7 +329,7 @@ async function runAllScenarios(scenarios, model, options) {
     }
   }
 
-  return { results, stoppedAtTier, stopReason };
+  return { results, stoppedAtTier, stopReason, completedNames: [...completedNames], stoppedOnError: false };
 }
 
 async function writeReports(report, options, extras = {}) {
@@ -311,6 +375,22 @@ async function main() {
   }
 
   const { options, configPath } = await loadBenchOptions(argv);
+  const checkpointPath = resolveCheckpointPath(options.checkpointPath);
+
+  if (options.reset) {
+    await clearCheckpoint(checkpointPath);
+    console.error(`checkpoint cleared: ${checkpointPath}`);
+    const onlyReset =
+      argv.length === 0 ||
+      argv.every(
+        (arg, index) =>
+          arg === "--reset" ||
+          arg === "--checkpoint" ||
+          (index > 0 && argv[index - 1] === "--checkpoint"),
+      );
+    if (onlyReset) return;
+  }
+
   if (configPath) {
     console.error(`config: ${configPath}`);
   } else {
@@ -343,25 +423,109 @@ async function main() {
     process.exit(1);
   }
 
+  const scenarioNames = scenarios.map((s) => s.name);
+  const runKey = buildRunKey(scenarioNames, options);
+  const selectionLabel = describeRunSelection(scenarioNames, options);
+  let checkpoint = options.resume ? await loadCheckpoint(checkpointPath) : null;
+
+  if (options.resume) {
+    if (!checkpoint) {
+      console.error(`No checkpoint found at ${checkpointPath}. Run without --resume to start fresh.`);
+      process.exit(1);
+    }
+    if (!checkpointMatchesRun(checkpoint, runKey, scenarioNames)) {
+      console.error(
+        "Checkpoint does not match this run (different scenarios or options). Use --reset to clear it, then start fresh.",
+      );
+      console.error(`  checkpoint: ${checkpoint.selectionLabel ?? "(unknown)"}`);
+      console.error(`  this run:   ${selectionLabel}`);
+      process.exit(1);
+    }
+    console.error(
+      `checkpoint: ${checkpoint.completedNames.length}/${scenarioNames.length} scenario(s) completed (${checkpoint.selectionLabel})`,
+    );
+  } else if (checkpoint) {
+    await clearCheckpoint(checkpointPath);
+    console.error("Starting fresh run (previous checkpoint cleared). Use --resume to continue it.");
+  }
+
+  const resumeStartedAt = checkpoint?.startedAt ?? new Date().toISOString();
+  let resumeCompleted = new Set(checkpoint?.completedNames ?? []);
+  let resumeResults = [...(checkpoint?.results ?? [])];
+
   const allResults = [];
-  let stoppedAtTier = null;
-  let stopReason = null;
-  let resolvedModel = options.models[0];
+  let stoppedAtTier = checkpoint?.stoppedAtTier ?? null;
+  let stopReason = checkpoint?.stopReason ?? null;
+  let stoppedOnError = false;
+  let resolvedModel = checkpoint?.resolvedModel ?? options.models[0];
+
+  const persistCheckpoint = async ({
+    results,
+    completedNames,
+    stoppedAtTier: stopped,
+    stopReason: reason,
+    resolvedModel: model,
+  }) => {
+    await saveCheckpoint(
+      checkpointPath,
+      buildCheckpointRecord({
+        runKey,
+        selectionLabel,
+        scenarioNames,
+        completedNames,
+        results,
+        startedAt: resumeStartedAt,
+        resolvedModel: model,
+        stoppedAtTier: stopped,
+        stopReason: reason,
+      }),
+    );
+  };
 
   for (const model of options.models) {
     console.error(`== halo-agent model: ${model} ==`);
     resolvedModel = await logResolvedModel(model, options);
-    const { results, stoppedAtTier: stopped, stopReason: reason } = await runAllScenarios(
-      scenarios,
-      resolvedModel,
-      options,
-    );
+    const outcome = await runAllScenarios(scenarios, resolvedModel, options, {
+        completedNames: [...resumeCompleted],
+        results: resumeResults,
+        stoppedAtTier,
+        stopReason,
+        onProgress: async (progress) => {
+          resumeCompleted = new Set(progress.completedNames);
+          resumeResults = progress.results;
+          stoppedAtTier = progress.stoppedAtTier;
+          stopReason = progress.stopReason;
+          await persistCheckpoint({
+            results: progress.results,
+            completedNames: progress.completedNames,
+            stoppedAtTier: progress.stoppedAtTier,
+            stopReason: progress.stopReason,
+            resolvedModel,
+          });
+        },
+      });
+    const { results, stoppedAtTier: stopped, stopReason: reason, completedNames } = outcome;
     allResults.push(...results);
+    resumeCompleted = new Set(completedNames);
+    resumeResults = results;
+    if (outcome.stoppedOnError) {
+      stoppedOnError = true;
+      stoppedAtTier = stopped;
+      stopReason = reason;
+      break;
+    }
     if (stopped != null) {
       stoppedAtTier = stopped;
       stopReason = reason;
       break;
     }
+  }
+
+  const runFinished =
+    !stoppedOnError &&
+    (resumeCompleted.size >= scenarioNames.length || stoppedAtTier != null);
+  if (runFinished) {
+    await clearCheckpoint(checkpointPath);
   }
 
   const gateEvaluation = evaluateGates(allResults, options.gates, {
@@ -390,6 +554,12 @@ async function main() {
     console.error("");
     console.error("Gate enforcement failed — see gate summary above.");
     process.exit(2);
+  }
+
+  if (stoppedOnError) {
+    console.error("");
+    console.error("Bench run stopped due to an error (use --resume to continue).");
+    process.exit(1);
   }
 }
 

@@ -72,6 +72,16 @@ test("detectTaskHints matches config-edit goals", () => {
   assert.ok(hints.some((h) => h.id === "config-edit"));
 });
 
+test("detectTaskHints matches path-answer and test-verify goals", () => {
+  const pathGoal =
+    "Which file exports computeTax? Reply with the path relative to the workspace root only.";
+  assert.ok(detectTaskHints(pathGoal).some((h) => h.id === "path-answer"));
+
+  const testGoal =
+    "Create test.mjs and run test.mjs with node and confirm it passes.";
+  assert.ok(detectTaskHints(testGoal).some((h) => h.id === "test-verify"));
+});
+
 test("isGptOssModel recognizes gpt-oss variants", () => {
   assert.equal(isGptOssModel("gpt-oss:20b"), true);
   assert.equal(isGptOssModel("qwen3:14b"), false);

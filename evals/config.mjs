@@ -29,10 +29,12 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @property {number} judgeRetries
  * @property {string|null} [scenario]
  * @property {string[]|null} [scenarios]
+ * @property {string} checkpointPath
  * @property {{json: string|null, markdown: string|null, capability: string|null, public: string|null}} report
  */
 
 import { defaultGatesConfig } from "./gates.mjs";
+import { DEFAULT_CHECKPOINT_REL } from "./checkpoint.mjs";
 
 /** @returns {BenchConfig} */
 export function defaultConfig() {
@@ -55,6 +57,7 @@ export function defaultConfig() {
     judgeRetries: 2,
     scenario: null,
     scenarios: null,
+    checkpointPath: DEFAULT_CHECKPOINT_REL,
     report: {
       json: "bench-latest.json",
       markdown: "bench-latest.md",
@@ -168,8 +171,11 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     gatePreset: null,
     capabilityJson: null,
     publicJson: null,
+    checkpointPath: null,
     flat: false,
     noReport: false,
+    resume: false,
+    reset: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -219,6 +225,9 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
       cli.enforceGates = true;
     } else if (arg === "--capability-json") cli.capabilityJson = argv[++i];
     else if (arg === "--public-json") cli.publicJson = argv[++i];
+    else if (arg === "--checkpoint") cli.checkpointPath = argv[++i];
+    else if (arg === "--resume") cli.resume = true;
+    else if (arg === "--reset") cli.reset = true;
     else throw new Error(`Unknown option '${arg}'.`);
   }
 
@@ -256,5 +265,8 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,
     capabilityJson: cli.noReport ? null : cli.capabilityJson ?? fileConfig.report.capability,
     publicJson: cli.noReport ? null : cli.publicJson ?? fileConfig.report.public,
+    checkpointPath: cli.checkpointPath ?? fileConfig.checkpointPath,
+    resume: cli.resume,
+    reset: cli.reset,
   };
 }
