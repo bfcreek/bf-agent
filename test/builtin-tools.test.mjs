@@ -4,10 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
+import { AgentLoop } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
 import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot } from "../src/tools/fs.mjs";
-import { findDeleteCommand } from "../src/tools/shell.mjs";
+import {
+  classifyDeleteCommand,
+  extractDeleteTargets,
+  findDeleteCommand,
+} from "../src/tools/shell.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -286,21 +291,63 @@ test("findDeleteCommand leaves non-deletion commands alone", () => {
   }
 });
 
-test("run_command blocks deletion commands when no approval handler is set", async () => {
-  await writeFile(path.join(root, "precious.txt"), "keep me", "utf8");
-
-  const run = await registry.execute("run_command", {
-    command: IS_WINDOWS ? "Remove-Item precious.txt" : "rm precious.txt",
-  });
-  assert.equal(run.ok, false);
-  assert.match(run.error, /requires explicit user approval/);
-  assert.match(run.error, /ask the user/);
-  assert.equal(await readFile(path.join(root, "precious.txt"), "utf8"), "keep me");
+test("extractDeleteTargets keeps files, skips flags and switches", () => {
+  assert.deepEqual(extractDeleteTargets("rm -rf build/"), ["build"]);
+  assert.deepEqual(extractDeleteTargets("Remove-Item -Force -Recurse junk.txt"), ["junk.txt"]);
+  assert.deepEqual(extractDeleteTargets("rmdir /s /q build"), ["build"]);
+  // Quoted names with spaces split on whitespace — a known limitation; both
+  // halves must then be authorized, which is the conservative direction.
+  assert.deepEqual(extractDeleteTargets("del 'old notes.txt'"), ["old", "notes.txt"]);
+  assert.deepEqual(extractDeleteTargets("git rm tracked.txt"), ["tracked.txt"]);
+  assert.deepEqual(extractDeleteTargets("git clean -fd"), []);
+  assert.deepEqual(extractDeleteTargets("find . -name '*.log' -delete"), []);
+  assert.deepEqual(extractDeleteTargets("rm ./scratch.md"), ["scratch.md"]);
 });
 
-test("run_command allows deletion once an approval handler has approved", async () => {
+test("classifyDeleteCommand authorizes deletes the goal explicitly names", () => {
+  const goal = "Delete the file junk-notes.txt from this workspace. Do not change any other file.";
+  assert.equal(classifyDeleteCommand("Remove-Item junk-notes.txt", goal).verdict, "authorized");
+  assert.equal(classifyDeleteCommand("rm ./junk-notes.txt", goal).verdict, "authorized");
+  assert.equal(classifyDeleteCommand("node -v", goal).verdict, "none");
+});
+
+test("classifyDeleteCommand blocks deletes the goal never named", () => {
+  const goal = "Clean up unused files in this project.";
+  const result = classifyDeleteCommand("rm junk-notes.txt", goal);
+  assert.equal(result.verdict, "unauthorized");
+  assert.equal(result.target, "junk-notes.txt");
+});
+
+test("classifyDeleteCommand blocks files the goal says to keep", () => {
+  const goal =
+    "Clean up unused files. important.mjs is required — do not delete or modify it. Delete junk-notes.txt.";
+  const keep = classifyDeleteCommand("rm important.mjs", goal);
+  assert.equal(keep.verdict, "protected");
+  assert.equal(keep.target, "important.mjs");
+  // Protection is judged per sentence: the explicit delete still goes ahead.
+  assert.equal(classifyDeleteCommand("rm junk-notes.txt", goal).verdict, "authorized");
+});
+
+test("classifyDeleteCommand blocks broad or indirect deletes", () => {
+  const goal = "Delete all the .log files and the build directory.";
+  assert.equal(classifyDeleteCommand("rm -rf .", goal).verdict, "unauthorized");
+  assert.equal(classifyDeleteCommand("git clean -fd", goal).verdict, "unauthorized");
+  assert.equal(classifyDeleteCommand("find . -name '*.log' -delete", goal).verdict, "unauthorized");
+  assert.equal(classifyDeleteCommand("Get-ChildItem | Remove-Item", goal).verdict, "unauthorized");
+  // Wildcards authorize via their fixed part when the goal names it.
+  assert.equal(classifyDeleteCommand("rm *.log", goal).verdict, "authorized");
+  assert.equal(classifyDeleteCommand("rm -rf build", goal).verdict, "authorized");
+});
+
+test("classifyDeleteCommand does not match partial file names", () => {
+  const goal = "Delete junk-notes.txt.";
+  assert.equal(classifyDeleteCommand("rm notes.txt", goal).verdict, "unauthorized");
+  assert.equal(classifyDeleteCommand("rm junk", goal).verdict, "unauthorized");
+});
+
+test("run_command deletes a file the goal explicitly names, unattended", async () => {
   await writeFile(path.join(root, "doomed.txt"), "bye", "utf8");
-  registry.setApprovalHandler(() => true);
+  registry.setRunContext({ goal: "Please delete doomed.txt from the workspace." });
 
   const run = await registry.execute("run_command", {
     command: IS_WINDOWS ? "Remove-Item doomed.txt" : "rm doomed.txt",
@@ -310,10 +357,76 @@ test("run_command allows deletion once an approval handler has approved", async 
   await assert.rejects(readFile(path.join(root, "doomed.txt"), "utf8"));
 });
 
-test("run_command still runs non-deletion commands without an approval handler", async () => {
+test("run_command blocks deletes the goal never authorized", async () => {
+  await writeFile(path.join(root, "precious.txt"), "keep me", "utf8");
+  registry.setRunContext({ goal: "Clean up unused files in this project." });
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item precious.txt" : "rm precious.txt",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /did not explicitly name/);
+  assert.match(run.error, /ask the user/);
+  assert.equal(await readFile(path.join(root, "precious.txt"), "utf8"), "keep me");
+});
+
+test("run_command blocks deletes of files the goal says to keep", async () => {
+  await writeFile(path.join(root, "vital.txt"), "do not lose", "utf8");
+  registry.setRunContext({
+    goal: "Tidy the workspace. vital.txt is required — do not delete it.",
+  });
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item vital.txt" : "rm vital.txt",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /say to keep/);
+  assert.equal(await readFile(path.join(root, "vital.txt"), "utf8"), "do not lose");
+});
+
+test("run_command blocks deletes when no run context is set (safe default)", async () => {
+  await writeFile(path.join(root, "orphan.txt"), "x", "utf8");
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item orphan.txt" : "rm orphan.txt",
+  });
+  assert.equal(run.ok, false);
+  assert.equal(await readFile(path.join(root, "orphan.txt"), "utf8"), "x");
+});
+
+test("run_command allows any approved delete when an approval handler is set", async () => {
+  await writeFile(path.join(root, "approved.txt"), "bye", "utf8");
+  registry.setRunContext({ goal: "Clean up unused files." });
+  registry.setApprovalHandler(() => true);
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item approved.txt" : "rm approved.txt",
+  });
+  assert.equal(run.ok, true);
+  await assert.rejects(readFile(path.join(root, "approved.txt"), "utf8"));
+});
+
+test("run_command still runs non-deletion commands without any authorization", async () => {
   const run = await registry.execute("run_command", {
     command: `node -e "console.log('harmless')"`,
   });
   assert.equal(run.ok, true);
   assert.match(run.result.stdout, /harmless/);
+});
+
+test("agent loop hands the goal to tools via run context", async () => {
+  const captured = [];
+  const fakeRegistry = {
+    schemas: () => [],
+    execute: async () => ({ ok: true, result: "" }),
+    setRunContext(context) {
+      captured.push(context);
+    },
+  };
+  const client = {
+    chat: async () => ({ message: { role: "assistant", content: "done" }, raw: {} }),
+  };
+  const loop = new AgentLoop({ client, registry: fakeRegistry, planning: false, taskHints: false });
+  await loop.run("delete junk.txt");
+  assert.deepEqual(captured, [{ goal: "delete junk.txt" }]);
 });

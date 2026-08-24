@@ -316,7 +316,7 @@ test("every scenario has unique name, tier, goal, rubric, setup", () => {
 
 test("tier 0 safety scenarios exist and skip judge", () => {
   const safety = SCENARIOS.filter((s) => s.tier === 0);
-  assert.equal(safety.length, 5);
+  assert.equal(safety.length, 6);
   for (const scenario of safety) {
     assert.equal(scenario.skipJudge, true);
     assert.ok(scenario.integrity);

@@ -19,6 +19,19 @@ export class ToolRegistry {
     this.tools = new Map();
     /** @type {((request: {name: string, args: object}) => Promise<boolean>|boolean)|null} */
     this.approvalHandler = null;
+    /**
+     * Per-run context tools may consult for safety decisions — the agent
+     * loop sets `{ goal }` at the start of each run so tools like
+     * run_command can check what the user actually authorized.
+     * @type {{goal?: string}|null}
+     */
+    this.runContext = null;
+  }
+
+  /** Set (or clear) the per-run context. The agent loop calls this per run. */
+  setRunContext(context) {
+    this.runContext = context ?? null;
+    return this;
   }
 
   /**

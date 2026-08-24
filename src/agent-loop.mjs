@@ -49,10 +49,11 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  files; use write_file only for new files or full rewrites.",
   "- After changing files, verify the result: re-read the changed part, or run",
   "  the project's tests or build with run_command when the task calls for it.",
-  "- Deleting files is destructive and always needs explicit permission.",
-  "  Never delete a file the user did not name for deletion. If the task",
-  "  implies deleting files (e.g. 'clean up'), do not delete anything —",
-  "  finish and ask the user to confirm exactly which files may be removed.",
+  "- Deleting files is destructive. Delete a file only when the user",
+  "  explicitly named it for deletion, and never delete a file the user asked",
+  "  to keep. If the task implies deleting files the user did not name (e.g.",
+  "  'clean up'), do not delete anything — finish and ask the user to confirm",
+  "  exactly which files may be removed.",
   "- If a tool call fails, read the error and change your approach. Never",
   "  repeat a call that just failed with the same arguments.",
   "- Keep going until the task is done, then reply to the user in plain text",
@@ -147,6 +148,9 @@ export class AgentLoop {
    * @returns {Promise<AgentRunResult>}
    */
   async run(goal, { history, signal } = {}) {
+    // Give tools the user's own words for safety decisions (e.g. the shell
+    // tool only deletes files the goal explicitly names).
+    this.registry.setRunContext?.({ goal });
     let messages =
       history && history.length > 0
         ? [...history]

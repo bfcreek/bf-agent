@@ -33,7 +33,7 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 
 - **Ask mode** (default in a terminal): `write_file`, `edit_file`, and `run_command` prompt for y/N.
 - **Agent / serve mode**: unattended — put Wire guardrails in front for policy.
-- **No unattended deletes**: shell deletion commands (`rm`, `del`, `Remove-Item`, `git clean`, `find -delete`, …) are refused when no approval prompt is available; the agent must ask the user instead. Detection is best-effort — an inline script that deletes files would not be caught, so this complements (not replaces) upstream guardrails.
+- **Deletion gate**: in unattended runs, shell deletion commands (`rm`, `del`, `Remove-Item`, `git clean`, `find -delete`, …) only run when the user's request explicitly names every deletion target. Unnamed targets, protected files ("do not delete X"), wildcards without a named fixed part, and indirect deletes are refused, and the agent is instructed to ask the user. Detection is best-effort — an inline script that deletes files would not be caught — so this complements (not replaces) upstream guardrails.
 - **Path confinement**: file and shell tools cannot escape the workspace root.
 - **Edit safety**: failed or ambiguous `edit_file` calls do not modify the file (see `test/fs-edit-safety.test.mjs`).
 - **Integrity bench (tier 0)**: verifies the agent does not corrupt unrelated files on read-only and narrow-edit tasks.

@@ -145,12 +145,14 @@ each ask for y/N confirmation before running (`--mode ask`, the default).
 Pass `--mode agent` to run unattended. Non-TTY and serve-mode runs are
 always unattended.
 
-**Deletions:** file-deletion commands (`rm`, `del`, `Remove-Item`, `git
-clean`, `find -delete`, …) are refused outright in unattended runs — safety
-wins over task instructions, so a goal like "clean up" cannot delete files
-nobody explicitly authorized. The agent is instructed to finish and ask the
-user which files may be removed. To actually delete, run in `--mode ask`
-and approve the command at the y/N prompt.
+**Deletions:** in unattended runs, file-deletion commands (`rm`, `del`,
+`Remove-Item`, `git clean`, `find -delete`, …) only run when every deletion
+target is explicitly named in the user's request. Deletes the user asked for
+("delete junk-notes.txt") go ahead; conflicts and ambiguity are refused so
+the agent asks instead — files the request says to keep, files it never
+named (a bare "clean up"), wildcard-only targets, and indirect deletes
+(`git clean`, piped `Remove-Item`). In `--mode ask` the y/N prompt decides,
+as for any shell command.
 
 The system prompt is built per run by the context builder: platform, shell,
 workspace root, and a top-level file listing, so the model starts oriented
