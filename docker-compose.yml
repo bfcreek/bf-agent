@@ -3,6 +3,8 @@
 #   docker compose exec ollama ollama pull llama3.2
 # GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 # Host Ollama already running:  docker compose -f docker-compose.host-ollama.yml up --build
+#
+# Test output: ../halo-agent-benchmark is bind-mounted at /halo-agent-benchmark.
 
 name: halo-agent
 
@@ -46,12 +48,14 @@ services:
       - "${HALO_PORT:-11435}:11435"
     volumes:
       - ${HALO_WORKSPACE:-./workspace}:/workspace
+      - ${HALO_BENCHMARK_ROOT:-../halo-agent-benchmark}:/halo-agent-benchmark
     environment:
       HALO_MODEL: ${HALO_MODEL:-auto}
       HALO_PORT: ${HALO_PORT:-11435}
       HALO_NUM_CTX: ${HALO_NUM_CTX:-16384}
       HALO_OLLAMA_URL: http://ollama:11434
       HALO_CWD: /workspace
+      HALO_BENCHMARK_ROOT: /halo-agent-benchmark
     healthcheck:
       test:
         [

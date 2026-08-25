@@ -99,8 +99,11 @@ prompt for approvals. Put Wire's guardrails in front if you need policy.
 
 ## Docker Compose
 
-Ollama + `halo-agent serve` (`/v1` on port 11435). Workspace is bind-mounted
-at `/workspace`. Copy `.env.example` to `.env` to change model or ports.
+Ollama + `halo-agent serve` (`/v1` on port 11435). The agent workspace is
+`./workspace` → `/workspace`. Bench and test output use the sibling
+`halo-agent-benchmark` folder → `/halo-agent-benchmark` (same tree as
+`npm run bench` and `.\bin\bench-tb.ps1`). Copy `.env.example` to `.env` to
+change model, ports, or those paths.
 
 ```powershell
 docker compose up --build
