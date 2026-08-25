@@ -26,6 +26,18 @@ export function ollamaUrlForContainer(baseUrl) {
 }
 
 /**
+ * Harbor `--include-task-name` uses fnmatch against package ids like
+ * `terminal-bench/build-pmars`. Bare folder names do not match.
+ *
+ * @param {string} name
+ */
+export function toHarborTaskFilter(name) {
+  const raw = String(name ?? "").trim();
+  if (!raw || raw.includes("/")) return raw;
+  return `*/${raw}`;
+}
+
+/**
  * @returns {{bin: string, argsPrefix: string[]}|null}
  */
 export function findHarbor() {
@@ -83,10 +95,10 @@ export function buildHarborArgs(input) {
     "/app",
   ];
   for (const name of input.includeTaskNames ?? []) {
-    args.push("--include-task-name", name);
+    args.push("--include-task-name", toHarborTaskFilter(name));
   }
   for (const name of input.excludeTaskNames ?? []) {
-    args.push("--exclude-task-name", name);
+    args.push("--exclude-task-name", toHarborTaskFilter(name));
   }
   args.push(
     "--ak",

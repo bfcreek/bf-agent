@@ -23,6 +23,8 @@ export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
  * @property {number} timeoutMultiplier
  * @property {string[]} includeTaskNames
  * @property {string[]} excludeTaskNames
+ * @property {number|null} sample
+ * @property {number|null} seed
  * @property {boolean} skipJudge
  * @property {string} judgeModel
  * @property {number} judgeTimeoutSeconds
@@ -46,6 +48,8 @@ export function defaultRecognizedConfig() {
     timeoutMultiplier: 1,
     includeTaskNames: [],
     excludeTaskNames: [],
+    sample: null,
+    seed: null,
     skipJudge: false,
     judgeModel: "auto",
     judgeTimeoutSeconds: 300,
@@ -116,6 +120,8 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     timeoutMultiplier: null,
     includeTaskNames: null,
     excludeTaskNames: null,
+    sample: null,
+    seed: null,
     skipJudge: null,
     judgeModel: null,
     judgeTimeoutSeconds: null,
@@ -167,7 +173,9 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
         .map((s) => s.trim())
         .filter(Boolean);
       cli.excludeTaskNames = [...(cli.excludeTaskNames ?? []), ...names];
-    } else if (arg === "--judge-model") cli.judgeModel = take();
+    } else if (arg === "--sample") cli.sample = Number.parseInt(take(), 10);
+    else if (arg === "--seed") cli.seed = Number.parseInt(take(), 10);
+    else if (arg === "--judge-model") cli.judgeModel = take();
     else if (arg === "--judge-timeout") cli.judgeTimeoutSeconds = Number.parseInt(take(), 10);
     else if (arg === "--judge-retries") cli.judgeRetries = Number.parseInt(take(), 10);
     else if (arg === "--out") cli.out = take();
@@ -198,6 +206,8 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     timeoutMultiplier: cli.timeoutMultiplier ?? fileConfig.timeoutMultiplier,
     includeTaskNames: cli.includeTaskNames ?? fileConfig.includeTaskNames,
     excludeTaskNames: cli.excludeTaskNames ?? fileConfig.excludeTaskNames,
+    sample: cli.sample ?? fileConfig.sample ?? null,
+    seed: cli.seed ?? fileConfig.seed ?? null,
     skipJudge: cli.skipJudge ?? fileConfig.skipJudge,
     judgeModel: cli.judgeModel ?? fileConfig.judgeModel,
     judgeTimeoutSeconds: cli.judgeTimeoutSeconds ?? fileConfig.judgeTimeoutSeconds,

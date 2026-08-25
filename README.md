@@ -233,7 +233,13 @@ quality. `--task <name>` runs one task, `--json <file>` saves results,
 
 ## Dev bench (agent + judge)
 
+Host-only. No Harbor. Recommendations and scores come from this run.
+
 ```powershell
+.\bin\bench-local.ps1
+.\bin\bench-local.ps1 -SkipJudge
+.\bin\bench-local.ps1 -Tier 2
+.\bin\bench.ps1
 npm run bench
 node evals/dev-bench.mjs --tier 2
 node evals/dev-bench.mjs --scenario greet-module --keep-workspace
@@ -278,18 +284,25 @@ release gate — run while iterating on the runtime.
 
 ## Recognized benchmarks (on demand)
 
-Public leaderboard suites, **separate from the development bench**. Harbor
-runs the hidden tests; the Cursor CLI then judges **each task** the same way
-`npm run bench` does (score, grade, process notes, runtime recommendations).
+Public leaderboard suites, **separate from the local development bench**.
+Harbor runs each Terminal-Bench task in Docker; that is why this launcher
+uses Docker. For scores and recommendations without Harbor, use
+`.\bin\bench-local.ps1`.
 
 ```powershell
 .\bin\bench-tb.ps1
 .\bin\bench-tb.ps1 -Check
 .\bin\bench-tb.ps1 -SkipJudge
 .\bin\bench-tb.ps1 -Include openssl-selfsigned-cert
+.\bin\bench-tb-mini.ps1
+.\bin\bench-tb-mini.ps1 -Count 5 -Seed 42
 .\bin\bench-tb.ps1 -FromJob path\to\harbor\job
+.\bin\bench-tb.ps1 -Compose
+npm run bench:tb:mini
 npm run bench:recognized -- --list
 ```
+
+`bench-tb-mini` shuffles the Terminal-Bench 2.1 catalog and runs **5** tasks (override with `-Count`). That is not Harbor `--n-tasks`, which takes the first N after filters. The chosen names and RNG seed are printed (`sample: … (seed N)`); pass `-Seed` / `--seed` to repeat the same draw. `--include` still works: the sample is drawn from that list instead of the full catalog.
 
 `--skip-judge` records only Harbor pass/fail. Default is to judge every trial.
 

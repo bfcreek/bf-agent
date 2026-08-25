@@ -1,19 +1,29 @@
-# Start Terminal-Bench with recognized-bench defaults (evals/recognized/config.json).
+# Terminal-Bench via Harbor — each task runs in its own Docker sandbox.
+# Ollama stays on the host (default http://127.0.0.1:11434).
+#
 # Usage: .\bin\bench-tb.ps1
 #        .\bin\bench-tb.ps1 -Check
 #        .\bin\bench-tb.ps1 -SkipJudge
 #        .\bin\bench-tb.ps1 -Include openssl-selfsigned-cert
+#        .\bin\bench-tb.ps1 -Sample 5
 #        .\bin\bench-tb.ps1 -FromJob path\to\harbor\job
 #        .\bin\bench-tb.ps1 -DryRun
+#        .\bin\bench-tb.ps1 -Compose
+#
+# Random 5-task subset: .\bin\bench-tb-mini.ps1
+# Local development bench (no Harbor): .\bin\bench-local.ps1
 
 param(
     [switch]$Check,
     [switch]$SkipJudge,
     [switch]$List,
     [switch]$DryRun,
+    [switch]$Compose,
     [string]$Dataset,
     [string]$Model,
     [string]$Include,
+    [int]$Sample,
+    [string]$Seed,
     [string]$FromJob,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
@@ -79,6 +89,14 @@ else {
         $argsList.Add("--include")
         $argsList.Add($Include)
     }
+    if ($Sample -gt 0) {
+        $argsList.Add("--sample")
+        $argsList.Add([string]$Sample)
+    }
+    if ($Seed) {
+        $argsList.Add("--seed")
+        $argsList.Add($Seed)
+    }
     if ($FromJob) {
         $argsList.Add("--from-job")
         $argsList.Add($FromJob)
@@ -89,10 +107,33 @@ if ($ExtraArgs) { $argsList.AddRange($ExtraArgs) }
 
 if (-not $List -and -not $Check) {
     $judge = if ($SkipJudge -or $defaults.skipJudge) { "Harbor tests only" } else { "Harbor tests + Cursor judge ($($defaults.judgeModel))" }
-    Write-Host "Starting Terminal-Bench $dataset with halo-agent defaults" -ForegroundColor Cyan
+    Write-Host "Starting Terminal-Bench $dataset (Harbor / Docker sandboxes)" -ForegroundColor Cyan
     Write-Host "  model:  $model"
     Write-Host "  grade:  $judge"
-    Write-Host "  needs:  Docker, Harbor, Ollama (host.docker.internal)"
+    Write-Host "  needs:  Docker Desktop, Harbor, host Ollama (published as host.docker.internal)"
+    Write-Host "  out:    ../halo-agent-benchmark/recognized/"
+    Write-Host "  local:  .\bin\bench-local.ps1  (dev bench, no Harbor)"
+    Write-Host ""
+}
+
+if ($Compose -and -not $List -and -not $Check -and -not $FromJob) {
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if (-not $docker) {
+        [Console]::Error.WriteLine("Docker was not found on PATH. Start Docker Desktop or omit -Compose and use host Ollama.")
+        exit 10
+    }
+    Write-Host "Starting Compose Ollama (docker compose up -d --build ollama)..." -ForegroundColor Cyan
+    Push-Location $RepoRoot
+    try {
+        & docker compose up -d --build ollama
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("docker compose up failed (exit $LASTEXITCODE).")
+            exit $LASTEXITCODE
+        }
+    }
+    finally {
+        Pop-Location
+    }
     Write-Host ""
 }
 

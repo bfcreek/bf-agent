@@ -6,6 +6,7 @@
  *   node evals/recognized/run.mjs --check
  *   node evals/recognized/run.mjs terminal-bench
  *   node evals/recognized/run.mjs tb --dataset 2.1 --include openssl-selfsigned-cert
+ *   node evals/recognized/run.mjs terminal-bench --sample 5
  *   node evals/recognized/run.mjs terminal-bench --from-job path/to/harbor/job
  *
  * Harbor scores hidden tests. The Cursor CLI then judges each trial the same
@@ -41,6 +42,7 @@ import {
   formatRecognizedMarkdown,
 } from "./report.mjs";
 import { listSuites, resolveDataset, resolveSuite } from "./registry.mjs";
+import { resolveSampledIncludes } from "./terminal-bench/sample.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const PACKAGE_VERSION = JSON.parse(
@@ -68,8 +70,10 @@ Options:
   --dataset <id>         2.1 (default), 2.0, 1.0, 3.0, or a raw Harbor dataset id
   --model, -m <name>     Ollama model (default: auto)
   --base-url <url>       Host Ollama URL (rewritten to host.docker.internal in Docker)
-  --include, -i <glob>   Harbor task name glob (repeatable or comma-separated)
+  --include, -i <glob>   Task name or glob (short names like build-pmars are ok)
   --exclude, -x <glob>   Exclude task names
+  --sample <n>           Random subset of n tasks (shuffle; not Harbor --n-tasks)
+  --seed <int>           Reproducible RNG seed for --sample
   --n-concurrent <n>     Parallel Harbor trials (default 1)
   --attempts, -k <n>     Attempts per task (default 1)
   --max-steps <n>        halo-agent loop cap (default 80)
@@ -130,6 +134,30 @@ async function main() {
     console.error(err.message);
     process.exitCode = 1;
     return;
+  }
+
+  let sampled = null;
+  if (options.sample != null && !options.fromJob) {
+    try {
+      sampled = await resolveSampledIncludes({
+        sample: options.sample,
+        seed: options.seed,
+        includeTaskNames: options.includeTaskNames,
+        dataset: options.dataset,
+      });
+    } catch (err) {
+      console.error(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    options.includeTaskNames = sampled.tasks;
+    const source = sampled.fromInclude ? "include list" : `${dataset.label ?? dataset.id} catalog`;
+    console.error(
+      `sample: ${sampled.count} of ${sampled.poolSize} from ${source} (seed ${sampled.seed}): ${sampled.tasks.join(", ")}`,
+    );
+    if (sampled.truncated) {
+      console.error(`sample: requested ${sampled.requested}, catalog only has ${sampled.poolSize}.`);
+    }
   }
 
   if (configPath) console.error(`config: ${configPath}`);
@@ -259,6 +287,11 @@ async function main() {
       "Cursor judge scores are qualitative (process + artifacts), same schema as the development bench.",
       "Ollama must be reachable from Docker (host.docker.internal). On Linux, bind Ollama to 0.0.0.0 if the container cannot connect.",
       "halo-agent command timeouts are raised for this suite via HALO_COMMAND_TIMEOUT / HALO_MAX_COMMAND_TIMEOUT.",
+      ...(sampled
+        ? [
+            `Random subset: ${sampled.count} of ${sampled.poolSize} tasks (seed ${sampled.seed}): ${sampled.tasks.join(", ")}. Re-run with --sample ${sampled.requested} --seed ${sampled.seed}.`,
+          ]
+        : []),
     ],
   });
 

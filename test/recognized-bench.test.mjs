@@ -5,12 +5,17 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { parseRecognizedArgs, defaultRecognizedConfig } from "../evals/recognized/config.mjs";
-import { buildHarborArgs, ollamaUrlForContainer } from "../evals/recognized/harbor.mjs";
+import { buildHarborArgs, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
 import { findInstructionField, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
 import { latestReportPaths, recognizedRoot, runDirectory, timestampRunId } from "../evals/recognized/layout.mjs";
 import { parseHarborJob, summarizeTasks } from "../evals/recognized/parse.mjs";
 import { buildRecognizedReport, formatRecognizedMarkdown } from "../evals/recognized/report.mjs";
 import { listSuites, resolveDataset, resolveSuite } from "../evals/recognized/registry.mjs";
+import {
+  loadTaskCatalog,
+  pickRandomTasks,
+  resolveSampledIncludes,
+} from "../evals/recognized/terminal-bench/sample.mjs";
 import { buildJudgePrompt } from "../evals/judge.mjs";
 import { defaultBenchmarkRoot } from "../evals/workspace-layout.mjs";
 
@@ -46,6 +51,52 @@ test("parseRecognizedArgs --skip-judge and --from-job", () => {
   assert.equal(opts.fromJob, "jobs/run");
 });
 
+test("parseRecognizedArgs --sample and --seed", () => {
+  const opts = parseRecognizedArgs(["tb", "--sample", "5", "--seed", "42"], defaultRecognizedConfig());
+  assert.equal(opts.sample, 5);
+  assert.equal(opts.seed, 42);
+});
+
+test("TB 2.1 catalog has 89 unique task names", async () => {
+  const tasks = await loadTaskCatalog("2.1");
+  assert.equal(tasks.length, 89);
+  assert.equal(new Set(tasks).size, 89);
+  assert.ok(tasks.includes("openssl-selfsigned-cert"));
+});
+
+test("pickRandomTasks is deterministic for a seed", () => {
+  const names = ["a", "b", "c", "d", "e", "f", "g"];
+  const a = pickRandomTasks(names, { count: 3, seed: 42 });
+  const b = pickRandomTasks(names, { count: 3, seed: 42 });
+  assert.deepEqual(a.tasks, b.tasks);
+  assert.equal(a.seed, 42);
+  assert.equal(a.count, 3);
+  const c = pickRandomTasks(names, { count: 3, seed: 99 });
+  assert.notDeepEqual(a.tasks, c.tasks);
+});
+
+test("resolveSampledIncludes draws from include list when provided", async () => {
+  const picked = await resolveSampledIncludes({
+    sample: 2,
+    seed: 1,
+    includeTaskNames: ["alpha", "beta", "gamma"],
+    dataset: "2.1",
+  });
+  assert.equal(picked.count, 2);
+  assert.equal(picked.fromInclude, true);
+  for (const name of picked.tasks) {
+    assert.ok(["alpha", "beta", "gamma"].includes(name));
+  }
+});
+
+test("resolveSampledIncludes draws 5 from the 2.1 catalog", async () => {
+  const picked = await resolveSampledIncludes({ sample: 5, seed: 7, dataset: "2.1" });
+  assert.equal(picked.count, 5);
+  assert.equal(picked.poolSize, 89);
+  assert.equal(picked.fromInclude, false);
+  assert.equal(new Set(picked.tasks).size, 5);
+});
+
 test("ollamaUrlForContainer rewrites loopback for Docker", () => {
   assert.equal(ollamaUrlForContainer("http://127.0.0.1:11434"), "http://host.docker.internal:11434");
   assert.equal(ollamaUrlForContainer("http://localhost:11434/"), "http://host.docker.internal:11434");
@@ -66,8 +117,14 @@ test("buildHarborArgs uses custom halo-agent import and downloads /app for the j
   assert.ok(args.includes("--artifact"));
   assert.ok(args.includes("/app"));
   assert.ok(args.includes("--include-task-name"));
-  assert.ok(args.includes("openssl-selfsigned-cert"));
+  assert.ok(args.includes("*/openssl-selfsigned-cert"));
   assert.equal(args[args.indexOf("-d") + 1], "terminal-bench/terminal-bench-2-1");
+});
+
+test("toHarborTaskFilter prefixes bare names so Harbor fnmatch can match package ids", () => {
+  assert.equal(toHarborTaskFilter("build-pmars"), "*/build-pmars");
+  assert.equal(toHarborTaskFilter("terminal-bench/build-pmars"), "terminal-bench/build-pmars");
+  assert.equal(toHarborTaskFilter("*/openssl*"), "*/openssl*");
 });
 
 test("recognized layout sits under the sibling benchmark folder", () => {

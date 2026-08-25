@@ -21,8 +21,11 @@
     "evals": "node evals/run.mjs",
     "bench": "node evals/dev-bench.mjs",
     "bench:menu": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench.ps1",
+    "bench:local": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-local.ps1",
     "bench:recognized": "node evals/recognized/run.mjs",
     "bench:tb": "node evals/recognized/run.mjs terminal-bench",
-    "bench:tb:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb.ps1"
+    "bench:tb:mini": "node evals/recognized/run.mjs terminal-bench --sample 5",
+    "bench:tb:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb.ps1",
+    "bench:tb:mini:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb-mini.ps1"
   }
 }
