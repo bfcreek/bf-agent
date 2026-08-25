@@ -97,6 +97,32 @@ Exposes the agent loop behind the standard OpenAI API so any existing client
 Serve mode always runs unattended (`agent` mode): there is no terminal to
 prompt for approvals. Put Wire's guardrails in front if you need policy.
 
+## Docker Compose
+
+Ollama + `halo-agent serve` (`/v1` on port 11435). Workspace is bind-mounted
+at `/workspace`. Copy `.env.example` to `.env` to change model or ports.
+
+```powershell
+docker compose up --build
+docker compose --profile pull up ollama-pull
+docker compose exec ollama ollama pull llama3.2
+docker compose run --rm halo-agent models
+docker compose run --rm halo-agent "what time is it right now?"
+```
+
+NVIDIA GPU for Ollama:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+Already running Ollama on the host (typical for Terminal-Bench / Harbor, which
+reach it at `host.docker.internal:11434`):
+
+```powershell
+docker compose -f docker-compose.host-ollama.yml up --build
+```
+
 ## SDK
 
 The same machinery is embeddable — `createAgent()` wires up the client,
@@ -254,11 +280,12 @@ runs the hidden tests; the Cursor CLI then judges **each task** the same way
 `npm run bench` does (score, grade, process notes, runtime recommendations).
 
 ```powershell
+.\bin\bench-tb.ps1
+.\bin\bench-tb.ps1 -Check
+.\bin\bench-tb.ps1 -SkipJudge
+.\bin\bench-tb.ps1 -Include openssl-selfsigned-cert
+.\bin\bench-tb.ps1 -FromJob path\to\harbor\job
 npm run bench:recognized -- --list
-npm run bench:recognized -- --check
-npm run bench:tb -- --include openssl-selfsigned-cert
-node evals/recognized/run.mjs terminal-bench --dataset 2.1
-node evals/recognized/run.mjs terminal-bench --from-job path\to\harbor\job
 ```
 
 `--skip-judge` records only Harbor pass/fail. Default is to judge every trial.
@@ -293,6 +320,8 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/tools/fetch-url.mjs` | `fetch_url` with HTML extract + micro-RAG |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
+| `Dockerfile` | Image for `halo-agent serve` (and one-shot CLI via `compose run`) |
+| `docker-compose.yml` | Ollama + halo-agent; see `docker-compose.gpu.yml` and `docker-compose.host-ollama.yml` |
 | `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), recognized benches (`evals/recognized/`) |
 
 ## Relationship to Aura Wire

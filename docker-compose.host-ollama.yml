@@ -1,0 +1,37 @@
+# Use Ollama on the Docker host instead of the compose ollama service.
+#   docker compose -f docker-compose.host-ollama.yml up --build
+#
+# Harbor/Terminal-Bench task containers also reach this via host.docker.internal:11434.
+
+name: halo-agent
+
+services:
+  halo-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${HALO_PORT:-11435}:11435"
+    volumes:
+      - ${HALO_WORKSPACE:-./workspace}:/workspace
+    environment:
+      HALO_MODEL: ${HALO_MODEL:-auto}
+      HALO_PORT: ${HALO_PORT:-11435}
+      HALO_NUM_CTX: ${HALO_NUM_CTX:-16384}
+      HALO_OLLAMA_URL: http://host.docker.internal:${OLLAMA_PORT:-11434}
+      HALO_CWD: /workspace
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:11435/v1/models').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
