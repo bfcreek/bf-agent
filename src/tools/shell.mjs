@@ -9,8 +9,10 @@
  */
 
 import { spawn } from "node:child_process";
+import { access } from "node:fs/promises";
 
-import { resolveWithinRoot, truncateMiddle } from "./fs.mjs";
+import { looksVacuousCliStdout } from "../prompt-enhancements.mjs";
+import { goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
@@ -47,6 +49,29 @@ const REPL_COMMAND_NAMES = new Set([
 const INTERACTIVE_ONLY_FLAGS = new Set(["-i", "--interactive"]);
 
 /**
+ * Block bash/.sh invocations on Windows unless the user asked for POSIX shell.
+ * Models otherwise write and run bash even when run_command is PowerShell.
+ *
+ * @param {string} command
+ * @param {string} [goal]
+ * @param {{ platform?: string }} [options]
+ * @returns {string|null}
+ */
+export function windowsBashCommandIssue(command, goal, { platform = process.platform } = {}) {
+  if (platform !== "win32") return null;
+  if (goalAllowsPosixShell(goal)) return null;
+  const text = String(command ?? "");
+  const usesBash =
+    /(?:^|[;|&\n]\s*)(?:bash|sh)(?:\s|$)/.test(text) ||
+    /(?:^|[;|&\n\s])[\w./\\-]+\.(?:sh|bash)(?:\s|$|"|')/.test(text);
+  if (!usesBash) return null;
+  return (
+    "This is Windows PowerShell. Do not run bash/.sh unless the user asked for bash. " +
+    "Write a .ps1 script or use PowerShell syntax (chain with ';'), then retry."
+  );
+}
+
+/**
  * Detect command segments that would start an interactive REPL or shell:
  * a bare interpreter (`node`, `python`, `bash`, …) with no script path,
  * no inline code, and no other arguments (or only interactive flags).
@@ -66,6 +91,51 @@ export function findInteractiveCommand(command) {
     if (args.length === 0 || args.every((a) => INTERACTIVE_ONLY_FLAGS.has(a.toLowerCase()))) {
       return segment;
     }
+  }
+  return null;
+}
+
+/**
+ * CLIs that should print to stdout. Exit 0 with empty stdout usually means a
+ * broken Windows entry-point guard (URL.pathname / new URL(process.argv[1])).
+ *
+ * @param {string} command
+ * @param {number|null} exitCode
+ * @param {string} stdout
+ * @returns {string|null}
+ */
+export function cliEmptyStdoutNote(command, exitCode, stdout) {
+  if (exitCode !== 0) return null;
+  const text = String(command ?? "");
+  if (/\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+test|pytest)\b/i.test(text)) {
+    return null;
+  }
+  if (
+    !(/\b(node|nodejs|python3?|py)\s+\S+\.(mjs|js|cjs|py)\b/i.test(text) || /\bdotnet\s+run\b/i.test(text))
+  ) {
+    return null;
+  }
+  const out = String(stdout ?? "").trim();
+  if (!out) {
+    return (
+      "Exited 0 with empty stdout. If this CLI should print, the entry-point guard is likely wrong on Windows: " +
+      "use import.meta.url === pathToFileURL(process.argv[1]).href (not new URL(process.argv[1])), " +
+      "and resolve sibling files with fileURLToPath(new URL('./file', import.meta.url))."
+    );
+  }
+  if (out === "[]") {
+    return (
+      "Exited 0 but stdout is an empty JSON array []. If the input has records, property names likely did not bind. " +
+      "In C# deserialize with JsonSerializerOptions { PropertyNameCaseInsensitive = true } and serialize with JsonNamingPolicy.CamelCase. " +
+      "Read the JSON file and compare stdout to expected records before claiming success."
+    );
+  }
+  if (looksVacuousCliStdout(out, text)) {
+    return (
+      "Exited 0 but stdout looks empty of catalog records (qty=0 and no SKUs). " +
+      "JSON property names likely did not bind — deserialize with PropertyNameCaseInsensitive = true, " +
+      "then re-run the same command and confirm SKUs appear before finishing."
+    );
   }
   return null;
 }
@@ -137,6 +207,27 @@ function commandBaseName(segment) {
  * @param {string} segment
  * @returns {string[]}
  */
+/** PowerShell common parameters that take a value (not a file path). */
+const PS_PARAMS_WITH_VALUE = new Set([
+  "-erroraction",
+  "-ea",
+  "-warningaction",
+  "-wa",
+  "-informationaction",
+  "-ia",
+]);
+
+/** Bare PowerShell action names that are not deletion targets. */
+const PS_ACTION_VALUES = new Set([
+  "silentlycontinue",
+  "continue",
+  "stop",
+  "inquire",
+  "ignore",
+  "suspend",
+  "break",
+]);
+
 export function extractDeleteTargets(segment) {
   const words = segmentWords(segment);
   const base = commandBaseName(segment);
@@ -145,14 +236,20 @@ export function extractDeleteTargets(segment) {
   if (base === "git") args = args.slice(1);
 
   const targets = [];
-  for (const raw of args) {
-    if (raw.startsWith("-")) continue;
+  for (let i = 0; i < args.length; i++) {
+    const raw = args[i];
+    if (raw.startsWith("-")) {
+      if (PS_PARAMS_WITH_VALUE.has(raw.toLowerCase())) i += 1;
+      continue;
+    }
     if (/^\/[a-z]{1,2}$/i.test(raw)) continue; // DOS switch (/s, /q, /f)
     const target = raw
       .replace(/^["'`]+|["'`]+$/g, "")
       .replace(/^\.[\\/]/, "")
       .replace(/[\\/]+$/, "");
-    if (target) targets.push(target);
+    if (!target) continue;
+    if (PS_ACTION_VALUES.has(target.toLowerCase())) continue;
+    targets.push(target);
   }
   return targets;
 }
@@ -210,6 +307,9 @@ export function registerShellTools(registry, { workspaceRoot }) {
       "in the workspace directory and return its status ('success' or 'FAILED with exit code N'), " +
       "exit code, stdout, and stderr. Commands run with no input, so never launch a bare " +
       "interpreter or shell (node, python, bash) without a script or inline code. " +
+      (IS_WINDOWS
+        ? "On Windows do not invoke bash or .sh unless the user asked for bash; write and run .ps1 instead. "
+        : "") +
       `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s).`,
     parameters: {
       type: "object",
@@ -238,6 +338,8 @@ export function registerShellTools(registry, { workspaceRoot }) {
             'python script.py) or pass inline code (e.g. node -e "...", python -c "...").',
         );
       }
+      const posixShell = windowsBashCommandIssue(command, registry.runContext?.goal);
+      if (posixShell) throw new Error(posixShell);
       // Deletion gate for unattended runs (in ask mode, reaching execute
       // means the human already approved this exact call). Deletes the user
       // explicitly asked for go ahead; contradictions and ambiguity are
@@ -263,7 +365,15 @@ export function registerShellTools(registry, { workspaceRoot }) {
           );
         }
       }
-      const dir = resolveWithinRoot(workspaceRoot, cwd);
+      let dir = workspaceRoot;
+      if (cwd) {
+        dir = resolveWithinRoot(workspaceRoot, cwd);
+        try {
+          await access(dir);
+        } catch {
+          dir = workspaceRoot;
+        }
+      }
       const timeoutMs =
         Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) *
         1000;
@@ -320,12 +430,14 @@ function runCommand(command, { cwd, timeoutMs }) {
         : code === 0
           ? "success"
           : `FAILED with exit code ${code}`;
+      const note = timedOut ? null : cliEmptyStdoutNote(command, code, stdout);
       resolve({
         status,
         exitCode: code,
         timedOut,
         stdout: truncateMiddle(stdout),
         stderr: truncateMiddle(stderr),
+        ...(note ? { note } : {}),
       });
     };
 

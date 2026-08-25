@@ -93,3 +93,11 @@ test("find_files reports when nothing matches", async () => {
   assert.ok(outcome.ok);
   assert.match(outcome.result, /No files matching/);
 });
+
+test("grep_search falls back when glob matches zero files", async () => {
+  const noneGlob = await registry.execute("grep_search", { pattern: "greetUser", glob: "*.py" });
+  assert.ok(noneGlob.ok);
+  assert.match(noneGlob.result, /glob '\*\.py' matched 0/);
+  assert.match(noneGlob.result, /searched all files instead/);
+  assert.match(noneGlob.result, /src\/app\.mjs/);
+});

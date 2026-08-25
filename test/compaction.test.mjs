@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AgentLoop } from "../src/agent-loop.mjs";
-import { compactMessages, estimateTokens, transcriptSize } from "../src/compaction.mjs";
+import { compactMessages, estimateTokens, formatVerificationRecap, transcriptSize } from "../src/compaction.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 class FakeClient {
@@ -168,7 +168,7 @@ test("loop derives a token budget from the client's numCtx and compacts on real 
   );
   const registry = new ToolRegistry();
   registry.register({ name: "noop", execute: () => "ok" });
-  const loop = new AgentLoop({ client, registry, compaction: { keepRecent: 2 } });
+  const loop = new AgentLoop({ client, registry, compaction: { keepRecent: 2 }, planning: false });
 
   const result = await loop.run("go");
 
@@ -189,4 +189,71 @@ test("loop without compaction option never makes a summarizer call", async () =>
 
   await loop.run("continue", { history: longTranscript() });
   assert.equal(client.calls.length, 1);
+});
+
+test("formatVerificationRecap lists passing and failing command results", () => {
+  const recap = formatVerificationRecap([
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: "status: success\nexitCode: 0\nstdout:\nok\n",
+    },
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: JSON.stringify({ status: "FAILED with exit code 1", exitCode: 1 }),
+    },
+    { role: "user", content: "ignore me" },
+  ]);
+  assert.match(recap, /do not re-run a command that already exited 0/i);
+  assert.match(recap, /success \(exit 0\)/);
+  assert.match(recap, /FAILED \(exit 1\)/);
+  assert.equal(formatVerificationRecap([]), "");
+  const withStdout = formatVerificationRecap([
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: JSON.stringify({ status: "FAILED with exit code 1", exitCode: 1, stdout: "AssertionError: mul(3, 4)" }),
+    },
+  ]);
+  assert.match(withStdout, /last output:.*mul\(3, 4\)/);
+  const withCompiler = formatVerificationRecap([
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content:
+        "status: FAILED with exit code 1\nexitCode: 1\nstderr:\nProgram.cs(12,17): error CS0136: A local named 'args'\n",
+    },
+  ]);
+  assert.match(withCompiler, /compiler:.*CS0136/);
+});
+
+test("formatVerificationRecap keeps file snapshots and failing assertions", () => {
+  const recap = formatVerificationRecap([
+    {
+      role: "assistant",
+      tool_calls: [
+        { function: { name: "read_file", arguments: { path: "calc.py" } } },
+        { function: { name: "run_command", arguments: { command: "python test.py" } } },
+      ],
+    },
+    {
+      role: "tool",
+      tool_name: "read_file",
+      content: "def add(a, b):\n    return a + b\n\ndef mul(a, b):\n    return a + b\n",
+    },
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: JSON.stringify({
+        status: "FAILED with exit code 1",
+        exitCode: 1,
+        stdout: "    assert mul(3, 4) == 12\nAssertionError",
+      }),
+    },
+  ]);
+  assert.match(recap, /Last known file state/);
+  assert.match(recap, /calc\.py:.*def add/);
+  assert.match(recap, /Known assertion outcomes/);
+  assert.match(recap, /assert mul\(3, 4\) == 12/);
 });

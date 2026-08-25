@@ -13,9 +13,11 @@ import {
 } from "../src/tools/mutation-safety.mjs";
 import {
   classifyDeleteCommand,
+  cliEmptyStdoutNote,
   extractDeleteTargets,
   findDeleteCommand,
   findInteractiveCommand,
+  windowsBashCommandIssue,
 } from "../src/tools/shell.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -197,7 +199,7 @@ test("edit_file flexible match rejects ambiguous snippets", async () => {
   });
 
   assert.equal(edit.ok, false);
-  assert.match(edit.error, /matches 2 places/);
+  assert.match(edit.error, /appears 2 times/);
 });
 
 test("file tools refuse paths outside the workspace", async () => {
@@ -293,6 +295,86 @@ test("findInteractiveCommand leaves script and inline invocations alone", () => 
   }
 });
 
+test("windowsBashCommandIssue blocks bash on Windows unless the user asked for it", () => {
+  const win = { platform: "win32" };
+  assert.match(
+    windowsBashCommandIssue("bash hello.sh", "Create a script that prints hello", win),
+    /PowerShell|\.ps1/,
+  );
+  assert.match(
+    windowsBashCommandIssue("bash -c 'echo hi'", "Create a script that prints hello", win),
+    /PowerShell|\.ps1/,
+  );
+  assert.match(
+    windowsBashCommandIssue("./hello.sh", "Create a script that prints hello", win),
+    /PowerShell|\.ps1/,
+  );
+  assert.equal(
+    windowsBashCommandIssue("bash hello.sh", "Write a bash script that prints hello", win),
+    null,
+  );
+  assert.equal(
+    windowsBashCommandIssue("bash hello.sh", "Create a script that prints hello", {
+      platform: "linux",
+    }),
+    null,
+  );
+  assert.equal(
+    windowsBashCommandIssue("Write-Output 'hello'", "Create a script that prints hello", win),
+    null,
+  );
+});
+
+test("run_command refuses bash on Windows when the user did not ask for it", async () => {
+  if (process.platform !== "win32") return;
+  registry.setRunContext({ goal: "Create a script that prints hello" });
+  const run = await registry.execute("run_command", { command: "bash hello.sh" });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /PowerShell|\.ps1/);
+});
+
+test("cliEmptyStdoutNote warns on empty CLI stdout", () => {
+  assert.match(
+    cliEmptyStdoutNote("node summarize.mjs data.csv", 0, ""),
+    /empty stdout/i,
+  );
+  assert.match(
+    cliEmptyStdoutNote("dotnet run", 0, "  \n"),
+    /entry-point guard|Windows/i,
+  );
+});
+
+test("cliEmptyStdoutNote warns on empty JSON array stdout", () => {
+  assert.match(
+    cliEmptyStdoutNote("dotnet run -- data/users.json --active", 0, "[]"),
+    /empty JSON array/i,
+  );
+  assert.match(
+    cliEmptyStdoutNote("dotnet run -- data/users.json --active", 0, "[]\n"),
+    /PropertyNameCaseInsensitive/,
+  );
+  assert.equal(cliEmptyStdoutNote("dotnet run", 0, "[{\"id\":1}]"), null);
+});
+
+test("cliEmptyStdoutNote warns on qty=0 catalog stdout with no SKUs", () => {
+  assert.match(
+    cliEmptyStdoutNote("dotnet run -- list", 0, "qty=0\n"),
+    /qty=0|no SKUs|PropertyNameCaseInsensitive/i,
+  );
+  assert.equal(
+    cliEmptyStdoutNote("dotnet run -- list", 0, "WID-1  Widget  qty=10  $2.50\n"),
+    null,
+  );
+});
+
+test("cliEmptyStdoutNote stays quiet for tests, failures, and real output", () => {
+  assert.equal(cliEmptyStdoutNote("node test.mjs", 0, ""), null);
+  assert.equal(cliEmptyStdoutNote("python test.py", 0, ""), null);
+  assert.equal(cliEmptyStdoutNote("node -v", 0, ""), null);
+  assert.equal(cliEmptyStdoutNote("node summarize.mjs", 1, ""), null);
+  assert.equal(cliEmptyStdoutNote("node summarize.mjs", 0, "ok\n"), null);
+});
+
 test("run_command refuses commands that would open an interactive REPL", async () => {
   const run = await registry.execute("run_command", { command: "node" });
   assert.equal(run.ok, false);
@@ -352,6 +434,24 @@ test("extractDeleteTargets keeps files, skips flags and switches", () => {
   assert.deepEqual(extractDeleteTargets("git clean -fd"), []);
   assert.deepEqual(extractDeleteTargets("find . -name '*.log' -delete"), []);
   assert.deepEqual(extractDeleteTargets("rm ./scratch.md"), ["scratch.md"]);
+  assert.deepEqual(
+    extractDeleteTargets("Remove-Item invoice.json -ErrorAction SilentlyContinue"),
+    ["invoice.json"],
+  );
+  assert.deepEqual(
+    extractDeleteTargets("Remove-Item -ErrorAction SilentlyContinue invoice.json"),
+    ["invoice.json"],
+  );
+});
+
+test("classifyDeleteCommand ignores SilentlyContinue on a named persist file", () => {
+  const goal =
+    "Persist CLI state in invoice.json at the workspace root so each process sees prior lines.";
+  const result = classifyDeleteCommand(
+    "Remove-Item invoice.json -ErrorAction SilentlyContinue",
+    goal,
+  );
+  assert.equal(result.verdict, "authorized");
 });
 
 test("classifyDeleteCommand authorizes deletes the goal explicitly names", () => {

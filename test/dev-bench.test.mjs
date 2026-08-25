@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,9 @@ import {
   clearAllCheckpoints,
   clearCheckpoint,
   describeRunSelection,
+  isJudgeJsonError,
+  isScenarioTimeoutError,
+  isTransientProviderError,
   languageFilterFromCheckpoint,
   listCheckpoints,
   loadCheckpoint,
@@ -35,6 +38,15 @@ import { buildAssessmentReport, formatReportConsole } from "../evals/report.mjs"
 import { SCENARIOS, agentAnswerText, filterAvailableScenarios, runtimeAvailable, selectScenarios } from "../evals/scenarios.mjs";
 import { captureWorkspaceSnapshot } from "../evals/workspace-snapshot.mjs";
 import { removeWorkspaceDir } from "../evals/workspace-cleanup.mjs";
+
+/** @param {string} dir @param {Record<string, string>} files */
+async function writeTree(dir, files) {
+  for (const [rel, content] of Object.entries(files)) {
+    const full = path.join(dir, rel);
+    await mkdir(path.dirname(full), { recursive: true });
+    await writeFile(full, content, "utf8");
+  }
+}
 
 test("removeWorkspaceDir deletes a temp directory", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-rm-"));
@@ -412,8 +424,13 @@ test("persistAgentArtifacts writes json and step trace files", async () => {
     ],
     messages: [],
   };
-  const artifacts = await persistAgentArtifacts(dir, agentResult);
+  const artifacts = await persistAgentArtifacts(dir, agentResult, {
+    goal: "Which file exports computeTax?",
+    rubric: "Answer identifies lib/tax.mjs.",
+  });
   assert.equal(artifacts.finalAnswer, "lib/tax.mjs");
+  assert.equal(artifacts.task, "Which file exports computeTax?");
+  assert.equal(artifacts.rubric, "Answer identifies lib/tax.mjs.");
   assert.deepEqual(artifacts.toolCallOrder, ["grep_search"]);
   assert.equal(formatStepSummary(agentResult), buildAgentArtifacts(agentResult).stepSummary);
 });
@@ -422,10 +439,13 @@ test("every scenario has unique name, tier, goal, rubric, setup", () => {
   const names = SCENARIOS.map((s) => s.name);
   assert.equal(new Set(names).size, names.length);
   for (const scenario of SCENARIOS) {
-    assert.ok(scenario.tier >= 0 && scenario.tier <= 5);
+    assert.ok(scenario.tier >= 0 && scenario.tier <= 6);
     assert.ok(scenario.goal.length > 20);
     assert.ok(scenario.rubric.length > 20);
     assert.equal(typeof scenario.setup, "function");
+    if (scenario.tier === 6) {
+      assert.ok(String(scenario.followUp ?? "").length > 20, `${scenario.name} needs a follow-up`);
+    }
   }
 });
 
@@ -444,17 +464,35 @@ test("scenarios are ordered by increasing tier", () => {
   }
 });
 
-test("python and csharp scenarios cover tiers 1-5", () => {
+test("python and csharp scenarios cover tiers 1-6", () => {
   const python = SCENARIOS.filter((s) => s.language === "python");
   const csharp = SCENARIOS.filter((s) => s.language === "csharp");
+  const jsTier5 = SCENARIOS.filter((s) => s.tier === 5 && (s.language ?? "js") === "js").map((s) => s.name);
   assert.deepEqual(
     python.map((s) => `${s.tier}:${s.name}`),
-    ["1:py-greet", "1:py-find-export", "2:py-fix-tests", "3:py-json-filter", "4:py-refactor"],
+    ["1:py-greet", "1:py-find-export", "2:py-fix-tests", "3:py-json-filter", "4:py-refactor", "5:py-timesheet", "5:py-budget", "6:py-warehouse", "6:py-flags"],
   );
   assert.deepEqual(
     csharp.map((s) => `${s.tier}:${s.name}`),
-    ["1:cs-greet", "1:cs-find-export", "2:cs-fix-tests", "3:cs-json-filter", "4:cs-refactor", "5:cs-catalog-cli"],
+    [
+      "1:cs-greet",
+      "1:cs-find-export",
+      "2:cs-fix-tests",
+      "3:cs-json-filter",
+      "4:cs-refactor",
+      "5:cs-catalog-cli",
+      "5:cs-invoice-tests",
+      "5:cs-kanban",
+      "5:cs-booking",
+      "6:cs-tickets",
+      "6:cs-payroll",
+    ],
   );
+  assert.ok(jsTier5.includes("js-job-queue"));
+  assert.ok(jsTier5.includes("js-task-dag"));
+  const jsTier6 = SCENARIOS.filter((s) => s.tier === 6 && (s.language ?? "js") === "js").map((s) => s.name);
+  assert.ok(jsTier6.includes("js-library"));
+  assert.ok(jsTier6.includes("js-kvstore"));
   for (const scenario of [...python, ...csharp]) {
     assert.equal(typeof scenario.precheck, "function");
     if (scenario.name.endsWith("find-export")) {
@@ -575,6 +613,698 @@ test("cs-catalog-cli precheck compiles and checks CLI output", { timeout: 120_00
       ].join("\n"),
       "utf8",
     );
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("dotnet")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /dotnet/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("cs-invoice-tests precheck compiles, tests, and checks CLI output", { timeout: 180_000 }, async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "cs-invoice-tests");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-invoice-"));
+  try {
+    await scenario.setup(dir);
+    const appDir = path.join(dir, "Invoice");
+    const testDir = path.join(dir, "Invoice.Tests");
+    await mkdir(appDir, { recursive: true });
+    await mkdir(testDir, { recursive: true });
+
+    await writeFile(
+      path.join(appDir, "Invoice.csproj"),
+      [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        "  <PropertyGroup>",
+        "    <OutputType>Exe</OutputType>",
+        "    <TargetFramework>net8.0</TargetFramework>",
+        "    <ImplicitUsings>enable</ImplicitUsings>",
+        "    <Nullable>enable</Nullable>",
+        "    <RollForward>LatestMajor</RollForward>",
+        "  </PropertyGroup>",
+        "</Project>",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(appDir, "Ledger.cs"),
+      [
+        "public sealed record InvoiceLine(string Description, int Qty, decimal UnitPrice);",
+        "",
+        "public sealed class Invoice {",
+        "  public List<InvoiceLine> Lines { get; } = new();",
+        "  public decimal Subtotal => Lines.Sum(l => l.Qty * l.UnitPrice);",
+        "  public decimal Tax => Math.Round(Subtotal * 0.10m, 2, MidpointRounding.AwayFromZero);",
+        "  public decimal GrandTotal => Subtotal + Tax;",
+        "  public void Add(string description, int qty, decimal unitPrice) {",
+        "    if (qty <= 0 || unitPrice < 0) throw new ArgumentOutOfRangeException();",
+        "    Lines.Add(new InvoiceLine(description, qty, unitPrice));",
+        "  }",
+        "}",
+        "",
+        "public static class InvoiceStore {",
+        "  public static Invoice Load(string path) {",
+        "    var invoice = new Invoice();",
+        "    if (!File.Exists(path)) return invoice;",
+        "    using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));",
+        "    if (!doc.RootElement.TryGetProperty(\"lines\", out var lines)) return invoice;",
+        "    foreach (var el in lines.EnumerateArray()) {",
+        "      invoice.Add(",
+        "        el.GetProperty(\"desc\").GetString() ?? \"\",",
+        "        el.GetProperty(\"qty\").GetInt32(),",
+        "        el.GetProperty(\"price\").GetDecimal());",
+        "    }",
+        "    return invoice;",
+        "  }",
+        "  public static void Save(string path, Invoice invoice) {",
+        "    var payload = new {",
+        "      lines = invoice.Lines.Select(l => new { desc = l.Description, qty = l.Qty, price = l.UnitPrice }).ToArray()",
+        "    };",
+        "    File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(payload));",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(appDir, "Program.cs"),
+      [
+        "using System.Globalization;",
+        "var store = Path.Combine(Directory.GetCurrentDirectory(), \"invoice.json\");",
+        "var invoice = InvoiceStore.Load(store);",
+        "if (args.Length == 0) { Usage(); return; }",
+        "switch (args[0]) {",
+        "  case \"add\": {",
+        "    if (args.Length < 4) { Usage(); return; }",
+        "    if (!int.TryParse(args[2], out var qty) ||",
+        "        !decimal.TryParse(args[3], NumberStyles.Number, CultureInfo.InvariantCulture, out var price)) {",
+        "      Usage(); return;",
+        "    }",
+        "    try { invoice.Add(args[1], qty, price); }",
+        "    catch { Environment.Exit(1); return; }",
+        "    InvoiceStore.Save(store, invoice);",
+        "    Console.WriteLine($\"added: {invoice.Lines.Count}\");",
+        "    break;",
+        "  }",
+        "  case \"lines\":",
+        "    foreach (var line in invoice.Lines)",
+        "      Console.WriteLine($\"{line.Qty} x {line.Description} @ {line.UnitPrice:0.00}\");",
+        "    break;",
+        "  case \"summary\":",
+        "    Console.WriteLine($\"subtotal: {invoice.Subtotal:0.00}\");",
+        "    Console.WriteLine($\"tax: {invoice.Tax:0.00}\");",
+        "    Console.WriteLine($\"total: {invoice.GrandTotal:0.00}\");",
+        "    break;",
+        "  default:",
+        "    Usage();",
+        "    break;",
+        "}",
+        "void Usage() {",
+        "  Console.Error.WriteLine(\"usage: add <desc> <qty> <price> | lines | summary\");",
+        "  Environment.Exit(1);",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(testDir, "Invoice.Tests.csproj"),
+      [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        "  <PropertyGroup>",
+        "    <TargetFramework>net8.0</TargetFramework>",
+        "    <ImplicitUsings>enable</ImplicitUsings>",
+        "    <Nullable>enable</Nullable>",
+        "    <IsPackable>false</IsPackable>",
+        "    <RollForward>LatestMajor</RollForward>",
+        "  </PropertyGroup>",
+        "  <ItemGroup>",
+        '    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />',
+        '    <PackageReference Include="xunit" Version="2.9.2" />',
+        '    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />',
+        '    <ProjectReference Include="..\\Invoice\\Invoice.csproj" />',
+        "  </ItemGroup>",
+        "</Project>",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(testDir, "LedgerTests.cs"),
+      [
+        "using Xunit;",
+        "public class LedgerTests {",
+        "  [Fact]",
+        "  public void WidgetTotals() {",
+        "    var invoice = new Invoice();",
+        "    invoice.Add(\"Widget\", 2, 5.00m);",
+        "    Assert.Equal(10.00m, invoice.Subtotal);",
+        "    Assert.Equal(1.00m, invoice.Tax);",
+        "    Assert.Equal(11.00m, invoice.GrandTotal);",
+        "  }",
+        "  [Fact]",
+        "  public void RoundsTaxAwayFromZero() {",
+        "    var invoice = new Invoice();",
+        "    invoice.Add(\"Item\", 3, 1.25m);",
+        "    Assert.Equal(3.75m, invoice.Subtotal);",
+        "    Assert.Equal(0.38m, invoice.Tax);",
+        "    Assert.Equal(4.13m, invoice.GrandTotal);",
+        "  }",
+        "  [Fact]",
+        "  public void RejectsZeroQty() {",
+        "    Assert.ThrowsAny<Exception>(() => new Invoice().Add(\"Bad\", 0, 1m));",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("dotnet")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /dotnet/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("js-job-queue precheck accepts a correct two-file CLI", async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "js-job-queue");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-js-queue-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "jobs.mjs": [
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "const FILE = 'queue.json';",
+        "export function load() {",
+        "  if (!existsSync(FILE)) return { nextId: 1, jobs: [] };",
+        "  return JSON.parse(readFileSync(FILE, 'utf8'));",
+        "}",
+        "export function save(state) { writeFileSync(FILE, JSON.stringify(state)); }",
+        "export function format(job) { return `${job.id}  ${job.name}  ${job.status}`; }",
+        "",
+      ].join("\n"),
+      "queue.mjs": [
+        "import { format, load, save } from './jobs.mjs';",
+        "function usage() { console.error('usage: enqueue|list|claim|complete|fail|retry'); process.exit(1); }",
+        "const [cmd, a] = process.argv.slice(2);",
+        "if (!cmd) usage();",
+        "const state = load();",
+        "const byId = (id) => state.jobs.find((j) => j.id === id);",
+        "if (cmd === 'enqueue') {",
+        "  if (!a) usage();",
+        "  const job = { id: state.nextId++, name: a, status: 'queued' };",
+        "  state.jobs.push(job); save(state); console.log(`queued: ${job.id}`);",
+        "} else if (cmd === 'list') {",
+        "  for (const job of state.jobs) console.log(format(job));",
+        "} else if (cmd === 'claim') {",
+        "  const job = state.jobs.find((j) => j.status === 'queued');",
+        "  if (!job) { console.log('idle'); }",
+        "  else { job.status = 'running'; save(state); console.log(format(job)); }",
+        "} else if (cmd === 'complete' || cmd === 'fail' || cmd === 'retry') {",
+        "  const id = Number(a);",
+        "  const job = byId(id);",
+        "  if (!Number.isInteger(id) || !job) usage();",
+        "  if (cmd === 'complete') { if (job.status !== 'running') usage(); job.status = 'done'; save(state); console.log(`completed: ${id}`); }",
+        "  else if (cmd === 'fail') { if (job.status !== 'running') usage(); job.status = 'failed'; save(state); console.log(`failed: ${id}`); }",
+        "  else { if (job.status !== 'failed') usage(); job.status = 'queued'; save(state); console.log(`queued: ${id}`); }",
+        "} else usage();",
+        "",
+      ].join("\n"),
+      "test.mjs": [
+        "import { spawnSync } from 'node:child_process';",
+        "import { existsSync, unlinkSync } from 'node:fs';",
+        "if (existsSync('queue.json')) unlinkSync('queue.json');",
+        "function run(...args) { return spawnSync(process.execPath, ['queue.mjs', ...args], { encoding: 'utf8' }); }",
+        "let r = run('enqueue', 'wash'); if (r.status !== 0 || !r.stdout.includes('queued: 1')) process.exit(1);",
+        "r = run('claim'); if (!r.stdout.includes('1  wash  running')) process.exit(1);",
+        "r = run('complete', '1'); if (!r.stdout.includes('completed: 1')) process.exit(1);",
+        "r = run('complete', '1'); if (r.status === 0) process.exit(1);",
+        "console.log('ok');",
+        "",
+      ].join("\n"),
+    });
+    const result = await scenario.precheck(dir);
+    assert.equal(result.pass, true, result.detail);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("js-task-dag precheck accepts a correct two-file CLI", async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "js-task-dag");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-js-dag-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "graph.mjs": [
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "export function loadTasks() { return JSON.parse(readFileSync('data/tasks.json', 'utf8')); }",
+        "export function loadDone() {",
+        "  if (!existsSync('progress.json')) return new Set();",
+        "  return new Set(JSON.parse(readFileSync('progress.json', 'utf8')).done ?? []);",
+        "}",
+        "export function saveDone(done) { writeFileSync('progress.json', JSON.stringify({ done: [...done] })); }",
+        "export function kahn(tasks) {",
+        "  const remaining = new Set(tasks.map((t) => t.id));",
+        "  const deps = new Map(tasks.map((t) => [t.id, [...t.deps]]));",
+        "  const order = [];",
+        "  while (remaining.size) {",
+        "    const ready = [...remaining].filter((id) => deps.get(id).every((d) => !remaining.has(d))).sort();",
+        "    if (!ready.length) throw new Error('cycle');",
+        "    remaining.delete(ready[0]);",
+        "    order.push(ready[0]);",
+        "  }",
+        "  return order;",
+        "}",
+        "export function kind(task, done) {",
+        "  if (done.has(task.id)) return 'done';",
+        "  if (task.deps.every((d) => done.has(d))) return 'ready';",
+        "  return 'pending';",
+        "}",
+        "",
+      ].join("\n"),
+      "dag.mjs": [
+        "import { kahn, kind, loadDone, loadTasks, saveDone } from './graph.mjs';",
+        "function usage() { console.error('usage: order|ready|run|status|reset'); process.exit(1); }",
+        "const [cmd, id] = process.argv.slice(2);",
+        "if (!cmd) usage();",
+        "const tasks = loadTasks();",
+        "const done = loadDone();",
+        "if (cmd === 'order') { for (const item of kahn(tasks)) console.log(item); }",
+        "else if (cmd === 'ready') {",
+        "  for (const task of tasks.filter((t) => kind(t, done) === 'ready').sort((a, b) => a.id.localeCompare(b.id))) console.log(task.id);",
+        "} else if (cmd === 'run') {",
+        "  const task = tasks.find((t) => t.id === id);",
+        "  if (!task || kind(task, done) !== 'ready') usage();",
+        "  done.add(id); saveDone(done); console.log(`ran: ${id}`);",
+        "} else if (cmd === 'status') {",
+        "  for (const task of [...tasks].sort((a, b) => a.id.localeCompare(b.id))) console.log(`${task.id}  ${kind(task, done)}`);",
+        "} else if (cmd === 'reset') { saveDone(new Set()); console.log('reset'); }",
+        "else usage();",
+        "",
+      ].join("\n"),
+      "test.mjs": [
+        "import { spawnSync } from 'node:child_process';",
+        "import { existsSync, unlinkSync } from 'node:fs';",
+        "if (existsSync('progress.json')) unlinkSync('progress.json');",
+        "function run(...args) { return spawnSync(process.execPath, ['dag.mjs', ...args], { encoding: 'utf8' }); }",
+        "const order = run('order').stdout.trim().split(/\\r?\\n/);",
+        "if (order.join(',') !== 'fetch,parse,index,report,publish') process.exit(1);",
+        "if (run('ready').stdout.trim() !== 'fetch') process.exit(1);",
+        "if (run('run', 'index').status === 0) process.exit(1);",
+        "console.log('ok');",
+        "",
+      ].join("\n"),
+    });
+    const result = await scenario.precheck(dir);
+    assert.equal(result.pass, true, result.detail);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("py-timesheet precheck accepts a correct two-file CLI", async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "py-timesheet");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-py-time-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "store.py": [
+        "import json, os",
+        "FILE = 'timesheet.json'",
+        "def load():",
+        "    if not os.path.exists(FILE):",
+        "        return {'open': {}, 'minutes': {}}",
+        "    with open(FILE, encoding='utf-8') as f:",
+        "        return json.load(f)",
+        "def save(state):",
+        "    with open(FILE, 'w', encoding='utf-8') as f:",
+        "        json.dump(state, f)",
+        "def parse_hhmm(text):",
+        "    h, m = text.split(':')",
+        "    h, m = int(h), int(m)",
+        "    if not (0 <= h <= 23 and 0 <= m <= 59):",
+        "        raise ValueError('bad time')",
+        "    return h * 60 + m, f'{h:02d}:{m:02d}'",
+        "def fmt_hours(total):",
+        "    return f'{total // 60}:{total % 60:02d}'",
+        "",
+      ].join("\n"),
+      "timesheet.py": [
+        "import sys",
+        "from store import fmt_hours, load, parse_hhmm, save",
+        "def usage():",
+        "    print('usage: in|out|hours|open|overtime', file=sys.stderr)",
+        "    sys.exit(1)",
+        "args = sys.argv[1:]",
+        "if not args: usage()",
+        "cmd, rest = args[0], args[1:]",
+        "state = load()",
+        "try:",
+        "    if cmd == 'in':",
+        "        who, raw = rest[0], rest[1]",
+        "        if who in state['open']: usage()",
+        "        mins, label = parse_hhmm(raw)",
+        "        state['open'][who] = {'mins': mins, 'label': label}",
+        "        save(state)",
+        "        print(f'in: {who} {label}')",
+        "    elif cmd == 'out':",
+        "        who, raw = rest[0], rest[1]",
+        "        if who not in state['open']: usage()",
+        "        end, _ = parse_hhmm(raw)",
+        "        start = state['open'][who]['mins']",
+        "        if end <= start: usage()",
+        "        delta = end - start",
+        "        state['minutes'][who] = state['minutes'].get(who, 0) + delta",
+        "        del state['open'][who]",
+        "        save(state)",
+        "        print(f'out: {who} {delta}')",
+        "    elif cmd == 'hours':",
+        "        who = rest[0]",
+        "        print(f\"hours: {fmt_hours(state['minutes'].get(who, 0))}\")",
+        "    elif cmd == 'open':",
+        "        for who in sorted(state['open']):",
+        "            print(f\"{who}  since {state['open'][who]['label']}\")",
+        "    elif cmd == 'overtime':",
+        "        who = rest[0]",
+        "        if '--threshold' not in rest: usage()",
+        "        threshold = int(rest[rest.index('--threshold') + 1])",
+        "        extra = max(0, state['minutes'].get(who, 0) - threshold)",
+        "        print(f'overtime: {extra}')",
+        "    else:",
+        "        usage()",
+        "except (IndexError, ValueError, KeyError):",
+        "    usage()",
+        "",
+      ].join("\n"),
+      "test.py": [
+        "import os, subprocess, sys",
+        "if os.path.exists('timesheet.json'): os.remove('timesheet.json')",
+        "def run(*args):",
+        "    return subprocess.run([sys.executable, 'timesheet.py', *args], capture_output=True, text=True)",
+        "r = run('in', 'Ada', '09:00')",
+        "assert r.returncode == 0 and 'in: Ada 09:00' in r.stdout",
+        "assert run('in', 'Ada', '09:05').returncode != 0",
+        "r = run('out', 'Ada', '10:30')",
+        "assert r.returncode == 0 and 'out: Ada 90' in r.stdout",
+        "print('ok')",
+        "",
+      ].join("\n"),
+    });
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("python")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /python/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("py-budget precheck accepts a correct two-file CLI", async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "py-budget");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-py-budget-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "envelopes.py": [
+        "import json, os",
+        "def load_envelopes():",
+        "    with open(os.path.join('data', 'envelopes.json'), encoding='utf-8') as f:",
+        "        return {row['name']: int(row['limit']) for row in json.load(f)}",
+        "def load_spent():",
+        "    if not os.path.exists('spend.json'):",
+        "        return {}",
+        "    with open('spend.json', encoding='utf-8') as f:",
+        "        return json.load(f)",
+        "def save_spent(spent):",
+        "    with open('spend.json', 'w', encoding='utf-8') as f:",
+        "        json.dump(spent, f)",
+        "def line(name, limit, spent):",
+        "    return f'{name}  limit={limit}  spent={spent}  left={limit - spent}'",
+        "",
+      ].join("\n"),
+      "budget.py": [
+        "import sys",
+        "from envelopes import line, load_envelopes, load_spent, save_spent",
+        "def usage():",
+        "    print('usage: envelopes|spend|left|over|reset', file=sys.stderr)",
+        "    sys.exit(1)",
+        "args = sys.argv[1:]",
+        "if not args: usage()",
+        "cmd, rest = args[0], args[1:]",
+        "limits = load_envelopes()",
+        "spent = load_spent()",
+        "def get(name):",
+        "    if name not in limits:",
+        "        print('not found')",
+        "        sys.exit(1)",
+        "    return spent.get(name, 0)",
+        "if cmd == 'envelopes':",
+        "    for name in sorted(limits):",
+        "        print(line(name, limits[name], spent.get(name, 0)))",
+        "elif cmd == 'spend':",
+        "    name, raw = rest[0], rest[1]",
+        "    amount = int(raw)",
+        "    if amount <= 0: usage()",
+        "    total = get(name) + amount",
+        "    spent[name] = total",
+        "    save_spent(spent)",
+        "    print(f'spent: {name} {total}')",
+        "elif cmd == 'left':",
+        "    name = rest[0]",
+        "    print(f'left: {limits[name] - get(name)}')",
+        "elif cmd == 'over':",
+        "    rows = [line(name, limits[name], spent.get(name, 0)) for name in sorted(limits) if spent.get(name, 0) > limits[name]]",
+        "    print('\\n'.join(rows) if rows else 'none')",
+        "elif cmd == 'reset':",
+        "    name = rest[0]",
+        "    get(name)",
+        "    spent[name] = 0",
+        "    save_spent(spent)",
+        "    print(f'reset: {name}')",
+        "else:",
+        "    usage()",
+        "",
+      ].join("\n"),
+      "test.py": [
+        "import os, subprocess, sys",
+        "if os.path.exists('spend.json'): os.remove('spend.json')",
+        "def run(*args):",
+        "    return subprocess.run([sys.executable, 'budget.py', *args], capture_output=True, text=True)",
+        "assert 'groceries  limit=100  spent=0  left=100' in run('envelopes').stdout",
+        "r = run('spend', 'groceries', '30')",
+        "assert r.returncode == 0 and 'spent: groceries 30' in r.stdout",
+        "print('ok')",
+        "",
+      ].join("\n"),
+    });
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("python")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /python/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("cs-kanban precheck compiles and checks CLI output", { timeout: 120_000 }, async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "cs-kanban");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-kanban-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "Board.cs": [
+        "using System.Text.Json;",
+        "public sealed record Card(int Id, string Col, string Title);",
+        "public sealed class Board {",
+        "  static readonly HashSet<string> Cols = new(StringComparer.Ordinal) { \"todo\", \"doing\", \"done\" };",
+        "  public int NextId { get; set; } = 1;",
+        "  public List<Card> Cards { get; set; } = new();",
+        "  public static bool ValidCol(string col) => Cols.Contains(col);",
+        "  public static Board Load(string path) {",
+        "    if (!File.Exists(path)) return new Board();",
+        "    using var doc = JsonDocument.Parse(File.ReadAllText(path));",
+        "    var board = new Board { NextId = doc.RootElement.GetProperty(\"nextId\").GetInt32() };",
+        "    foreach (var el in doc.RootElement.GetProperty(\"cards\").EnumerateArray()) {",
+        "      board.Cards.Add(new Card(el.GetProperty(\"id\").GetInt32(), el.GetProperty(\"col\").GetString()!, el.GetProperty(\"title\").GetString()!));",
+        "    }",
+        "    return board;",
+        "  }",
+        "  public void Save(string path) {",
+        "    var payload = new { nextId = NextId, cards = Cards.Select(c => new { id = c.Id, col = c.Col, title = c.Title }) };",
+        "    File.WriteAllText(path, JsonSerializer.Serialize(payload));",
+        "  }",
+        "  public static string Format(Card c) => $\"{c.Id}  {c.Col}  {c.Title}\";",
+        "}",
+        "",
+      ].join("\n"),
+      "Program.cs": [
+        "var store = \"board.json\";",
+        "var board = Board.Load(store);",
+        "if (args.Length == 0) Usage();",
+        "switch (args[0]) {",
+        "  case \"add\":",
+        "    if (args.Length < 3 || !Board.ValidCol(args[1])) Usage();",
+        "    board.Cards.Add(new Card(board.NextId, args[1], args[2]));",
+        "    Console.WriteLine($\"added: {board.NextId}\");",
+        "    board.NextId++;",
+        "    board.Save(store);",
+        "    break;",
+        "  case \"list\": {",
+        "    IEnumerable<Card> cards = board.Cards.OrderBy(c => c.Id);",
+        "    if (args.Length > 1) {",
+        "      if (!Board.ValidCol(args[1])) Usage();",
+        "      cards = cards.Where(c => c.Col == args[1]);",
+        "    }",
+        "    foreach (var c in cards) Console.WriteLine(Board.Format(c));",
+        "    break;",
+        "  }",
+        "  case \"move\": {",
+        "    if (args.Length < 3) Usage();",
+        "    int moveId;",
+        "    if (!int.TryParse(args[1], out moveId) || !Board.ValidCol(args[2])) Usage();",
+        "    var idx = board.Cards.FindIndex(c => c.Id == moveId);",
+        "    if (idx < 0) Usage();",
+        "    board.Cards[idx] = board.Cards[idx] with { Col = args[2] };",
+        "    board.Save(store);",
+        "    Console.WriteLine($\"moved: {moveId} {args[2]}\");",
+        "    break;",
+        "  }",
+        "  case \"find\":",
+        "    if (args.Length < 2) Usage();",
+        "    foreach (var c in board.Cards.Where(c => c.Title.Contains(args[1], StringComparison.OrdinalIgnoreCase)).OrderBy(c => c.Id))",
+        "      Console.WriteLine(Board.Format(c));",
+        "    break;",
+        "  case \"done\":",
+        "    foreach (var c in board.Cards.Where(c => c.Col == \"done\").OrderBy(c => c.Id)) Console.WriteLine(Board.Format(c));",
+        "    break;",
+        "  default:",
+        "    Usage();",
+        "    break;",
+        "}",
+        "void Usage() { Console.WriteLine(\"usage: add|list|move|find|done\"); Environment.Exit(1); }",
+        "",
+      ].join("\n"),
+    });
+    const result = await scenario.precheck(dir);
+    if (!runtimeAvailable("dotnet")) {
+      assert.equal(result.pass, false);
+      assert.match(result.detail, /dotnet/i);
+    } else {
+      assert.equal(result.pass, true, result.detail);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("cs-booking precheck compiles and checks CLI output", { timeout: 120_000 }, async () => {
+  const scenario = SCENARIOS.find((s) => s.name === "cs-booking");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-cs-book-"));
+  try {
+    await scenario.setup(dir);
+    await writeTree(dir, {
+      "Bookings.cs": [
+        "using System.Text.Json;",
+        "public sealed record Room(string Id, string Name);",
+        "public sealed record Booking(int Id, string Room, string Date, int Slot);",
+        "public sealed class BookingStore {",
+        "  public int NextId { get; set; } = 1;",
+        "  public List<Booking> Bookings { get; set; } = new();",
+        "  public static List<Room> LoadRooms(string path) {",
+        "    using var doc = JsonDocument.Parse(File.ReadAllText(path));",
+        "    return doc.RootElement.EnumerateArray()",
+        "      .Select(el => new Room(el.GetProperty(\"id\").GetString()!, el.GetProperty(\"name\").GetString()!))",
+        "      .OrderBy(r => r.Id, StringComparer.Ordinal).ToList();",
+        "  }",
+        "  public static BookingStore Load(string path) {",
+        "    if (!File.Exists(path)) return new BookingStore();",
+        "    using var doc = JsonDocument.Parse(File.ReadAllText(path));",
+        "    var store = new BookingStore { NextId = doc.RootElement.GetProperty(\"nextId\").GetInt32() };",
+        "    foreach (var el in doc.RootElement.GetProperty(\"bookings\").EnumerateArray()) {",
+        "      store.Bookings.Add(new Booking(el.GetProperty(\"id\").GetInt32(), el.GetProperty(\"room\").GetString()!, el.GetProperty(\"date\").GetString()!, el.GetProperty(\"slot\").GetInt32()));",
+        "    }",
+        "    return store;",
+        "  }",
+        "  public void Save(string path) {",
+        "    var payload = new { nextId = NextId, bookings = Bookings.Select(b => new { id = b.Id, room = b.Room, date = b.Date, slot = b.Slot }) };",
+        "    File.WriteAllText(path, JsonSerializer.Serialize(payload));",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+      "Program.cs": [
+        "var rooms = BookingStore.LoadRooms(Path.Combine(\"data\", \"rooms.json\"));",
+        "var storePath = \"bookings.json\";",
+        "var store = BookingStore.Load(storePath);",
+        "if (args.Length == 0) Usage();",
+        "switch (args[0]) {",
+        "  case \"rooms\":",
+        "    foreach (var room in rooms) Console.WriteLine($\"{room.Id}  {room.Name}\");",
+        "    break;",
+        "  case \"book\": {",
+        "    if (args.Length < 4) Usage();",
+        "    var roomId = args[1];",
+        "    var date = args[2];",
+        "    int slot;",
+        "    if (!int.TryParse(args[3], out slot) || slot < 1 || slot > 8) Usage();",
+        "    if (!rooms.Any(r => r.Id == roomId)) { Console.WriteLine(\"not found\"); Environment.Exit(1); }",
+        "    if (store.Bookings.Any(b => b.Room == roomId && b.Date == date && b.Slot == slot)) { Console.WriteLine(\"taken\"); Environment.Exit(1); }",
+        "    store.Bookings.Add(new Booking(store.NextId, roomId, date, slot));",
+        "    Console.WriteLine($\"booked: {store.NextId}\");",
+        "    store.NextId++;",
+        "    store.Save(storePath);",
+        "    break;",
+        "  }",
+        "  case \"cancel\": {",
+        "    if (args.Length < 2) Usage();",
+        "    int cancelId;",
+        "    if (!int.TryParse(args[1], out cancelId)) Usage();",
+        "    var found = store.Bookings.Find(b => b.Id == cancelId);",
+        "    if (found is null) { Console.WriteLine(\"not found\"); Environment.Exit(1); }",
+        "    store.Bookings.Remove(found);",
+        "    store.Save(storePath);",
+        "    Console.WriteLine($\"canceled: {cancelId}\");",
+        "    break;",
+        "  }",
+        "  case \"agenda\":",
+        "    if (args.Length < 2) Usage();",
+        "    foreach (var b in store.Bookings.Where(b => b.Date == args[1]).OrderBy(b => b.Room, StringComparer.Ordinal).ThenBy(b => b.Slot))",
+        "      Console.WriteLine($\"{b.Room}  slot={b.Slot}  booking={b.Id}\");",
+        "    break;",
+        "  case \"free\": {",
+        "    if (args.Length < 3) Usage();",
+        "    if (!rooms.Any(r => r.Id == args[1])) { Console.WriteLine(\"not found\"); Environment.Exit(1); }",
+        "    var used = store.Bookings.Count(b => b.Room == args[1] && b.Date == args[2]);",
+        "    Console.WriteLine($\"free: {8 - used}\");",
+        "    break;",
+        "  }",
+        "  default:",
+        "    Usage();",
+        "    break;",
+        "}",
+        "void Usage() { Console.WriteLine(\"usage: rooms|book|cancel|agenda|free\"); Environment.Exit(1); }",
+        "",
+      ].join("\n"),
+    });
     const result = await scenario.precheck(dir);
     if (!runtimeAvailable("dotnet")) {
       assert.equal(result.pass, false);
@@ -772,4 +1502,18 @@ test("shouldStopBench stops on runner or judge errors only", () => {
     false,
   );
   assert.equal(shouldStopBench({ verdict: { score: 0, grade: "F" } }), false);
+  assert.equal(shouldStopBench({ error: "This operation was aborted" }), false);
+  assert.equal(shouldStopBench({ error: "The operation was aborted" }), false);
+  assert.equal(isScenarioTimeoutError("This operation was aborted"), true);
+  assert.equal(shouldStopBench({ error: "Judge response was not valid JSON." }), false);
+  assert.equal(isJudgeJsonError("Judge response was not valid JSON."), true);
+  assert.equal(
+    shouldStopBench({ error: "Ollama /api/chat returned 500: Internal Server Error" }),
+    false,
+  );
+  assert.equal(
+    isTransientProviderError("Ollama /api/chat returned 500: Internal Server Error"),
+    true,
+  );
+  assert.equal(shouldStopBench({ error: "Cursor agent exited 1" }), true);
 });

@@ -7,12 +7,20 @@
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
+  alreadyVerifiedFinishNudge,
+  ambiguousEditRecoveryNudge,
   detectTaskHints,
+  extractCompilerDiagnostics,
   finalAnswerNudge,
   formatTaskConstraints,
-  isComplexGoal,
+  shouldPlanGoal,
+  isTerminalVerificationMessage,
   mutationBlockedUntilPretest,
   PLANNING_USER_MESSAGE,
+  redundantVerifyBlock,
+  repeatedToolCallMessage,
+  TOOL_NUDGE_NEAR_LIMIT,
+  verificationCompleteOutcome,
 } from "./prompt-enhancements.mjs";
 
 /**
@@ -22,6 +30,10 @@ import {
 const WRAP_UP_PROMPT = [
   "You have used all available tool steps for this task.",
   "Answer the user now in plain text using what you have learned.",
+  "Your reply must be non-empty and must directly answer the question.",
+  "If you were asked for a path or number, reply with only that value",
+  "(the defining file's relative path, not an import site).",
+  "If you diagnosed a compile or test fix you did not apply, state that exact remaining change.",
   "If the task is not finished, say clearly what was done and what remains.",
   "Do not call any more tools.",
 ].join(" ");
@@ -63,33 +75,57 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  Pass a query to fetch_url so micro-RAG returns relevant passages instead",
   "  of the whole page.",
   "- To find where something is defined or used, use grep_search or find_files",
-  "  instead of reading files one at a time.",
+  "  first — do not list_dir to hunt for a symbol. Read the matching file after",
+  "  the search hit.",
   "- Read a file before editing it. Before your first edit, also read any",
   "  existing tests or callers that define the expected interface (flag names,",
   "  function signatures, output format) so your first attempt matches them.",
   "  Use edit_file for changes to existing files; use write_file only for new",
-  "  files or full rewrites. Prefer the smallest exact replacement (one key or",
-  "  one line, e.g. '\"debug\": false' -> '\"debug\": true') over rewriting the file.",
+  "  files or full rewrites. If asked to fix or edit a named file, read it first.",
+  "  If that file does not exist, report that and stop — do not write_file to",
+  "  create it unless the task asked you to create that file. Prefer the",
+  "  smallest exact replacement (one key or one line, e.g. '\"debug\": false' ->",
+  "  '\"debug\": true') over rewriting the file.",
   "- After changing files, verify the result: re-read the changed part, or run",
   "  the project's tests or build with run_command when the task calls for it.",
-  "  Once the required verification command exits 0 with the expected output,",
-  "  stop and give your final answer — do not run more exploratory commands.",
+  "  Once a required verification command exits 0 with the expected output,",
+  "  do not re-run that same command. Different named checks (dotnet build vs a",
+  "  smoke-test subcommand, or test.mjs vs a CLI invocation) still each need",
+  "  their own run_command. After all named checks pass, stop immediately — no",
+  "  diagnostics. If a tool result includes verificationComplete: true, that is",
+  "  terminal success: give the final answer listing changed files and the",
+  "  passing command. Implement only what the task asks; do not add standalone",
+  "  entrypoints, listen() bootstraps, or formatting-only edits unless requested",
+  "  or required for tests. On Windows, run_command is PowerShell: chain with ';' not",
+  "  '&&', and write new shell scripts as .ps1 (not bash/.sh) unless the user asked",
+  "  for bash.",
+  "  Exit 0 with empty stdout is not success for a CLI that should print:",
+  "  fix the entry-point guard, then re-run. A repeated-call refusal after a",
+  "  passing verification means the task is done: give your final answer, do",
+  "  not run node -v or other diagnostics, and do not mention blocked commands.",
   "- When the task mentions failing tests, your first tool step must be",
   "  run_command with that test command; do not edit until you have seen the",
-  "  failure exit code and output. After the last edit, run the tests again.",
+  "  failure exit code and output. If the first run already exits 0, read the",
+  "  implementation and stop — do not add validation, docstrings, or extras.",
+  "  If it fails, fix only the broken logic, then re-run the tests.",
   "- Before claiming success, run every command the task names (e.g. node",
   "  test.mjs, python test.py, or `dotnet run`) with run_command.",
-  "  Only claim pass/success when the exit code is 0. run_command results",
-  "  start with a status field: FAILED or TIMED OUT means the command did not",
-  "  succeed even though the tool call returned — read stderr, do not assume",
-  "  success.",
+  "  Only claim pass/success when the exit code is 0 AND stdout matches what",
+  "  the task asked to print. Empty stdout or [] is a failure for a CLI that",
+  "  should print records — read stdout, do not stop on exit 0 alone.",
+  "  run_command results start with a status field: FAILED or TIMED OUT means",
+  "  the command did not succeed even though the tool call returned — read",
+  "  stderr, do not assume success.",
   "- Never launch a bare interpreter or shell (node, python, bash, ...) with",
   "  no script or inline code: commands run with no input, so a REPL hangs",
   "  until the timeout. A timed-out command is a failure — change the command",
   "  instead of repeating it, and do not spend your final answer explaining",
   "  shell behavior.",
   "- Files ending in .mjs are ES modules: use import/export, never require or",
-  "  module.exports.",
+  "  module.exports. Resolve sibling files with fileURLToPath(new URL('./file',",
+  "  import.meta.url)), never URL.pathname — that is wrong on Windows. When",
+  "  tests spawn a sibling CLI, use that same fileURLToPath URL, never",
+  "  pathToFileURL(absPath).pathname.",
   "- When a .mjs file is both a CLI entry and importable, guard top-level CLI",
   "  code with import.meta.url === pathToFileURL(process.argv[1]).href (or keep",
   "  lib and bin separate) so importing from tests does not call process.exit.",
@@ -97,16 +133,36 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  module that exits on load.",
   "- When a task says a server listens on a port, the entry module must call",
   "  listen when executed directly (same import.meta.url main check), not only",
-  "  export a start helper for tests.",
+  "  export a start helper for tests. Insert new routes above any catch-all",
+  "  404 handler so existing fallback behavior stays intact. Do not start a",
+  "  long-running server in the foreground after tests already passed. Outbound",
+  "  HTTP in tests should use `import { request } from 'node:http'` (or fetch);",
+  "  createServer() returns a server, not a request factory.",
   "- When renaming or fixing a misspelled identifier, update every declaration,",
   "  export, and reference in one edit_file call (set replace_all when the old",
-  "  string is the typo alone). Then verify once.",
+  "  string is the typo alone — never replace_all on a return/statement line).",
+  "- When edit_file reports that old_string is ambiguous, include the enclosing",
+  "  function or class (for example `def mul(a, b):\\n    return a + b`) and omit",
+  "  replace_all unless you intend to change every occurrence. Then verify once.",
   "- When extracting a shared module, write the shared file first, then update",
   "  importers, then run tests. When a sample/fixture file is named, read it",
-  "  before writing the implementation.",
+  "  before writing the implementation. In C#, do not name a method the same",
+  "  as its class (CS0542) — keep the class name, rename the method. JSON from C#",
+  "  CLIs: deserialize with PropertyNameCaseInsensitive = true and serialize",
+  "  with JsonNamingPolicy.CamelCase (input keys are usually camelCase). Python JSON CLIs: named flags only; empty/[] is failure; stop after test.py and the named invocation pass. If Foo.py defines foo(), use from foo import foo. For new",
+  "  C# console apps, prefer a Program class with static void Main(string[] args)",
+  "  over mixing top-level statements with type declarations (CS8803). Never",
+  "  declare a local `args` in a top-level program (CS0136 shadows implicit Main",
+  "  args — use `cliArgs`). Never use `out` variables inside `||`/`&&` (CS0165);",
+  "  assign TryParse to a bool, then test it. After the first compile error,",
+  "  apply the canonical fix for that CS code once. Locate a .NET solution via",
+  "  .sln, .slnx, or the known csproj — do not hardcode one filename.",
+  "- For CLIs: validate required args, wrap file I/O in try/catch with a",
+  "  user-facing error and non-zero exit, then run tests.",
   "- In your final answer, mention only files you actually created or edited;",
   "  do not claim you added tests or docs you did not write. If tests were",
-  "  already present and left unchanged, say so.",
+  "  already present and left unchanged, say so. Never mention blocked",
+  "  diagnostic commands such as node -v.",
   "- Deleting files is destructive. Delete a file only when the user",
   "  explicitly named it for deletion, and never delete a file the user asked",
   "  to keep. If the task implies deleting files the user did not name (e.g.",
@@ -114,12 +170,19 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  exactly which files may be removed.",
   "- If a tool call fails, read the error and change your approach. Never",
   "  repeat a call that just failed with the same arguments.",
-  "- When the user asks for only a path, number, or other single value, reply",
-  "  with that value alone unless they asked for more.",
+  "- Never finish with an empty message. After tools return, synthesize a",
+  "  non-empty final answer. When the user asks for only a path, number, or",
+  "  other single value, reply with that value alone (the file that DEFINES",
+  "  a symbol, not an import site) and do not call more tools.",
   "- When creating or fixing tests, run them with run_command before finishing",
   "  and report whether they passed in your final answer.",
   "- Keep going until the task is done, then reply to the user in plain text",
   "  with no tool calls. State what you did and what, if anything, remains.",
+  "- If the user says this is a new request or the workspace already contains a",
+  "  working project, that is mandatory new work: edit files for every newly",
+  "  named command before verifying. Passing build or old commands is not done.",
+  "- Before editing tests on failure, trace program state against the spec; if",
+  "  the implementation already matches, keep it and fix the assertion.",
 ].join("\n");
 
 /**
@@ -157,7 +220,8 @@ export class AgentLoop {
    *   the user message before the model is called. `{ workspaceRoot, client?,
    *   embeddingModel?, onProgress? }`.
    * @param {(info: {readme: boolean, ragHits: number}) => void} [options.onBootstrap]
-   * @param {boolean} [options.planning] Pre-pass plan on complex first turns (default true).
+   * @param {boolean} [options.planning] Pre-pass plan on first turns (default true).
+   *   Skips only empty goals and simple read-and-answer prompts.
    * @param {boolean} [options.taskHints] Append task-type constraints to the user message (default true).
    * @param {(info: {plan: string, hints: Array<{id: string, constraint: string}>}) => void} [options.onPlan]
    */
@@ -233,7 +297,7 @@ export class AgentLoop {
     const steps = [];
     const freshTurn = isFreshTurn(history);
 
-    if (this.planning && freshTurn && isComplexGoal(goal) && !signal?.aborted) {
+    if (this.planning && freshTurn && shouldPlanGoal(goal) && !signal?.aborted) {
       try {
         const planMessages = [
           ...messages,
@@ -266,6 +330,7 @@ export class AgentLoop {
     let repeatedKey = "";
     let repeatedCount = 0;
     let toolNudgeCount = 0;
+    let nearLimitNudged = false;
 
     for (let index = 1; index <= this.maxSteps; index++) {
       if (signal?.aborted) {
@@ -282,6 +347,11 @@ export class AgentLoop {
         });
         if (compacted !== messages) observedTokens = 0;
         messages = compacted;
+      }
+
+      if (!nearLimitNudged && index >= this.maxSteps) {
+        nearLimitNudged = true;
+        messages.push({ role: "user", content: TOOL_NUDGE_NEAR_LIMIT });
       }
 
       const { message, raw } = await chatWithParseRecovery(this.client, {
@@ -330,24 +400,36 @@ export class AgentLoop {
       repeatedKey = stepKey;
       const refuseRepeat = repeatedCount >= MAX_REPEATED_STEPS;
 
+      const forceFinish =
+        toolNudgeCount > 0 &&
+        alreadyVerifiedFinishNudge({ goal, steps, nudgeCount: 0 });
+
       const executed = [];
       for (const call of toolCalls) {
         const name = call?.function?.name ?? "";
         const args = call?.function?.arguments ?? {};
-        const pretestBlock = refuseRepeat
+        const pretestBlock = refuseRepeat || forceFinish
           ? null
           : mutationBlockedUntilPretest({ goal, toolName: name, steps });
+        const verifyBlock =
+          refuseRepeat || forceFinish || pretestBlock
+            ? null
+            : redundantVerifyBlock({ goal, steps, toolName: name, args });
         const outcome = refuseRepeat
-          ? {
-              ok: false,
-              error:
-                `You have made this exact tool call ${repeatedCount + 1} times in a row; ` +
-                "it was not executed again. Do something different: change the arguments, " +
-                "use another tool, or give your final answer now.",
-            }
-          : pretestBlock
+          ? blockedToolOutcome(
+              repeatedToolCallMessage({
+                repeatedCount,
+                goal,
+                steps,
+              }),
+            )
+          : forceFinish
+            ? verificationCompleteOutcome(forceFinish)
+            : pretestBlock
             ? { ok: false, error: pretestBlock }
-            : await this.registry.execute(name, args);
+            : verifyBlock
+              ? blockedToolOutcome(verifyBlock)
+              : await this.registry.execute(name, args);
         executed.push({ name, args, ...outcome });
         messages.push({
           role: "tool",
@@ -364,6 +446,19 @@ export class AgentLoop {
       };
       steps.push(step);
       this.onStep?.(step);
+
+      const stopNudge = alreadyVerifiedFinishNudge({
+        goal,
+        steps,
+        nudgeCount: toolNudgeCount,
+      });
+      if (stopNudge) {
+        toolNudgeCount += 1;
+        messages.push({ role: "user", content: stopNudge });
+      } else {
+        const editNudge = ambiguousEditRecoveryNudge({ steps });
+        if (editNudge) messages.push({ role: "user", content: editNudge });
+      }
     }
 
     // Out of steps: ask for a plain-text wrap-up (no tools offered) so the
@@ -401,23 +496,30 @@ export function isToolCallParseError(err) {
 }
 
 /**
- * One retry on transient client failures (network unreachable, 5xx). A
- * single mid-task hiccup should not kill a run that already did real work.
+ * Retry transient client failures (network unreachable, 5xx) with backoff.
+ * A mid-task hiccup should not kill a run that already did real work.
  * Tool-call parse failures are not transient — {@link chatWithParseRecovery}
- * handles those with a model nudge.
+ * handles those with a model nudge. 4xx is not retried.
  */
+const TRANSIENT_RETRY_DELAYS_MS = [500, 1500, 4000, 8000];
+
 async function chatWithRetry(client, request) {
-  try {
-    return await client.chat(request);
-  } catch (err) {
-    if (err?.name === "AbortError" || request.signal?.aborted) throw err;
-    if (err?.name !== "OllamaClientError") throw err;
-    if (typeof err.status === "number" && err.status < 500) throw err;
-    if (isToolCallParseError(err)) throw err;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    if (request.signal?.aborted) throw err;
-    return client.chat(request);
+  let lastErr;
+  for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await client.chat(request);
+    } catch (err) {
+      lastErr = err;
+      if (err?.name === "AbortError" || request.signal?.aborted) throw err;
+      if (err?.name !== "OllamaClientError") throw err;
+      if (typeof err.status === "number" && err.status < 500) throw err;
+      if (isToolCallParseError(err)) throw err;
+      if (attempt >= TRANSIENT_RETRY_DELAYS_MS.length) throw err;
+      await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[attempt]));
+      if (request.signal?.aborted) throw err;
+    }
   }
+  throw lastErr;
 }
 
 /**
@@ -463,11 +565,56 @@ function textOf(content) {
   return typeof content === "string" ? content : "";
 }
 
+function blockedToolOutcome(message) {
+  if (isTerminalVerificationMessage(message)) return verificationCompleteOutcome(message);
+  return { ok: false, error: message };
+}
+
 /** Tool results go back to the model as a string (JSON for structured data). */
 function toolResultContent(outcome) {
   if (!outcome.ok) return `ERROR: ${outcome.error}`;
   const { result } = outcome;
   if (result === undefined || result === null) return "(no output)";
+  if (typeof result === "object") {
+    if (result.verificationComplete) {
+      return [
+        "status: verification already succeeded",
+        "verificationComplete: true",
+        "exitCode: 0",
+        `note: ${result.note ?? ""}`.trim(),
+      ].join("\n");
+    }
+    const code = result.exitCode ?? result.exitCode;
+    const status = result.status;
+    if (code != null || status != null) {
+      const failed = Number(code) !== 0 || result.timedOut;
+      const lines = [
+        `status: ${status ?? (Number(code) === 0 ? "success" : `FAILED with exit code ${code}`)}`,
+        `exitCode: ${code ?? ""}`,
+      ];
+      if (result.timedOut) lines.push("timedOut: true");
+      if (failed) {
+        lines.push("FAILED: treat this as a real command failure even though the tool call succeeded.");
+      }
+      const compilerErrors = extractCompilerDiagnostics(
+        `${result.stderr ?? ""}\n${result.stdout ?? ""}`,
+      );
+      if (compilerErrors) lines.push(`compilerErrors:\n${compilerErrors}`);
+      if (failed) {
+        lines.push(`stdout:\n${String(result.stdout ?? "").length ? result.stdout : "(empty)"}`);
+        lines.push(`stderr:\n${String(result.stderr ?? "").length ? result.stderr : "(empty)"}`);
+      } else {
+        if (result.stdout != null && String(result.stdout).length) {
+          lines.push(`stdout:\n${result.stdout}`);
+        } else {
+          lines.push("stdout: (empty)");
+        }
+        if (result.stderr) lines.push(`stderr:\n${result.stderr}`);
+      }
+      if (result.note) lines.push(`note: ${result.note}`);
+      return lines.join("\n");
+    }
+  }
   return typeof result === "string" ? result : JSON.stringify(result);
 }
 

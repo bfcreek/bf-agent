@@ -26,6 +26,10 @@ test("environment context names the workspace root, platform, and shell", async 
   assert.ok(context.includes(process.platform), "platform present");
   assert.match(context, /run_command uses (PowerShell|\/bin\/sh)/);
   assert.ok(context.includes(process.version), "node version present");
+  if (process.platform === "win32") {
+    assert.match(context, /\.ps1/);
+    assert.match(context, /Do not default to bash/);
+  }
 });
 
 test("environment context lists top-level entries with dirs marked", async () => {

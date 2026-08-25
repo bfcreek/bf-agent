@@ -124,6 +124,38 @@ export function classifyCleanupFileMutation(filePath, goal) {
  * @param {string|null|undefined} target
  * @param {string} toolName
  */
+const EDIT_EXISTING_INTENT =
+  /\b(fix|typo|edit|save it|change|update|modify|correct)\b/i;
+const CREATE_FILE_INTENT =
+  /\b(create|write|implement|add|build|make|scaffold|extract|refactor)\b/i;
+
+/**
+ * Block write_file from creating a missing file the user asked to edit.
+ * Create/implement goals are left alone so new files can still be written.
+ *
+ * @param {string} [goal]
+ * @param {string} filePath
+ * @param {boolean} exists
+ * @returns {string|null}
+ */
+export function missingEditTargetBlock(goal, filePath, exists) {
+  if (exists) return null;
+  const goalText = String(goal ?? "");
+  if (!goalText) return null;
+  if (!EDIT_EXISTING_INTENT.test(goalText)) return null;
+  if (CREATE_FILE_INTENT.test(goalText)) return null;
+  const rel = normalizeMutationPath(filePath);
+  if (!rel || isTooBroadTarget(rel)) return null;
+  const base = rel.includes("/") ? rel.slice(rel.lastIndexOf("/") + 1) : rel;
+  const mentioned =
+    analyzeFileMention(goalText, rel).mentioned || analyzeFileMention(goalText, base).mentioned;
+  if (!mentioned) return null;
+  return (
+    `Blocked: '${base}' does not exist. The task is to edit an existing file, not create it. ` +
+    "Tell the user the file is missing and stop; do not write_file that path."
+  );
+}
+
 export function cleanupMutationBlockMessage(verdict, target, toolName = "write_file") {
   if (verdict === "protected") {
     return (

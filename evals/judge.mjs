@@ -56,7 +56,11 @@ export function buildAgentSpawn(agentBin, args) {
  * @param {number} [input.options.timeoutSeconds]
  */
 export async function judgeRun({ scenario, agentResult, workspaceDir, options = {} }) {
-  await persistAgentArtifacts(workspaceDir, agentResult);
+  await persistAgentArtifacts(workspaceDir, agentResult, {
+    goal: scenario.goal,
+    followUp: scenario.followUp ?? null,
+    rubric: scenario.rubric,
+  });
   const snapshot = await captureWorkspaceSnapshot(workspaceDir);
   const retries = options.retries ?? 2;
   let lastRaw = "";
@@ -128,7 +132,15 @@ function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
   const stepSummary = formatStepSummary(agentResult);
   return [
     "## Task",
-    scenario.goal,
+    scenario.followUp
+      ? [
+          "### Phase 1 — create",
+          scenario.goal,
+          "",
+          "### Phase 2 — follow-up change",
+          scenario.followUp,
+        ].join("\n")
+      : scenario.goal,
     "",
     "## Rubric",
     scenario.rubric,

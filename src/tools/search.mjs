@@ -126,6 +126,8 @@ export function registerSearchTools(registry, { workspaceRoot }) {
       "Search file contents in the workspace with a regular expression. " +
       "Returns matching lines as 'path:line: text'. Use this to find where " +
       "something is defined or used instead of reading files one by one. " +
+      "When the user asked which file defines a symbol, reply with that file's " +
+      "workspace-relative path after the search — do not stop with an empty message. " +
       "Common directories like node_modules and .git are skipped.",
     parameters: {
       type: "object",
@@ -140,7 +142,10 @@ export function registerSearchTools(registry, { workspaceRoot }) {
         },
         glob: {
           type: "string",
-          description: "Only search files whose name matches this glob, e.g. '*.mjs' or 'src/**/*.js'.",
+          description:
+            "Only search files whose name matches this glob, e.g. '*.mjs' or 'src/**/*.js'. " +
+            "Omit glob (or use '*.py' / '*.cs') when the workspace is not JavaScript. " +
+            "If the glob matches no files, the search automatically repeats without a glob.",
         },
         case_insensitive: {
           type: "boolean",
@@ -173,12 +178,20 @@ export function registerSearchTools(registry, { workspaceRoot }) {
         ({ files: candidates, truncated: scanTruncated } = await collectFiles(root, start));
       }
 
+      const scannedBeforeGlob = candidates.length;
+      let globFallbackNote = "";
       if (glob) {
         const globRe = globToRegExp(glob);
         const matchWholePath = glob.includes("/");
-        candidates = candidates.filter((rel) =>
+        const afterGlob = candidates.filter((rel) =>
           matchWholePath ? globRe.test(rel) : globRe.test(rel.split("/").pop()),
         );
+        if (afterGlob.length === 0) {
+          globFallbackNote =
+            `Note: glob '${glob}' matched 0 of ${scannedBeforeGlob} file(s); searched all files instead.`;
+        } else {
+          candidates = afterGlob;
+        }
       }
 
       const matches = [];
@@ -208,7 +221,14 @@ export function registerSearchTools(registry, { workspaceRoot }) {
       }
 
       if (matches.length === 0) {
-        return `No matches for /${pattern}/ in ${candidates.length} file(s) searched.`;
+        const prefix = globFallbackNote ? `${globFallbackNote} ` : "";
+        if (glob && !globFallbackNote) {
+          return (
+            `No matches for /${pattern}/ in ${candidates.length} file(s) searched ` +
+            `(glob '${glob}' may be too narrow — retry without glob or with '*.py' / '*.cs').`
+          );
+        }
+        return `${prefix}No matches for /${pattern}/ in ${candidates.length} file(s) searched.`;
       }
       const notes = [];
       if (hitLimit)
@@ -218,7 +238,8 @@ export function registerSearchTools(registry, { workspaceRoot }) {
         );
       if (scanTruncated) notes.push(`only the first ${MAX_FILES_SCANNED} files were scanned`);
       const header = `${matches.length} match(es) in ${filesWithMatches} file(s)${notes.length ? ` (${notes.join("; ")})` : ""}:`;
-      return truncateOutput([header, ...matches].join("\n"));
+      const lines = globFallbackNote ? [globFallbackNote, header, ...matches] : [header, ...matches];
+      return truncateOutput(lines.join("\n"));
     },
   });
 

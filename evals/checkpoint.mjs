@@ -241,7 +241,36 @@ export function buildCheckpointRecord({
   };
 }
 
-/** Stop the bench sequence when a scenario hits a runner or judge error. */
+/** True when the scenario timed out / was aborted — record the miss, keep going. */
+export function isScenarioTimeoutError(error) {
+  const msg = String(error ?? "");
+  return /aborted|timed out|\btimeout\b/i.test(msg);
+}
+
+/** True when the Cursor judge returned unusable JSON — keep agent results, keep going. */
+export function isJudgeJsonError(error) {
+  const msg = String(error ?? "");
+  return /judge response was not valid json/i.test(msg);
+}
+
+/** True when the model provider hiccuped (5xx, reset) — record the miss, keep going. */
+export function isTransientProviderError(error) {
+  const msg = String(error ?? "");
+  return (
+    /\/api\/chat returned 5\d\d/i.test(msg) ||
+    /internal server error/i.test(msg) ||
+    /\bECONNRESET\b/i.test(msg) ||
+    /\bECONNREFUSED\b/i.test(msg) ||
+    /\bfetch failed\b/i.test(msg) ||
+    /\bsocket hang up\b/i.test(msg)
+  );
+}
+
+/** Stop the bench sequence on runner errors, not timeouts, judge JSON, or provider 5xx. */
 export function shouldStopBench(row) {
-  return Boolean(row?.error);
+  if (!row?.error) return false;
+  if (isScenarioTimeoutError(row.error)) return false;
+  if (isJudgeJsonError(row.error)) return false;
+  if (isTransientProviderError(row.error)) return false;
+  return true;
 }

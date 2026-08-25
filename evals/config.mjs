@@ -23,6 +23,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @property {string|null} gatePreset
  * @property {boolean} skipJudge
  * @property {boolean} keepWorkspace
+ * @property {string|null} [benchmarkRoot]
  * @property {boolean} verbose
  * @property {boolean} planning
  * @property {boolean} taskHints
@@ -81,6 +82,7 @@ export function defaultConfig() {
     gatePreset: null,
     skipJudge: false,
     keepWorkspace: false,
+    benchmarkRoot: null,
     verbose: false,
     planning: false,
     taskHints: true,
@@ -191,6 +193,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     markdown: null,
     verbose: null,
     keepWorkspace: null,
+    benchmarkRoot: null,
     skipJudge: null,
     judgeOnly: null,
     judgeModel: null,
@@ -242,6 +245,11 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     else if (arg === "--no-report") cli.noReport = true;
     else if (arg === "--verbose") cli.verbose = true;
     else if (arg === "--keep-workspace") cli.keepWorkspace = true;
+    else if (arg === "--benchmark-root") {
+      const raw = argv[++i];
+      if (!raw) throw new Error("--benchmark-root requires a path.");
+      cli.benchmarkRoot = raw;
+    }
     else if (arg === "--skip-judge") cli.skipJudge = true;
     else if (arg === "--judge-only") cli.judgeOnly = argv[++i];
     else if (arg === "--judge-model") cli.judgeModel = argv[++i];
@@ -295,6 +303,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     markdown: cli.noReport ? null : cli.markdown ?? fileConfig.report.markdown,
     verbose: cli.verbose ?? fileConfig.verbose,
     keepWorkspace: cli.keepWorkspace ?? fileConfig.keepWorkspace,
+    benchmarkRoot: cli.benchmarkRoot ?? fileConfig.benchmarkRoot ?? null,
     skipJudge: cli.skipJudge ?? fileConfig.skipJudge,
     judgeOnly: cli.judgeOnly,
     judgeModel: cli.judgeModel ?? fileConfig.judgeModel,

@@ -86,6 +86,7 @@ export function buildAssessmentReport(results, meta = {}) {
       seconds: row.seconds,
       summary: row.verdict?.summary ?? null,
       error: row.error ?? null,
+      judgeError: row.judgeError ?? null,
     })),
     recommendations,
   };

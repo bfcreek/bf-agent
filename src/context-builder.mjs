@@ -24,7 +24,8 @@ export async function buildEnvironmentContext({
   maxEntries = DEFAULT_MAX_ENTRIES,
 } = {}) {
   const root = path.resolve(workspaceRoot ?? process.cwd());
-  const shell = process.platform === "win32" ? "PowerShell" : "/bin/sh";
+  const isWindows = process.platform === "win32";
+  const shell = isWindows ? "PowerShell" : "/bin/sh";
 
   let names = [];
   let listingNote = "";
@@ -45,6 +46,11 @@ export async function buildEnvironmentContext({
     "## Environment",
     `- Workspace root: ${root} — file tool paths are relative to this directory.`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
+    ...(isWindows
+      ? [
+          "- Shell scripts: write PowerShell (.ps1). Do not default to bash or .sh — bash is not the default shell and may not be installed. Chain commands with ';' not '&&'.",
+        ]
+      : []),
     `- Node.js: ${process.version}`,
     `- Local date: ${new Date().toString()}`,
     "",

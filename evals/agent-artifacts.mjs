@@ -73,8 +73,11 @@ export function formatStepsText(agentResult) {
 /**
  * @param {import("../src/agent-loop.mjs").AgentRunResult} agentResult
  */
-export function buildAgentArtifacts(agentResult) {
+export function buildAgentArtifacts(agentResult, extra = {}) {
   return {
+    task: extra.goal ?? extra.task ?? null,
+    followUp: extra.followUp ?? null,
+    rubric: extra.rubric ?? null,
     finalAnswer: agentAnswerText(agentResult),
     stopReason: agentResult.stopReason,
     stepCount: agentResult.steps?.length ?? 0,
@@ -105,9 +108,9 @@ export function buildAgentArtifacts(agentResult) {
  * @param {string} workspaceDir
  * @param {import("../src/agent-loop.mjs").AgentRunResult} agentResult
  */
-export async function persistAgentArtifacts(workspaceDir, agentResult) {
+export async function persistAgentArtifacts(workspaceDir, agentResult, extra = {}) {
   const root = path.resolve(workspaceDir);
-  const artifacts = buildAgentArtifacts(agentResult);
+  const artifacts = buildAgentArtifacts(agentResult, extra);
   const dir = path.join(root, ARTIFACTS_DIR);
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(root, ARTIFACTS_JSON), JSON.stringify(artifacts, null, 2), "utf8");

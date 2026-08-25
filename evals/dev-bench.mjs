@@ -6,18 +6,19 @@
  *   npm run bench
  *   node evals/dev-bench.mjs --tier 3          # auto-loads bench.config.json if present
  *   node evals/dev-bench.mjs --flat              # all scenarios, no tier pauses
- *   node evals/dev-bench.mjs --scenario greet-module --keep-workspace
+ *   node evals/dev-bench.mjs --scenario greet-module
  *   node evals/dev-bench.mjs --language csharp --flat
  *   node evals/dev-bench.mjs --list-scenarios
  *   node evals/dev-bench.mjs --skip-judge
  *   node evals/dev-bench.mjs --resume          # continue after an interrupted run
- *   node evals/dev-bench.mjs --reset           # clear saved progress
+ *   node evals/dev-bench.mjs --reset           # clear saved progress and that sequence's output folders
+ *
+ * Scenario workspaces are kept under ../halo-agent-benchmark/<language>/t<tier>/<scenario>/.
  *
  * Requires: Ollama + a tool model for halo-agent; Cursor CLI (`agent`) for judging.
  */
 
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { createAgent } from "../src/index.mjs";
@@ -32,6 +33,7 @@ import {
   clearAllCheckpoints,
   clearCheckpoint,
   describeRunSelection,
+  isTransientProviderError,
   languageFilterFromCheckpoint,
   listCheckpoints,
   loadCheckpoint,
@@ -46,9 +48,10 @@ import {
 } from "./gates.mjs";
 import { captureIntegritySnapshot, checkScenarioIntegrity } from "./integrity.mjs";
 import { judgeRun } from "./judge.mjs";
+import { mergePhaseResults, scenarioPhases } from "./phases.mjs";
 import { buildAssessmentReport, formatReportConsole, formatReportMarkdown } from "./report.mjs";
 import { SCENARIOS, agentAnswerText, filterAvailableScenarios, selectScenarios } from "./scenarios.mjs";
-import { removeWorkspaceDir } from "./workspace-cleanup.mjs";
+import { defaultBenchmarkRoot, prepareScenarioWorkspace, resetSequenceWorkspaces } from "./workspace-layout.mjs";
 
 const PACKAGE_VERSION = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -91,8 +94,40 @@ function tierAverage(results) {
   return judged.reduce((sum, r) => sum + r.verdict.score, 0) / judged.length;
 }
 
+async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSteps, signal }) {
+  const agent = await createAgent({
+    model,
+    baseUrl: options.baseUrl,
+    workspaceRoot: dir,
+    maxSteps,
+    projectIndex: false,
+    planning: options.planning,
+    taskHints: options.taskHints,
+    onStep: options.verbose
+      ? (step) => {
+          for (const call of step.toolCalls) {
+            console.error(`    [${scenario.name}] ${call.name} -> ${call.ok ? "ok" : call.error}`);
+          }
+        }
+      : undefined,
+  });
+  try {
+    return await agent.run(goal, { signal });
+  } catch (err) {
+    if (signal.aborted || !isTransientProviderError(err?.message ?? err)) {
+      throw err;
+    }
+    return await agent.run(goal, { signal });
+  }
+}
+
 async function runScenario({ scenario, model, options }) {
-  const dir = options.judgeOnly ?? (await mkdtemp(path.join(os.tmpdir(), "halo-bench-")));
+  const benchmarkRoot = options.benchmarkRoot ?? defaultBenchmarkRoot();
+  const dir =
+    options.judgeOnly ?? (await prepareScenarioWorkspace(scenario, { root: benchmarkRoot }));
+  if (!options.judgeOnly) {
+    console.error(`  workspace: ${dir}`);
+  }
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeoutSeconds = scenario.timeoutSeconds ?? options.timeoutSeconds;
@@ -118,23 +153,25 @@ async function runScenario({ scenario, model, options }) {
         ? await captureIntegritySnapshot(dir)
         : null;
 
-      const agent = await createAgent({
-        model,
-        baseUrl: options.baseUrl,
-        workspaceRoot: dir,
-        maxSteps: scenario.maxSteps ?? options.maxSteps,
-        projectIndex: false,
-        planning: options.planning,
-        taskHints: options.taskHints,
-        onStep: options.verbose
-          ? (step) => {
-              for (const call of step.toolCalls) {
-                console.error(`    [${scenario.name}] ${call.name} -> ${call.ok ? "ok" : call.error}`);
-              }
-            }
-          : undefined,
-      });
-      agentResult = await agent.run(scenario.goal, { signal: controller.signal });
+      const phases = scenarioPhases(scenario, { maxSteps: options.maxSteps });
+      const phaseResults = [];
+      for (const [index, phase] of phases.entries()) {
+        if (phases.length > 1) {
+          console.error(`  phase ${index + 1}/${phases.length} (${phase.id})...`);
+        }
+        phaseResults.push(
+          await runAgentOnWorkspace({
+            scenario,
+            model,
+            options,
+            dir,
+            goal: phase.goal,
+            maxSteps: phase.maxSteps,
+            signal: controller.signal,
+          }),
+        );
+      }
+      agentResult = mergePhaseResults(phaseResults, phases);
 
       if (integrityBefore) {
         integrity = await checkScenarioIntegrity(dir, integrityBefore, scenario.integrity);
@@ -149,18 +186,24 @@ async function runScenario({ scenario, model, options }) {
       !options.skipJudge && !scenario.skipJudge && scenario.tier !== 0;
 
     let verdict = null;
+    let judgeError = null;
     if (shouldJudge) {
       console.error(`  judging with cursor agent (${options.judgeModel})...`);
-      verdict = await judgeRun({
-        scenario,
-        agentResult,
-        workspaceDir: dir,
-        options: {
-          model: options.judgeModel,
-          timeoutSeconds: options.judgeTimeoutSeconds,
-          retries: options.judgeRetries,
-        },
-      });
+      try {
+        verdict = await judgeRun({
+          scenario,
+          agentResult,
+          workspaceDir: dir,
+          options: {
+            model: options.judgeModel,
+            timeoutSeconds: options.judgeTimeoutSeconds,
+            retries: options.judgeRetries,
+          },
+        });
+      } catch (err) {
+        judgeError = err?.message ?? String(err);
+        console.error(`  judge failed: ${judgeError}`);
+      }
     }
 
     return {
@@ -168,15 +211,17 @@ async function runScenario({ scenario, model, options }) {
       tier: scenario.tier,
       model,
       workspace: dir,
-      keptWorkspace: options.keepWorkspace || Boolean(options.judgeOnly),
+      keptWorkspace: true,
       precheck,
       integrity,
       agent: {
         stopReason: agentResult.stopReason,
         steps: agentResult.steps.length,
+        phases: agentResult.phases ?? null,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
       },
       verdict,
+      judgeError,
       seconds: (Date.now() - startedAt) / 1000,
     };
   } catch (err) {
@@ -206,28 +251,22 @@ async function runScenario({ scenario, model, options }) {
       tier: scenario.tier,
       model,
       workspace: dir,
-      keptWorkspace: options.keepWorkspace || Boolean(options.judgeOnly),
+      keptWorkspace: true,
       precheck,
       integrity,
       agent: {
         stopReason: agentResult.stopReason ?? "error",
         steps: agentResult.steps?.length ?? 0,
+        phases: agentResult.phases ?? null,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
       },
       verdict: null,
+      judgeError: null,
       seconds: (Date.now() - startedAt) / 1000,
       error: err?.message ?? String(err),
     };
   } finally {
     clearTimeout(timer);
-    if (!options.keepWorkspace && !options.judgeOnly) {
-      const cleanup = await removeWorkspaceDir(dir);
-      if (!cleanup.removed) {
-        console.error(
-          `  warning: could not remove workspace ${dir}: ${cleanup.error?.message ?? cleanup.error}`,
-        );
-      }
-    }
   }
 }
 
@@ -268,6 +307,7 @@ function printProgress(row) {
     );
   }
   if (row.error) console.error(`    error: ${row.error}`);
+  if (row.judgeError) console.error(`    judge: ${row.judgeError}`);
   if (row.integrity?.pass === false) console.error(`    integrity: ${row.integrity.detail}`);
 }
 
@@ -422,7 +462,12 @@ async function main() {
       await clearCheckpoint(checkpointPath);
       console.error(`checkpoint cleared: ${checkpointPath}`);
     }
-    const valueFlags = new Set(["--checkpoint", "--language", "--lang"]);
+    const benchmarkRoot = options.benchmarkRoot ?? defaultBenchmarkRoot();
+    const clearedDirs = await resetSequenceWorkspaces(options.languageFilter, { root: benchmarkRoot });
+    for (const dir of clearedDirs) {
+      console.error(`benchmark output cleared: ${dir}`);
+    }
+    const valueFlags = new Set(["--checkpoint", "--language", "--lang", "--benchmark-root"]);
     const onlyReset =
       argv.length === 0 ||
       argv.every(
@@ -536,6 +581,7 @@ async function main() {
   } else if (checkpoint) {
     await clearCheckpoint(checkpointPath);
     console.error("Starting fresh run (previous checkpoint cleared). Use --resume to continue it.");
+    checkpoint = null;
   }
 
   const resumeStartedAt = checkpoint?.startedAt ?? new Date().toISOString();

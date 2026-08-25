@@ -59,7 +59,7 @@ Options:
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); its tools appear as `mcp_<name>` |
 | `--quiet` | off | Suppress step trace; print only the final answer |
 | `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
-| `--no-plan` | off | Skip the planning pre-pass on complex goals |
+| `--no-plan` | off | Skip the planning pre-pass on the first turn |
 | `--no-hints` | off | Skip task-type constraint hints in the user message |
 
 The model is resolved against Ollama's installed list at startup. With
@@ -156,8 +156,9 @@ as for any shell command.
 
 The system prompt is built per run by the context builder: platform, shell,
 workspace root, and a top-level file listing, so the model starts oriented
-instead of spending steps exploring. On complex goals, a planning pre-pass
-asks the model for a short numbered plan before any tools run; task-type
+instead of spending steps exploring. On the first turn, a planning pre-pass
+asks the model for a short numbered plan before any tools run (skipped only
+for empty prompts and simple read-and-answer goals). Task-type
 heuristics (test-fix, debug, refactor, etc.) append focused constraints to
 the user message. Thinking-capable models get Ollama's native `think` mode
 enabled automatically (`--think` to control). Long transcripts are compacted

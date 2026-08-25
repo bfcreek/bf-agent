@@ -215,7 +215,7 @@ Options:
   --no-index           Skip building the local project vector index
   --think <mode>       Native model reasoning: auto (default), true, false/off,
                        or low|medium|high|max (for thinking models / gpt-oss)
-  --no-plan            Skip the planning pre-pass on complex goals
+  --no-plan            Skip the planning pre-pass on the first turn
   --no-hints           Skip task-type constraint hints in the user message
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer

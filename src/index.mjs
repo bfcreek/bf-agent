@@ -80,9 +80,12 @@ export {
   finalAnswerNudge,
   formatTaskConstraints,
   isComplexGoal,
+  shouldPlanGoal,
   isGptOssModel,
   mutationBlockedUntilPretest,
   prematureFinalNudge,
+  redundantVerifyBlock,
+  verificationCompleteOutcome,
   resolveThinkSetting,
 } from "./prompt-enhancements.mjs";
 
@@ -155,7 +158,7 @@ export {
  * @param {string} [options.embeddingModel] Embedding model for project index.
  * @param {boolean} [options.projectBootstrap] First-turn README/RAG injection (default true).
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
- * @param {boolean} [options.planning] Planning pre-pass on complex first turns (default true).
+ * @param {boolean} [options.planning] Planning pre-pass on first turns (default true).
  * @param {boolean} [options.taskHints] Task-type constraint hints (default true).
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).

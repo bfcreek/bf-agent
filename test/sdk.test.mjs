@@ -67,7 +67,13 @@ test("createAgent runs a goal end to end with builtin tools", async () => {
     { role: "assistant", content: "", tool_calls: [{ function: { name: "echo", arguments: { text: "ping" } } }] },
     { role: "assistant", content: "echoed" },
   ]);
-  const agent = await sdk.createAgent({ client, workspaceRoot: root, projectIndex: false, projectBootstrap: false });
+  const agent = await sdk.createAgent({
+    client,
+    workspaceRoot: root,
+    projectIndex: false,
+    projectBootstrap: false,
+    planning: false,
+  });
 
   const result = await agent.run("echo ping");
   assert.equal(result.text, "echoed");
@@ -76,7 +82,13 @@ test("createAgent runs a goal end to end with builtin tools", async () => {
 
 test("createAgent injects a context-built system prompt", async () => {
   const client = new FakeClient([{ role: "assistant", content: "ok" }]);
-  const agent = await sdk.createAgent({ client, workspaceRoot: root, projectIndex: false, projectBootstrap: false });
+  const agent = await sdk.createAgent({
+    client,
+    workspaceRoot: root,
+    projectIndex: false,
+    projectBootstrap: false,
+    planning: false,
+  });
 
   await agent.run("hi");
   const system = client.calls[0].messages[0];
@@ -95,6 +107,7 @@ test("custom tools register alongside builtins and approval gating applies", asy
     workspaceRoot: root,
     tools: [{ name: "deploy", requiresApproval: true, execute: () => "deployed" }],
     approvalHandler: () => false,
+    planning: false,
   });
 
   const result = await agent.run("deploy it");
@@ -110,6 +123,7 @@ test("builtinTools:false yields a custom-tools-only agent", async () => {
     builtinTools: false,
     tools: [{ name: "only_tool", execute: () => 1 }],
     systemPrompt: "CUSTOM",
+    planning: false,
   });
 
   assert.deepEqual([...agent.registry.tools.keys()], ["only_tool"]);
