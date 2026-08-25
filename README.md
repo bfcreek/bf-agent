@@ -247,6 +247,30 @@ halo-agent. Reports are also written to `bench-latest.json` and
 Requires Ollama for the agent and the Cursor CLI (`agent`) for judging. Not a
 release gate — run while iterating on the runtime.
 
+## Recognized benchmarks (on demand)
+
+Public leaderboard suites, **separate from the development bench**. Harbor
+runs the hidden tests; the Cursor CLI then judges **each task** the same way
+`npm run bench` does (score, grade, process notes, runtime recommendations).
+
+```powershell
+npm run bench:recognized -- --list
+npm run bench:recognized -- --check
+npm run bench:tb -- --include openssl-selfsigned-cert
+node evals/recognized/run.mjs terminal-bench --dataset 2.1
+node evals/recognized/run.mjs terminal-bench --from-job path\to\harbor\job
+```
+
+`--skip-judge` records only Harbor pass/fail. Default is to judge every trial.
+
+Needs Docker, [Harbor](https://harborframework.com/) (`uv tool install harbor`),
+Ollama reachable from containers (`host.docker.internal`), and the Cursor CLI
+unless you skip the judge. Reports (JSON + markdown) go to
+`../halo-agent-benchmark/recognized/<suite>/<run-id>/` plus `latest.json` /
+`latest.md`.
+
+SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
+
 ## Layout
 
 | Path | Purpose |
@@ -269,7 +293,7 @@ release gate — run while iterating on the runtime.
 | `src/tools/fetch-url.mjs` | `fetch_url` with HTML extract + micro-RAG |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
-| `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), scenarios, judge |
+| `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), recognized benches (`evals/recognized/`) |
 
 ## Relationship to Aura Wire
 

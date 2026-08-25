@@ -54,6 +54,8 @@ export function buildAgentSpawn(agentBin, args) {
  * @param {string} [input.options.model]
  * @param {string} [input.options.agentBin]
  * @param {number} [input.options.timeoutSeconds]
+ * @param {string} [input.options.preamble] Extra instructions prepended to the prompt.
+ * @param {object} [input.options.snapshotOptions] Passed to captureWorkspaceSnapshot.
  */
 export async function judgeRun({ scenario, agentResult, workspaceDir, options = {} }) {
   await persistAgentArtifacts(workspaceDir, agentResult, {
@@ -61,16 +63,17 @@ export async function judgeRun({ scenario, agentResult, workspaceDir, options = 
     followUp: scenario.followUp ?? null,
     rubric: scenario.rubric,
   });
-  const snapshot = await captureWorkspaceSnapshot(workspaceDir);
+  const snapshot = await captureWorkspaceSnapshot(workspaceDir, options.snapshotOptions);
   const retries = options.retries ?? 2;
   let lastRaw = "";
   let lastVerdict = null;
+  const promptInput = { scenario, agentResult, snapshot, preamble: options.preamble };
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const prompt =
       attempt === 0
-        ? buildJudgePrompt({ scenario, agentResult, snapshot })
-        : buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRaw: lastRaw });
+        ? buildJudgePrompt(promptInput)
+        : buildJudgeRetryPrompt({ ...promptInput, priorRaw: lastRaw });
     lastRaw = await runCursorAgent({
       prompt,
       workspaceDir,
@@ -167,9 +170,11 @@ function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {Awaited<ReturnType<typeof captureWorkspaceSnapshot>>} input.snapshot
  * @param {string} [input.priorRaw]
+ * @param {string} [input.preamble]
  */
-export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRaw }) {
+export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRaw, preamble }) {
   return [
+    ...(preamble ? [preamble, ""] : []),
     "Your previous grading response was invalid or incomplete.",
     "Reply with ONLY a single JSON object matching the schema below — no markdown fences, no placeholders.",
     "Use the full agent artifacts below to grade outcome and process.",
@@ -189,9 +194,11 @@ export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRa
  * @param {import("./scenarios.mjs").BenchScenario} input.scenario
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {Awaited<ReturnType<typeof captureWorkspaceSnapshot>>} input.snapshot
+ * @param {string} [input.preamble]
  */
-export function buildJudgePrompt({ scenario, agentResult, snapshot }) {
+export function buildJudgePrompt({ scenario, agentResult, snapshot, preamble }) {
   return [
+    ...(preamble ? [preamble, ""] : []),
     "You are grading an AI coding agent (halo-agent) that ran against a task in a temp workspace.",
     "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
     `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering and process criteria.`,

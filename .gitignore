@@ -7,3 +7,6 @@ bench-*.json
 bench-*.md
 bench-test.json
 bench-test.md
+__pycache__/
+*.pyc
+evals/recognized/results/

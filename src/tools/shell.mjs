@@ -15,8 +15,15 @@ import { looksVacuousCliStdout } from "../prompt-enhancements.mjs";
 import { goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
 
-const DEFAULT_TIMEOUT_SECONDS = 30;
-const MAX_TIMEOUT_SECONDS = 300;
+function positiveIntEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return fallback;
+  const n = Number.parseInt(String(raw), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const DEFAULT_TIMEOUT_SECONDS = positiveIntEnv("HALO_COMMAND_TIMEOUT", 30);
+const MAX_TIMEOUT_SECONDS = positiveIntEnv("HALO_MAX_COMMAND_TIMEOUT", 300);
 
 /**
  * Interpreters and shells that open an interactive REPL when launched with

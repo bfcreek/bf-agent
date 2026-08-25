@@ -1,0 +1,211 @@
+/**
+ * Structured JSON + descriptive markdown for recognized-benchmark runs.
+ */
+
+const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+/**
+ * @param {object} input
+ */
+export function buildRecognizedReport(input) {
+  const tasks = input.tasks ?? [];
+  const overall = input.overall ?? {};
+  return {
+    version: 1,
+    kind: "recognized",
+    suite: input.suite,
+    suiteTitle: input.suiteTitle,
+    dataset: input.dataset,
+    datasetLabel: input.datasetLabel ?? input.dataset,
+    agent: input.agent ?? "halo-agent",
+    agentVersion: input.agentVersion ?? "0.1.0",
+    model: input.model,
+    judgeModel: input.judgeModel ?? null,
+    harness: input.harness ?? "harbor",
+    ranAt: input.ranAt ?? new Date().toISOString(),
+    environment: input.environment ?? {},
+    notes: input.notes ?? [],
+    harborJobDir: input.harborJobDir ?? null,
+    overall: {
+      tasks: overall.tasks ?? tasks.length,
+      resolved: overall.resolved ?? 0,
+      errors: overall.errors ?? 0,
+      resolveRate: overall.resolveRate ?? 0,
+      judged: overall.judged ?? 0,
+      judgeAvg: overall.judgeAvg ?? null,
+      totalSeconds: overall.totalSeconds ?? 0,
+    },
+    tasks: tasks.map((task) => ({
+      name: task.name,
+      trialName: task.trialName,
+      resolved: task.resolved,
+      reward: task.reward,
+      exception: task.exception,
+      seconds: task.seconds,
+      trialDir: task.trialDir,
+      score: task.verdict?.score ?? null,
+      grade: task.verdict?.grade ?? null,
+      summary: task.verdict?.summary ?? null,
+      strengths: task.verdict?.strengths ?? [],
+      weaknesses: task.verdict?.weaknesses ?? [],
+      agentImprovements: task.verdict?.agentImprovements ?? [],
+      judgeError: task.judgeError ?? null,
+    })),
+    recommendations: collectRecommendations(tasks),
+  };
+}
+
+/**
+ * @param {ReturnType<typeof buildRecognizedReport>} report
+ */
+export function formatRecognizedMarkdown(report) {
+  const o = report.overall;
+  const lines = [
+    `# ${report.suiteTitle ?? report.suite}`,
+    "",
+    `**Ran:** ${report.ranAt}`,
+    `**Agent:** ${report.agent} ${report.agentVersion}  |  **Model:** ${report.model}`,
+    `**Dataset:** ${report.datasetLabel ?? report.dataset} (\`${report.dataset}\`)`,
+    `**Harness:** ${report.harness}`,
+  ];
+  if (report.judgeModel) lines.push(`**Judge:** Cursor CLI (\`${report.judgeModel}\`)`);
+  lines.push("");
+  lines.push(
+    `**Harbor resolve rate:** ${o.resolved}/${o.tasks} (${pct(o.resolveRate)}) — hidden tests, mechanical`,
+  );
+  if (o.judgeAvg != null) {
+    lines.push(
+      `**Cursor judge average:** ${o.judgeAvg.toFixed(1)}/100 — ${o.judged}/${o.tasks} tasks graded`,
+    );
+  } else {
+    lines.push("**Cursor judge:** not run");
+  }
+  lines.push(`**Errors:** ${o.errors}  |  **Duration:** ${formatDuration(o.totalSeconds)}`);
+  if (report.harborJobDir) lines.push(`**Harbor job:** \`${report.harborJobDir}\``);
+  lines.push("");
+
+  if (report.environment && Object.keys(report.environment).length) {
+    lines.push("## Environment", "");
+    for (const [key, value] of Object.entries(report.environment)) {
+      lines.push(`- **${key}:** ${value}`);
+    }
+    lines.push("");
+  }
+
+  if (report.notes?.length) {
+    lines.push("## Notes", "");
+    for (const note of report.notes) lines.push(`- ${note}`);
+    lines.push("");
+  }
+
+  lines.push(
+    "## Tasks",
+    "",
+    "| Task | Harbor | Judge | Grade | Seconds | Summary |",
+    "| --- | --- | --- | --- | --- | --- |",
+  );
+  for (const task of report.tasks) {
+    const harbor = task.resolved ? "pass" : task.exception ? "error" : "fail";
+    const score = task.score != null ? String(task.score) : "—";
+    const grade = task.grade ?? "—";
+    const seconds = task.seconds != null ? formatDuration(task.seconds) : "—";
+    const summary = (task.judgeError || task.summary || task.exception || "")
+      .replaceAll("|", "\\|")
+      .replaceAll("\n", " ");
+    lines.push(
+      `| ${task.name} | ${harbor} | ${score} | ${grade} | ${seconds} | ${summary.slice(0, 160)} |`,
+    );
+  }
+  lines.push("");
+
+  if (report.recommendations.length > 0) {
+    lines.push("## Recommendations for halo-agent", "");
+    for (const rec of report.recommendations) {
+      const seen = rec.count > 1 ? ` (${rec.count}x: ${rec.tasks.join(", ")})` : "";
+      lines.push(`- **[${rec.priority}] ${rec.area}:** ${rec.suggestion}${seen}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * @param {ReturnType<typeof buildRecognizedReport>} report
+ */
+export function formatRecognizedConsole(report) {
+  const o = report.overall;
+  const bar = "═".repeat(56);
+  const lines = [
+    bar,
+    `  ${report.suiteTitle ?? report.suite} — recognized bench`,
+    bar,
+    `  Ran: ${report.ranAt}`,
+    `  ${report.agent} ${report.agentVersion}  |  model ${report.model}  |  ${report.datasetLabel ?? report.dataset}`,
+    "",
+    `  Harbor: ${o.resolved}/${o.tasks} resolved (${pct(o.resolveRate)})  |  errors ${o.errors}  |  ${formatDuration(o.totalSeconds)}`,
+  ];
+  if (o.judgeAvg != null) {
+    lines.push(`  Judge:  ${o.judgeAvg.toFixed(1)}/100 average  (${o.judged}/${o.tasks} graded)`);
+  }
+  lines.push("");
+  for (const task of report.tasks) {
+    const harbor = task.resolved ? "PASS" : task.exception ? "ERR " : "fail";
+    const score = task.score != null ? String(task.score).padStart(3) : " --";
+    const grade = (task.grade ?? "").padEnd(3);
+    lines.push(`  ${harbor}  ${score} ${grade}  ${task.name}`);
+    if (task.summary) lines.push(`         ${task.summary.slice(0, 100)}`);
+    if (task.judgeError) lines.push(`         judge: ${task.judgeError}`);
+  }
+  if (report.recommendations.length > 0) {
+    lines.push("", "  Recommendations");
+    for (const rec of report.recommendations.slice(0, 8)) {
+      lines.push(`  [${rec.priority}] ${rec.area}: ${rec.suggestion}`);
+    }
+  }
+  lines.push(bar);
+  return lines.join("\n");
+}
+
+function collectRecommendations(tasks) {
+  /** @type {Map<string, {area: string, suggestion: string, priority: string, count: number, tasks: string[]}>} */
+  const map = new Map();
+  for (const task of tasks) {
+    for (const item of task.verdict?.agentImprovements ?? []) {
+      const key = `${item.area}::${item.suggestion}`;
+      const existing = map.get(key);
+      if (existing) {
+        existing.count += 1;
+        if (!existing.tasks.includes(task.name)) existing.tasks.push(task.name);
+      } else {
+        map.set(key, {
+          area: item.area,
+          suggestion: item.suggestion,
+          priority: item.priority,
+          count: 1,
+          tasks: [task.name],
+        });
+      }
+    }
+  }
+  return [...map.values()].sort((a, b) => {
+    const pa = PRIORITY_ORDER[a.priority] ?? 9;
+    const pb = PRIORITY_ORDER[b.priority] ?? 9;
+    if (pa !== pb) return pa - pb;
+    return b.count - a.count;
+  });
+}
+
+function pct(rate) {
+  return `${(rate * 100).toFixed(1)}%`;
+}
+
+function formatDuration(seconds) {
+  if (seconds == null || !Number.isFinite(seconds)) return "—";
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
