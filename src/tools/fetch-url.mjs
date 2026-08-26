@@ -394,7 +394,8 @@ export function registerFetchUrlTool(registry, { fetchImpl, client, embeddingMod
       "run micro-RAG: the page is chunked and the most relevant passages for " +
       "that query are returned (embeddings when available, else keyword overlap). " +
       "Use after web_search on promising result URLs. Without query, returns a " +
-      "truncated page extract. Local/private addresses are refused.",
+      "truncated page extract. Local/private addresses are refused. " +
+      "Do not use this to download source archives or binaries — use run_command with curl/wget instead.",
     parameters: {
       type: "object",
       properties: {

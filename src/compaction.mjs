@@ -12,19 +12,30 @@ export const DEFAULT_KEEP_RECENT = 6;
 /** Compact when the transcript is estimated past this share of the context window. */
 export const DEFAULT_CONTEXT_FRACTION = 0.75;
 
+/** Cap on assistant thinking/prose before git setup on merge/repo tasks. */
+export const MAX_SPECULATIVE_REASONING_CHARS = 1200;
+
+const GIT_SETUP_CMD = /\bgit\s+(init|clone|fetch|checkout|switch|merge|pull|rebase)\b/i;
+const GIT_SETUP_GOAL =
+  /\b(git\s+(init|clone|merge|fetch|checkout)|merge conflict|two branches|unmerged)\b/i;
+
 const SUMMARIZER_PROMPT = [
   "You compress agent conversation history. Summarize the transcript into a",
-  "compact brief the model can use to continue the task: the user's goal,",
-  "key facts and file paths discovered, actions taken and their outcomes,",
-  "and any unresolved steps. Prioritize task-checklist results — files",
-  "created or edited, a short sketch of current file contents, which test",
-  "assertions passed or failed, and verification commands with their exit",
-  "codes (never drop a passing verify). Do not treat a passing build or",
-  "existing command as completion when the user asked for new commands that",
-  "are not yet implemented. Reduce incidental failed tool experiments to at",
-  "most a one-line note. If a compile error was diagnosed with a known",
-  "fix that was not applied, state that fix prominently so the next turn can",
-  "apply it instead of exploring. Reply with only the summary.",
+  "compact brief the model can use to continue the task. Keep the user's",
+  "original instruction unchanged — never invent a new goal. Record actions",
+  "already taken as hard facts the model must not deny: files written or",
+  "edited, commands that exited 0, and their paths. Prioritize task-checklist",
+  "results — files created or edited, a short sketch of current file contents,",
+  "which test assertions passed or failed, and verification commands with their",
+  "exit codes (never drop a passing verify). Prefer act-on-instruction order:",
+  "repo/branches/merge first, then implement/verify. Drop speculative reasoning",
+  "about examples or puzzles until git setup is done. Do not treat a passing build,",
+  "an existing results.json, or an existing command as completion when values",
+  "still need domain checks or the user asked for new work that is not yet",
+  "implemented. Reduce incidental failed tool experiments to at most a",
+  "one-line note. If a compile error was diagnosed with a known fix that was",
+  "not applied, state that fix prominently so the next turn can apply it",
+  "instead of exploring. Reply with only the summary.",
 ].join(" ");
 
 /** Rough size proxy — characters, since we have no tokenizer. */
@@ -73,6 +84,7 @@ export async function compactMessages({
   observedTokens = 0,
   keepRecent = DEFAULT_KEEP_RECENT,
 }) {
+  messages = capSpeculativeReasoning(messages);
   const overBudget = maxTokens
     ? estimateTokens(messages, observedTokens) > maxTokens
     : transcriptSize(messages) > maxChars;
@@ -100,6 +112,10 @@ export async function compactMessages({
   }
   if (!summary) return messages;
 
+  const original = extractOriginalInstruction(messages);
+  const goalBlock = original
+    ? `Original user instruction (verbatim — do not invent a new goal):\n${original}\n\n`
+    : "";
   const recap = formatVerificationRecap(middle);
   const recapBlock = recap ? `${recap}\n\n` : "";
 
@@ -107,10 +123,89 @@ export async function compactMessages({
     messages[0],
     {
       role: "user",
-      content: `[Earlier conversation was compacted to save space. Summary:]\n${recapBlock}${summary}`,
+      content: `[Earlier conversation was compacted to save space. Summary:]\n${goalBlock}${recapBlock}${summary}`,
     },
     ...messages.slice(start),
   ];
+}
+
+/**
+ * First real user goal in the transcript, skipping compaction recaps and nudges.
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+export function extractOriginalInstruction(messages) {
+  for (const m of messages ?? []) {
+    if (m.role !== "user") continue;
+    const text = String(m.content ?? "").trim();
+    if (!text) continue;
+    if (/^\[Earlier conversation was compacted/i.test(text)) continue;
+    if (/^Before using any tools, write a short numbered plan/i.test(text)) continue;
+    if (
+      /^(You replied without calling|Your answer was empty|Do not finish yet|Verification already|That edit_file|This task requires|You have made this exact|You are on your last)/i.test(
+        text,
+      )
+    ) {
+      continue;
+    }
+    const stripped = text.replace(/^## Task focus\n(?:- .+\n)+\n?/i, "").trim();
+    return stripped.slice(0, 8000);
+  }
+  return "";
+}
+
+/**
+ * True when a git repo/branch/merge command has already been issued.
+ * @param {Array<object>} messages
+ */
+export function gitSetupStarted(messages) {
+  for (const m of messages ?? []) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const c of m.tool_calls) {
+        const args = parseToolCallArgs(c);
+        const cmd = String(args.command ?? args.cmd ?? "");
+        if (GIT_SETUP_CMD.test(cmd)) return true;
+      }
+    }
+    if (m.role === "tool" && GIT_SETUP_CMD.test(String(m.content ?? ""))) return true;
+  }
+  return false;
+}
+
+export function isGitSetupGoal(text) {
+  return GIT_SETUP_GOAL.test(String(text ?? ""));
+}
+
+/**
+ * Truncate long speculative assistant thinking/prose until git setup exists.
+ * No-op (same array reference) when the goal is not git/merge or setup already started.
+ *
+ * @param {Array<object>} messages
+ * @param {{maxChars?: number}} [options]
+ * @returns {Array<object>}
+ */
+export function capSpeculativeReasoning(messages, { maxChars = MAX_SPECULATIVE_REASONING_CHARS } = {}) {
+  const original = extractOriginalInstruction(messages);
+  if (!isGitSetupGoal(original)) return messages;
+  if (gitSetupStarted(messages)) return messages;
+
+  const note =
+    "\n[speculative reasoning truncated — complete git/repo/branch/merge setup first, then implement/verify]";
+  let changed = false;
+  const out = (messages ?? []).map((m) => {
+    if (m.role !== "assistant") return m;
+    const next = { ...m };
+    if (typeof next.thinking === "string" && next.thinking.length > maxChars) {
+      next.thinking = next.thinking.slice(0, maxChars) + note;
+      changed = true;
+    }
+    if (!next.tool_calls && typeof next.content === "string" && next.content.length > maxChars) {
+      next.content = next.content.slice(0, maxChars) + note;
+      changed = true;
+    }
+    return next;
+  });
+  return changed ? out : messages;
 }
 
 function parseToolCallArgs(call) {
@@ -171,6 +266,7 @@ function jsonField(content, key) {
  */
 export function formatVerificationRecap(messages) {
   const commandLines = [];
+  const commandOutputs = [];
   const assertionLines = [];
   const files = new Map();
   let pending = [];
@@ -202,8 +298,18 @@ export function formatVerificationRecap(messages) {
     const { code, status, stdout, stderr } = parseCommandFields(content);
     if (code == null && !status) continue;
     const ok = Number(code) === 0 || /^success$/i.test(String(status ?? ""));
-    commandLines.push(`- ${name}: ${ok ? "success" : "FAILED"} (exit ${code ?? "?"})`);
-    if (!ok) {
+    const blocked = /^blocked$/i.test(String(status ?? ""));
+    commandLines.push(
+      `- ${name}: ${blocked ? "blocked" : ok ? "success" : "FAILED"} (exit ${code ?? "?"})`,
+    );
+    commandOutputs.push({
+      name,
+      status: blocked ? "blocked" : ok ? "success" : "FAILED",
+      code,
+      stdout,
+      stderr,
+    });
+    if (!ok && !blocked) {
       const combined = `${stdout ?? ""}\n${stderr ?? ""}`;
       const snippet = String(combined).trim().replace(/\s+/g, " ").slice(0, 240);
       if (snippet) commandLines.push(`  last output: ${snippet}`);
@@ -232,6 +338,18 @@ export function formatVerificationRecap(messages) {
       ...commandLines,
     );
   }
+  const recentOutputs = commandOutputs.slice(-3);
+  if (recentOutputs.length) {
+    const MAX_OUT = 2000;
+    parts.push("Last command outputs (verbatim; blocked means the command was not executed):");
+    for (const out of recentOutputs) {
+      parts.push(`- ${out.name} [${out.status} exit ${out.code ?? "n/a"}]`);
+      const stdout = String(out.stdout ?? "").slice(0, MAX_OUT);
+      const stderr = String(out.stderr ?? "").slice(0, MAX_OUT);
+      parts.push(`  stdout:\n${stdout.length ? stdout : "(empty)"}`);
+      if (stderr) parts.push(`  stderr:\n${stderr}`);
+    }
+  }
   if (uniqueAssertions.length) {
     parts.push(
       "Known assertion outcomes (do not retry stale patterns that already changed):",
@@ -239,8 +357,36 @@ export function formatVerificationRecap(messages) {
     );
   }
   if (fileLines.length) {
-    parts.push("Last known file state (re-read before editing if unsure):", ...fileLines);
+    parts.push(
+      "Last known file state (re-read before editing if unsure). An existing output file is not verification-complete until values pass domain/plausibility checks:",
+      ...fileLines,
+    );
   }
+
+  let emptySearchStreak = 0;
+  let maxEmptySearchStreak = 0;
+  for (const m of messages ?? []) {
+    if (m.role !== "tool") continue;
+    const name = String(m.tool_name ?? "");
+    const content = String(m.content ?? "");
+    const empty =
+      (name === "web_search" || name === "grep_search" || name === "find_files") &&
+      (/^0 web result|\bno matches\b|\bno files matching\b|\bempty results\b/i.test(content) ||
+        /No web results/i.test(content));
+    if (empty) {
+      emptySearchStreak += 1;
+      maxEmptySearchStreak = Math.max(maxEmptySearchStreak, emptySearchStreak);
+    } else if (name === "web_search" || name === "grep_search" || name === "find_files") {
+      emptySearchStreak = 0;
+    }
+  }
+  if (maxEmptySearchStreak >= 3) {
+    parts.push(
+      "Reminder: many consecutive searches returned empty. There is likely no hidden verifier in /app — " +
+        "use the local cost_model / metrics / installed packages instead of hunting for more search hits.",
+    );
+  }
+
   return parts.join("\n");
 }
 

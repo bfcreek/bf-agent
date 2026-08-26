@@ -9,12 +9,16 @@ import {
   detectTaskHints,
   emptyFinalAnswerNudge,
   extractCompilerDiagnostics,
+  extractNamedDeliverables,
   extractNamedNodeCommands,
   extractSmokeSubcommands,
   finalAnswerNudge,
+  formatExplicitGoals,
   formatTaskConstraints,
   hasSuccessfulTestRun,
+  isDiagnosticCommand,
   isFollowUpGoal,
+  isHarborStyleGoal,
   isSuccessfulTestCall,
   looksVacuousCliStdout,
   missingRequiredVerification,
@@ -27,14 +31,21 @@ import {
   mutatedBeforeTestRun,
   prematureFinalNudge,
   resolveThinkSetting,
+  repeatedEditMissNudge,
+  synthesizeFinalAnswer,
   TOOL_NUDGE_ALREADY_VERIFIED,
   TOOL_NUDGE_AMBIGUOUS_EDIT,
+  TOOL_NUDGE_EDIT_MISS_REWRITE,
+  TOOL_NUDGE_DELIVERABLE,
   TOOL_NUDGE_EMPTY_AFTER_TOOLS,
   TOOL_NUDGE_EMPTY_ANSWER,
   TOOL_NUDGE_EMPTY_VALUE,
   TOOL_NUDGE_FIX_IMPL,
   TOOL_NUDGE_FOLLOW_UP,
+  TOOL_NUDGE_MERGE_CONFLICT,
   TOOL_NUDGE_READ_IMPL,
+  TOOL_NUDGE_SECRET_HIT,
+  secretHitWithoutEditNudge,
 } from "../src/prompt-enhancements.mjs";
 
 test("detectTaskHints matches test-fix and debug goals", () => {
@@ -51,6 +62,22 @@ test("formatTaskConstraints renders a focus block", () => {
   const text = formatTaskConstraints([{ id: "debug", constraint: "Reproduce first." }]);
   assert.match(text, /## Task focus/);
   assert.match(text, /Reproduce first/);
+});
+
+test("formatExplicitGoals surfaces deliverables, verification, and fallbacks", () => {
+  const artifact = formatExplicitGoals(
+    "Write the output fasta file titled primers.fasta from sequences.fasta.",
+  );
+  assert.match(artifact, /## Goals \(explicit outcomes\)/);
+  assert.match(artifact, /primers\.fasta/);
+
+  const verify = formatExplicitGoals("Create greet.mjs and run node test.mjs until it passes.");
+  assert.match(verify, /node test\.mjs/);
+
+  const fallback = formatExplicitGoals("create the shell for an electron app");
+  assert.match(fallback, /^## Goals\n- Before acting, state 2–5 explicit outcomes/);
+
+  assert.equal(formatExplicitGoals(""), "");
 });
 
 test("shouldPlanGoal runs for short create goals, not only long ones", () => {
@@ -546,14 +573,14 @@ test("redundantVerifyBlock refuses extra tests and diagnostics after a pass", ()
     }),
     TOOL_NUDGE_ALREADY_VERIFIED,
   );
-  assert.equal(
-    redundantVerifyBlock({
-      steps,
-      toolName: "run_command",
-      args: { command: "node -v" },
-    }),
-    TOOL_NUDGE_ALREADY_VERIFIED,
-  );
+  const diagnosticBlock = redundantVerifyBlock({
+    steps,
+    toolName: "run_command",
+    args: { command: "node -v" },
+  });
+  assert.match(diagnosticBlock ?? "", /status: blocked|diagnostic/i);
+  assert.doesNotMatch(diagnosticBlock ?? "", /verificationComplete:\s*true/);
+  assert.match(diagnosticBlock ?? "", /node -v/);
   assert.equal(
     redundantVerifyBlock({
       steps: [
@@ -799,9 +826,50 @@ test("ambiguousEditRecoveryNudge fires after an ambiguous edit_file error", () =
     }),
     null,
   );
+  assert.match(PLANNING_USER_MESSAGE, /Goals section first|explicit outcomes/i);
   assert.match(PLANNING_USER_MESSAGE, /unique per-function edit|ping-pong/i);
   assert.match(PLANNING_USER_MESSAGE, /non-empty final answer/);
   assert.match(PLANNING_USER_MESSAGE, /CS0136|canonical fix/);
+  assert.match(PLANNING_USER_MESSAGE, /build-from-source|apt-get --version/);
+  assert.match(PLANNING_USER_MESSAGE, /Harbor \/ Terminal-Bench|named binaries/);
+  assert.match(PLANNING_USER_MESSAGE, /filter\.py not app\/filter\.py|workspace-relative/i);
+  assert.match(PLANNING_USER_MESSAGE, /git merge\/conflict|do not stop after only inspecting/i);
+});
+
+test("detectTaskHints matches sanitization, proto, and numeric-artifact goals", () => {
+  const xss = detectTaskHints("Write /app/filter.py to strip javascript and XSS from HTML");
+  assert.ok(xss.some((h) => h.id === "html-sanitize"));
+  const proto = detectTaskHints("Implement a gRPC service with a Set(key, a value (int)) RPC");
+  assert.ok(proto.some((h) => h.id === "rpc-proto"));
+  const fit = detectTaskHints("Fit Raman peaks and write results.json with G and 2D gamma");
+  assert.ok(fit.some((h) => h.id === "numeric-artifact"));
+  const pkg = detectTaskHints("Must use the MTEB package revision named in the README");
+  assert.ok(pkg.some((h) => h.id === "pinned-package"));
+  const re = detectTaskHints("Reverse engineer the mystery ELF with objdump and recreate path tracing");
+  assert.ok(re.some((h) => h.id === "reverse-engineer"));
+  const sql = detectTaskHints("Recover rows from a truncated sqlite database into recover.json");
+  assert.ok(sql.some((h) => h.id === "sqlite-carve"));
+});
+
+test("repeatedEditMissNudge fires after two old_string misses on the same file", () => {
+  const miss = {
+    name: "edit_file",
+    ok: false,
+    args: { path: "gc.c" },
+    error: "old_string was not found in the file",
+  };
+  assert.equal(
+    repeatedEditMissNudge({
+      steps: [{ toolCalls: [miss] }, { toolCalls: [miss] }],
+    }),
+    TOOL_NUDGE_EDIT_MISS_REWRITE,
+  );
+  assert.equal(
+    repeatedEditMissNudge({
+      steps: [{ toolCalls: [{ ...miss, ok: true }] }],
+    }),
+    null,
+  );
 });
 
 test("extractSmokeSubcommands reads slash lists and catalog command lists", () => {
@@ -915,6 +983,323 @@ test("redundantVerifyBlock allows a different smoke command after the first succ
       args: { command: "dotnet build" },
     })?.includes("already exited 0"),
     true,
+  );
+});
+
+test("environment probes do not latch verification or block later build steps", () => {
+  const goal =
+    "Under /tmp/CompCert/, build the CompCert C verified compiler from source. Ensure that CompCert can be invoked through /tmp/CompCert/ccomp.";
+  assert.equal(isHarborStyleGoal(goal), true);
+  assert.ok(extractNamedNodeCommands(goal).some((c) => /\/tmp\/CompCert\/ccomp/.test(c)));
+  assert.equal(isDiagnosticCommand("apt-get --version", goal), true);
+  assert.equal(isDiagnosticCommand("apt-cache policy", goal), true);
+  assert.equal(isDiagnosticCommand("apt-get install -y ocaml", goal), false);
+
+  const afterProbe = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "apt-get --version" },
+          result: { status: "success", exitCode: 0, stdout: "apt 2.4\n" },
+        },
+      ],
+    },
+  ];
+  assert.equal(
+    redundantVerifyBlock({
+      goal,
+      steps: afterProbe,
+      toolName: "run_command",
+      args: { command: "apt-get install -y ocaml coq" },
+    }),
+    null,
+  );
+  assert.equal(
+    alreadyVerifiedFinishNudge({ goal, steps: afterProbe, nudgeCount: 0 }),
+    null,
+  );
+  assert.ok(
+    missingRequiredVerification(goal, afterProbe.flatMap((s) => s.toolCalls)).some((item) =>
+      /ccomp/.test(item),
+    ),
+  );
+});
+
+test("generic diff/awk/head exit 0 is not task verification", () => {
+  const goal =
+    "The output fasta file should be titled primers.fasta. Design primers from sequences.fasta.";
+  assert.ok(extractNamedDeliverables(goal).includes("primers.fasta"));
+  assert.ok(detectTaskHints(goal).some((h) => h.id === "artifact-create"));
+
+  const afterDiff = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "diff -u sequences.fasta sequences.fasta" },
+          result: { status: "success", exitCode: 0, stdout: "" },
+        },
+      ],
+    },
+  ];
+  assert.equal(isDiagnosticCommand("diff -u sequences.fasta sequences.fasta", goal), true);
+  assert.equal(
+    redundantVerifyBlock({
+      goal,
+      steps: afterDiff,
+      toolName: "run_command",
+      args: { command: "head -n 20 sequences.fasta" },
+    }),
+    null,
+  );
+  assert.equal(
+    alreadyVerifiedFinishNudge({ goal, steps: afterDiff, nudgeCount: 0 }),
+    null,
+  );
+  assert.equal(
+    completionVerifyNudge({
+      goal,
+      answerText: "Done.",
+      steps: afterDiff,
+      nudgeCount: 0,
+    }),
+    TOOL_NUDGE_DELIVERABLE,
+  );
+});
+
+test("alreadyVerifiedFinishNudge is a single notice and yields to missing deliverables", () => {
+  const goal = "Create greet.mjs and a test.mjs. Run node test.mjs until it passes.";
+  const steps = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "node test.mjs" },
+          result: { status: "success", exitCode: 0, stdout: "ok\n" },
+        },
+      ],
+    },
+  ];
+  assert.equal(alreadyVerifiedFinishNudge({ goal, steps, nudgeCount: 0 }), TOOL_NUDGE_ALREADY_VERIFIED);
+  assert.equal(alreadyVerifiedFinishNudge({ goal, steps, nudgeCount: 1 }), null);
+});
+
+test("synthesizeFinalAnswer never returns empty text", () => {
+  const text = synthesizeFinalAnswer({
+    goal: "The output fasta file should be titled primers.fasta.",
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "diff -u sequences.fasta sequences.fasta" },
+            result: { status: "success", exitCode: 0, stdout: "" },
+          },
+        ],
+      },
+    ],
+  });
+  assert.match(text, /empty final answer/i);
+  assert.match(text, /primers\.fasta/);
+  assert.match(text, /No files were created/i);
+});
+
+test("detectTaskHints matches git merge conflict goals", () => {
+  const hints = detectTaskHints(
+    "Merge the two branches. After the merge conflict in algo.py, implement map() and verify with examples.json.",
+  );
+  assert.ok(hints.some((h) => h.id === "merge-conflict"));
+  assert.match(hints.find((h) => h.id === "merge-conflict").constraint, /git show/);
+});
+
+test("unresolved merge conflict blocks a final answer even when it is empty", () => {
+  const goal =
+    "Merge the two branches. After the merge conflict, implement map() and verify with examples.json.";
+  const inspectOnly = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "git merge feature" },
+          result: {
+            status: "FAILED with exit code 1",
+            exitCode: 1,
+            stdout: "CONFLICT (content): Merge conflict in algo.py\n",
+          },
+        },
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "git show :2:algo.py" },
+          result: { status: "success", exitCode: 0, stdout: "def map():\n    return 1\n" },
+        },
+        {
+          name: "read_file",
+          ok: true,
+          args: { path: "algo.py" },
+          result: "<<<<<<< HEAD\ndef map():\n=======\ndef map():\n>>>>>>> feature\n",
+        },
+      ],
+    },
+  ];
+  assert.ok(
+    missingRequiredVerification(goal, inspectOnly.flatMap((s) => s.toolCalls)).some((item) =>
+      /merge conflict/i.test(item),
+    ),
+  );
+  assert.equal(
+    finalAnswerNudge({
+      goal,
+      answerText: "",
+      steps: inspectOnly,
+      nudgeCount: 0,
+    }),
+    TOOL_NUDGE_MERGE_CONFLICT,
+  );
+  assert.match(
+    finalAnswerNudge({
+      goal,
+      answerText: "Inspected both sides.",
+      steps: inspectOnly,
+      nudgeCount: 0,
+    }) ?? "",
+    /merge CONFLICT|edit_file/i,
+  );
+});
+
+test("merge conflict loop requires commit and examples.json after the edit", () => {
+  const goal =
+    "Merge the two branches. After the merge conflict, implement map() and verify with examples.json.";
+  const resolved = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "git merge feature" },
+          result: {
+            status: "FAILED",
+            exitCode: 1,
+            stdout: "CONFLICT (content): Merge conflict in algo.py\n",
+          },
+        },
+        {
+          name: "write_file",
+          ok: true,
+          args: { path: "algo.py", content: "def map(grid):\n    return grid\n" },
+          result: { path: "algo.py", bytesWritten: 30 },
+        },
+      ],
+    },
+  ];
+  const missing = missingRequiredVerification(goal, resolved.flatMap((s) => s.toolCalls));
+  assert.ok(missing.some((item) => /git add and git commit/i.test(item)));
+  assert.ok(missing.some((item) => /examples\.json/i.test(item)));
+  assert.match(
+    completionVerifyNudge({
+      goal,
+      answerText: "Done.",
+      steps: resolved,
+      nudgeCount: 0,
+    }) ?? "",
+    /git add and git commit|examples\.json/,
+  );
+});
+
+test("detectTaskHints covers secret-sanitize, crypto, and optimize goals", () => {
+  const secret = detectTaskHints("Sanitize the repo: remove leaked AKIA and ghp_ secrets");
+  assert.ok(secret.some((h) => h.id === "secret-sanitize"));
+  const crypto = detectTaskHints("FEAL linear cryptanalysis of feal.c using pairs.txt");
+  assert.ok(crypto.some((h) => h.id === "reverse-engineer"));
+  assert.match(crypto.find((h) => h.id === "reverse-engineer").constraint, /feal\.c|pairs\.txt/i);
+  const opt = detectTaskHints("Optimize the inference batching scheduler to meet the cost threshold");
+  assert.ok(opt.some((h) => h.id === "optimize-threshold"));
+});
+
+test("redundantVerifyBlock allows re-run after a later shell command clobbers outputs", () => {
+  const steps = [
+    {
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "python shape_packer.py" },
+          result: { status: "success", exitCode: 0, stdout: "ok" },
+        },
+      ],
+    },
+    {
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "python baseline_packer.py" },
+          result: { status: "success", exitCode: 0, stdout: "baseline" },
+        },
+      ],
+    },
+  ];
+  assert.equal(
+    redundantVerifyBlock({
+      goal: "beat the baseline packer threshold",
+      steps,
+      toolName: "run_command",
+      args: { command: "python shape_packer.py" },
+    }),
+    null,
+  );
+});
+
+test("secretHitWithoutEditNudge fires when grep finds secrets and no edit ran", () => {
+  const nudge = secretHitWithoutEditNudge({
+    goal: "Sanitize leaked secrets from the git repo",
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "grep_search",
+            ok: true,
+            args: { pattern: "AKIA" },
+            result: "1 match(es) in 1 file(s):\n.env:1: AWS_KEY=AKIAIOSFODNN7EXAMPLE",
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(nudge, TOOL_NUDGE_SECRET_HIT);
+});
+
+test("completionVerifyNudge blocks sanitize success claims without mutations", () => {
+  assert.match(
+    completionVerifyNudge({
+      goal: "Sanitize the repo and remove secrets",
+      answerText: "Done — all secrets removed successfully.",
+      steps: [
+        {
+          toolCalls: [
+            {
+              name: "grep_search",
+              ok: true,
+              args: { pattern: "AKIA" },
+              result: "1 match(es):\n.env:1: KEY=AKIAIOSFODNN7EXAMPLE",
+            },
+          ],
+        },
+      ],
+      nudgeCount: 0,
+    }) ?? "",
+    /no successful write_file|Do not claim file changes/i,
   );
 });
 

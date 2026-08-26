@@ -22,7 +22,8 @@ after(async () => {
 
 test("environment context names the workspace root, platform, and shell", async () => {
   const context = await buildEnvironmentContext({ workspaceRoot: root });
-  assert.ok(context.includes(path.resolve(root)), "workspace root path present");
+  assert.match(context, /file tool paths are relative/);
+  assert.match(context, /Do not prefix paths with the workspace folder name/);
   assert.ok(context.includes(process.platform), "platform present");
   assert.match(context, /run_command uses (PowerShell|\/bin\/sh)/);
   assert.ok(context.includes(process.version), "node version present");
@@ -51,6 +52,18 @@ test("an unreadable workspace degrades to a note instead of throwing", async () 
   assert.match(context, /could not list workspace/);
 });
 
+test("environment context notes git merge discipline when .git is present", async () => {
+  const gitRoot = await mkdtemp(path.join(os.tmpdir(), "halo-agent-ctx-git-"));
+  try {
+    await mkdir(path.join(gitRoot, ".git"));
+    const context = await buildEnvironmentContext({ workspaceRoot: gitRoot });
+    assert.match(context, /git repository/);
+    assert.match(context, /merge CONFLICT/i);
+  } finally {
+    await rm(gitRoot, { recursive: true, force: true });
+  }
+});
+
 test("buildSystemPrompt prepends the base prompt", async () => {
   const prompt = await buildSystemPrompt({ basePrompt: "BASE RULES", workspaceRoot: root });
   assert.ok(prompt.startsWith("BASE RULES\n\n"));
@@ -72,10 +85,16 @@ test("truncateMiddle keeps the head and tail of long output", () => {
   const out = truncateMiddle(text, 100);
   assert.ok(out.startsWith("START"));
   assert.ok(out.endsWith("END"));
-  assert.match(out, /\[\.\.\. \d+ characters omitted \.\.\.\]/);
+  assert.match(out, /\[\.\.\. \d+ characters \/ \d+ bytes omitted/i);
   assert.ok(out.length < 200);
 });
 
 test("truncateMiddle leaves short output alone", () => {
   assert.equal(truncateMiddle("short", 100), "short");
+});
+
+test("truncateMiddle notes JSON keys when truncating objects", () => {
+  const obj = { alpha: "x".repeat(4000), beta: 1, gamma: true };
+  const out = truncateMiddle(JSON.stringify(obj), 80);
+  assert.match(out, /JSON keys \(3\): alpha, beta, gamma/);
 });

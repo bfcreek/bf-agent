@@ -36,6 +36,8 @@ export {
 export {
   compactMessages,
   estimateTokens,
+  extractOriginalInstruction,
+  formatVerificationRecap,
   transcriptSize,
   DEFAULT_CONTEXT_FRACTION,
   DEFAULT_KEEP_RECENT,
@@ -78,6 +80,7 @@ export {
   configureClientModel,
   detectTaskHints,
   finalAnswerNudge,
+  formatExplicitGoals,
   formatTaskConstraints,
   isComplexGoal,
   shouldPlanGoal,
@@ -85,7 +88,10 @@ export {
   mutationBlockedUntilPretest,
   prematureFinalNudge,
   redundantVerifyBlock,
+  repeatedEditMissNudge,
   verificationCompleteOutcome,
+  blockedCommandOutcome,
+  synthesizeFinalAnswer,
   resolveThinkSetting,
 } from "./prompt-enhancements.mjs";
 
@@ -101,6 +107,8 @@ export { registerProjectSearchTool } from "./tools/project-search.mjs";
 
 export {
   MAX_TOOL_OUTPUT_CHARS,
+  nearbySnippet,
+  normalizeWorkspaceRelativePath,
   registerFileTools,
   replaceFlexible,
   resolveWithinRoot,

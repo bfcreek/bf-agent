@@ -116,6 +116,7 @@ async function handleChatCompletions(options, req, res) {
     maxSteps: options.maxSteps,
     compaction: {},
     projectBootstrap: options.projectBootstrap,
+    planning: false,
   });
   const result = await loop.run(goal, { history });
 

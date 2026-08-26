@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { parseRecognizedArgs, defaultRecognizedConfig } from "../evals/recognized/config.mjs";
-import { buildHarborArgs, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
+import { buildHarborArgs, buildHarborEnv, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
 import { findInstructionField, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
 import { latestReportPaths, recognizedRoot, runDirectory, timestampRunId } from "../evals/recognized/layout.mjs";
 import { parseHarborJob, summarizeTasks } from "../evals/recognized/parse.mjs";
@@ -97,10 +97,16 @@ test("resolveSampledIncludes draws 5 from the 2.1 catalog", async () => {
   assert.equal(new Set(picked.tasks).size, 5);
 });
 
-test("ollamaUrlForContainer rewrites loopback for Docker", () => {
-  assert.equal(ollamaUrlForContainer("http://127.0.0.1:11434"), "http://host.docker.internal:11434");
-  assert.equal(ollamaUrlForContainer("http://localhost:11434/"), "http://host.docker.internal:11434");
-  assert.equal(ollamaUrlForContainer("http://192.168.1.9:11434"), "http://192.168.1.9:11434");
+test("buildHarborEnv forces UTF-8 so Harbor does not crash on Windows cp1252", () => {
+  const env = buildHarborEnv({
+    repoRoot: "C:\\repo",
+    agentVersion: "0.1.0",
+    model: "auto",
+    containerBaseUrl: "http://host.docker.internal:11434",
+  });
+  assert.equal(env.PYTHONUTF8, "1");
+  assert.equal(env.PYTHONIOENCODING, "utf-8");
+  assert.equal(env.HALO_AGENT_REPO, "C:\\repo");
 });
 
 test("buildHarborArgs uses custom halo-agent import and downloads /app for the judge", () => {

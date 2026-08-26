@@ -3,6 +3,7 @@
  * halo-agent CLI.
  *
  * Run one goal:   node src/cli.mjs "what time is it?" [--model llama3.2] [...]
+ * Interactive:    node src/cli.mjs   (TTY, no arguments — prompt until /quit)
  * Serve OpenAI:   node src/cli.mjs serve [--port 11435] [...]
  */
 
@@ -35,6 +36,14 @@ import {
   loadUserConfig,
   openConfigInEditor,
 } from "./user-config.mjs";
+import {
+  ensureModelsConfigFile,
+  getModelsConfigPath,
+  loadModelsConfig,
+  openConfigInEditor as openModelsConfigInEditor,
+  resolveCliModel,
+} from "./models-config.mjs";
+import { parseTierPresetArg } from "./tier-models.mjs";
 
 function parseArgs(argv, initial = getBuiltinDefaults()) {
   const options = {
@@ -57,6 +66,24 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       case "--model":
         options.model = value(arg, ++i) ?? options.model;
         break;
+      case "--tier-preset": {
+        const raw = value(arg, ++i);
+        if (raw !== undefined) {
+          try {
+            options.tierPreset = parseTierPresetArg(raw);
+          } catch (err) {
+            options.errors.push(err.message);
+          }
+        }
+        break;
+      }
+      case "--tier": {
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(raw ?? "", 10);
+        if (Number.isFinite(n) && n >= 0 && n <= 6) options.taskTier = n;
+        else if (raw !== undefined) options.errors.push(`--tier needs an integer from 0 to 6, got '${raw}'.`);
+        break;
+      }
       case "--base-url":
         options.baseUrl = value(arg, ++i) ?? options.baseUrl;
         break;
@@ -167,8 +194,18 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
     positional.shift();
   }
   if (positional[0] === "models") {
-    options.listModels = true;
     positional.shift();
+    if (positional[0] === "config") {
+      positional.shift();
+      if (positional[0] === "edit") {
+        options.modelsConfigEdit = true;
+        positional.shift();
+      } else {
+        options.modelsConfigCommand = true;
+      }
+    } else {
+      options.listModels = true;
+    }
   }
   if (positional[0] === "config") {
     options.configCommand = true;
@@ -190,19 +227,24 @@ function printHelp() {
   console.log(`halo-agent v${VERSION} - local agent loop on Ollama
 
 Usage:
+  halo-agent                        Interactive terminal mode (TTY only)
   halo-agent "<goal>" [options]     Run one goal and print the answer
   halo-agent serve [options]        OpenAI-compatible server (/v1/chat/completions)
   halo-agent models [options]       List installed Ollama models and tool compliance
-  halo-agent config edit            Create or open the user config file in $EDITOR
+  halo-agent models config edit       Create or open the model-routing config (models.yaml)
+  halo-agent config edit              Create or open the general user config (config.yaml)
 
 Config:
-  Defaults can be set in ${getConfigPath()} (YAML). Keys match CLI flag names
-  (without --). Command-line flags override config values.
+  General defaults: ${getConfigPath()} (YAML)
+  Model routing:    ${getModelsConfigPath()} (YAML — tier presets and bands)
+  Keys match CLI flag names (without --). Command-line flags override config values.
 
 Options:
-  --model <name|auto>  Ollama model. Default auto: strongest installed model with
-                       thinking + tool support that fits in memory; falls back to an
-                       installed Ollama cloud model when no local model is strong enough
+  --model <name|auto|tier>  Ollama model. Default auto: with models.yaml, picks the band
+                       for --tier (default from models.yaml); without models.yaml, strongest
+                       installed model with thinking + tools that fits in memory
+  --tier-preset <name> Preset for model routing: auto, cloud, hybrid, or local
+  --tier <n>           Task difficulty 0–6 for model routing (default from models.yaml)
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
   --max-steps <n>      Max model round-trips (default 10)
   --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
@@ -225,12 +267,15 @@ Options:
   -h, --help           Show this help
 
 Examples:
+  halo-agent
   halo-agent "what time is it?"
   halo-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
   halo-agent "fix the failing test" --session fix-tests --mode agent
   halo-agent serve --port 11435
   halo-agent models
+  halo-agent models config edit
   halo-agent models --json --base-url http://127.0.0.1:11434
+  halo-agent "hard refactor" --tier 4 --tier-preset hybrid
   halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
   halo-agent "what is the latest Node.js LTS version?"
 
@@ -257,6 +302,148 @@ function makeApprovalPrompt() {
     return /^y(es)?$/i.test(answer.trim());
   };
   return { handler, close: () => rl.close() };
+}
+
+function makeInteractivePrompt() {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let closed = false;
+  rl.on("close", () => {
+    closed = true;
+  });
+  const approve = async ({ name, args }) => {
+    let preview = JSON.stringify(args);
+    if (preview.length > 200) preview = `${preview.slice(0, 200)}...`;
+    const answer = await rl.question(`allow ${name} ${preview}? [y/N] `);
+    return /^y(es)?$/i.test(answer.trim());
+  };
+  return {
+    approve,
+    async readLine() {
+      return rl.question("› ");
+    },
+    close() {
+      if (!closed) {
+        closed = true;
+        rl.close();
+      }
+    },
+    onSigInt(handler) {
+      rl.on("SIGINT", handler);
+    },
+    ended() {
+      return closed || process.stdin.readableEnded;
+    },
+  };
+}
+
+function printInteractiveHelp() {
+  console.log(`Interactive commands:
+  /help, ?     Show this help
+  /clear       Start a new conversation (keeps --session name, clears in-memory history)
+  /quit, /exit  Leave interactive mode (also: quit, exit)`);
+}
+
+function isInteractiveCommand(input) {
+  const cmd = input.trim().toLowerCase();
+  return (
+    cmd === "/help" ||
+    cmd === "?" ||
+    cmd === "/quit" ||
+    cmd === "/exit" ||
+    cmd === "quit" ||
+    cmd === "exit"
+  );
+}
+
+async function runInteractiveSession({
+  options,
+  loop,
+  store,
+  prompt,
+  sessionName,
+  priorSession,
+}) {
+  let history = priorSession?.messages ?? null;
+  let sessionSnapshot = priorSession;
+
+  const sessionLabel = sessionName ? ` | session: ${sessionName}` : "";
+  console.error(
+    `halo-agent interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
+  );
+  console.error("Enter a prompt, or /help for commands. /quit to exit.");
+  if (priorSession && !options.quiet) {
+    console.error(
+      `[session ${sessionName}] resuming: ${priorSession.messages.length} messages, ${priorSession.steps.length} steps so far`,
+    );
+  }
+
+  prompt.onSigInt(() => {
+    console.log("");
+    prompt.close();
+    process.exit(0);
+  });
+
+  try {
+    while (true) {
+      let line;
+      try {
+        line = await prompt.readLine();
+      } catch (err) {
+        if (err?.code === "ERR_USE_AFTER_CLOSE") break;
+        throw err;
+      }
+
+      const input = line.trim();
+      if (!input) {
+        if (prompt.ended()) break;
+        continue;
+      }
+
+      const cmd = input.toLowerCase();
+      if (cmd === "/help" || cmd === "?") {
+        printInteractiveHelp();
+        continue;
+      }
+      if (cmd === "/clear") {
+        history = null;
+        sessionSnapshot = null;
+        console.error("[cleared conversation]");
+        continue;
+      }
+      if (isInteractiveCommand(input)) break;
+
+      try {
+        const result = await loop.run(input, {
+          history: history ?? undefined,
+        });
+        history = result.messages;
+
+        if (store && sessionName) {
+          const saved = store.merge(sessionName, sessionSnapshot, result);
+          await store.save(sessionName, saved);
+          sessionSnapshot = saved;
+          if (!options.quiet && saved.changedFiles.length > 0) {
+            console.error(`[session ${sessionName}] files changed: ${saved.changedFiles.join(", ")}`);
+          }
+        }
+
+        if (result.stopReason === "max-steps") {
+          console.error(
+            `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
+          );
+        }
+        if (result.text) console.log(result.text);
+      } catch (err) {
+        if (err instanceof OllamaClientError) {
+          console.error(err.message);
+          continue;
+        }
+        throw err;
+      }
+    }
+  } finally {
+    prompt.close();
+  }
 }
 
 function printClassifiedModels({ baseUrl, classified, suggested, json }) {
@@ -328,9 +515,14 @@ function describeStep(step) {
 async function main() {
   const builtins = getBuiltinDefaults();
   const { values: configValues, errors: configErrors } = await loadUserConfig();
+  const {
+    values: modelsConfigValues,
+    errors: modelsConfigErrors,
+    exists: modelsConfigExists,
+  } = await loadModelsConfig();
   const withConfig = applyConfigToDefaults(builtins, configValues);
   const options = parseArgs(process.argv.slice(2), withConfig);
-  options.errors.push(...configErrors);
+  options.errors.push(...configErrors, ...modelsConfigErrors);
 
   if (options.version) {
     console.log(VERSION);
@@ -345,6 +537,16 @@ async function main() {
     process.exitCode = openConfigInEditor(configPath);
     return;
   }
+  if (options.modelsConfigEdit) {
+    const configPath = await ensureModelsConfigFile();
+    process.exitCode = openModelsConfigInEditor(configPath);
+    return;
+  }
+  if (options.modelsConfigCommand) {
+    console.error("Unknown models config subcommand. Use: halo-agent models config edit");
+    process.exitCode = 1;
+    return;
+  }
   if (options.configCommand) {
     console.error("Unknown config subcommand. Use: halo-agent config edit");
     process.exitCode = 1;
@@ -357,10 +559,15 @@ async function main() {
     return;
   }
   if (!options.goal && !options.serve && !options.listModels) {
-    console.error("No goal given.");
-    printHelp();
-    process.exitCode = 1;
-    return;
+    const forceInteractive = process.env.HALO_AGENT_FORCE_INTERACTIVE === "1";
+    if ((process.stdin.isTTY && process.stdout.isTTY) || forceInteractive) {
+      options.interactive = true;
+    } else {
+      console.error("No goal given.");
+      printHelp();
+      process.exitCode = 1;
+      return;
+    }
   }
 
   if (options.listModels) {
@@ -375,11 +582,10 @@ async function main() {
     think: options.think,
   });
 
-  // Route to an installed, suitable model up front ("auto" picks the
-  // strongest thinking+tool model); skip silently when Ollama is
+  // Route to an installed, suitable model up front; skip silently when Ollama is
   // unreachable — the run itself will surface that error clearly.
   try {
-    const routed = await resolveModelAuto({ requested: options.model, client });
+    const routed = await resolveCliModel(options, client, modelsConfigValues, modelsConfigExists);
     for (const warning of routed.warnings) console.error(warning);
     options.model = routed.model;
     await configureClientModel(client, routed.model);
@@ -460,7 +666,13 @@ async function main() {
   }
 
   let approval;
-  if (options.mode === "ask") {
+  let interactivePrompt;
+  if (options.interactive) {
+    interactivePrompt = makeInteractivePrompt();
+    if (options.mode === "ask") {
+      registry.setApprovalHandler(interactivePrompt.approve);
+    }
+  } else if (options.mode === "ask") {
     approval = makeApprovalPrompt();
     registry.setApprovalHandler(approval.handler);
   }
@@ -498,6 +710,18 @@ async function main() {
   }
 
   try {
+    if (options.interactive) {
+      await runInteractiveSession({
+        options,
+        loop,
+        store,
+        prompt: interactivePrompt,
+        sessionName: options.session,
+        priorSession,
+      });
+      return;
+    }
+
     const result = await loop.run(options.goal, {
       history: priorSession?.messages,
     });
@@ -528,6 +752,7 @@ async function main() {
     throw err;
   } finally {
     approval?.close();
+    interactivePrompt?.close();
     for (const mcp of mcpClients) await mcp.close();
   }
 }

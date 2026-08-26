@@ -21,6 +21,8 @@ export function buildRunKey(scenarioNames, options) {
   const payload = {
     scenarios: scenarioNames,
     models: options.models,
+    tierModels: options.tierModels ?? null,
+    tierPreset: options.tierPreset ?? null,
     skipJudge: options.skipJudge,
     progression: options.progression,
     stopBelowScore: options.stopBelowScore,

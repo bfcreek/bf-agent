@@ -34,7 +34,7 @@ quoted: "hello # world"
   assert.equal(parsed.quoted, "hello # world");
 });
 
-test("normalizeConfigValues maps CLI names to internal options", () => {
+test("parseCliArgs loads single scenario from config file", () => {
   const { values, errors } = normalizeConfigValues({
     model: "llama3.2",
     "base-url": "http://example:11434",

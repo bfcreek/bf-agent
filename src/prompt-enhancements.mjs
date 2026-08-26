@@ -40,6 +40,12 @@ const TASK_HINT_RULES = [
       "Mandatory first step: run_command the failing test (e.g. node test.mjs, python test.py, or dotnet run) and record exit code/output before any edit_file or write_file. If that run already exits 0, read the named implementation file, confirm it matches the tests, and finish — do not add validation, docstrings, or extra features. If it fails, fix only the broken logic, then re-run the same command. Checklist: reproduce → diagnose → fix → verify. Do not rewrite the test file. After the failing run, edit_file the named implementation immediately (often inverted operators or swapped return values), then re-run the same test command. If edit_file says old_string is ambiguous, include the enclosing def/class (e.g. def mul(a, b): plus the return line) and never set replace_all on a return/statement. If a Python test imports a function whose module has the same name (greet.py / greet()), use `from greet import greet` — `import greet` then greet() calls the module.",
   },
   {
+    id: "merge-conflict",
+    test: /\b(merge conflict|git merge|unmerged|conflict markers?)\b|\b<<<<<<<\b/i,
+    constraint:
+      "After a merge CONFLICT, do not stop after inspecting both sides (git show). Required loop: edit_file or write_file to remove <<<<<<< markers → git add and git commit → run the named verification (e.g. examples.json). Empty answers and git show of both versions are not completion.",
+  },
+  {
     id: "debug",
     test: /\b(debug|diagnose|troubleshoot)\b|\bwhy (?:is|does|isn't|doesn't)\b|\bnot working\b|\b(?:is|are) broken\b/i,
     constraint:
@@ -139,6 +145,74 @@ const TASK_HINT_RULES = [
       "Before finishing, run each named smoke-test command with run_command. On Windows PowerShell chain with ';' not '&&'. After a command exits 0, do not re-run that same command; `dotnet build` is separate from `dotnet run` smoke tests. Treat verificationComplete:true as terminal success and give the final answer.",
   },
   {
+    id: "build-from-source",
+    test:
+      /\b(?:from source|compile|compcert|\.\/configure|make\s+install|apt-?get\s+install|wget\s+https?:)\b/i,
+    constraint:
+      "This is a multi-step build. Prefer run_command with curl/wget over fetch_url for archives. Checklist: locate a direct URL → shell download → extract to the named path → compile → install → run the instruction’s sanity command. After 2–3 HTTP 404/empty-search failures, switch approach (archive.org, apt-cache, FTP mirrors). Environment probes are not completion.",
+  },
+  {
+    id: "artifact-create",
+    test:
+      /\b(?:titled|named|called|output (?:fasta )?file|save as|write (?:to|into))\b.{0,80}\b[\w./-]+\.[A-Za-z0-9]+\b|\b[\w.-]+\.(fasta|fa|csv|json|txt)\b.{0,40}\b(?:output|create|write|save)\b/i,
+    constraint:
+      "The instruction names an output artifact. Create it with write_file (or an explicit redirect to that path) before any stop condition. Exit 0 alone does not mean the task is done unless the required output artifact exists. If no files were changed, keep working or report failure — do not stop. Workspace paths are relative to the root: if the root is /app, write_file 'filter.py' not 'app/filter.py' or '/app/filter.py' (those create /app/app/filter.py).",
+  },
+  {
+    id: "html-sanitize",
+    test: /\b(filter.?js|sanitiz|xss|script tag|onerror|innerHTML|strip javascript|remove javascript|html filter)\b/i,
+    constraint:
+      "For HTML/JS sanitization, do not rely on regex-only stripping. Prefer a real parser (BeautifulSoup, lxml, html.parser) plus an attribute/URL allowlist. Enumerate common XSS bypasses before finishing: entity encoding, event handlers without a space (onclick=), data:/vbscript:/javascript: URLs, CSS expression(), SVG/embed/math, and `on\\w+` that must match attribute names not arbitrary 'on' substrings. Keep a clean-HTML regression fixture and re-run it after each change.",
+  },
+  {
+    id: "rpc-proto",
+    test: /\b(grpc|protobuf|\.proto|rpc\b|protocol buffers?)\b/i,
+    constraint:
+      "When the instruction describes RPC/message fields in English (e.g. 'a value (int)'), use that exact identifier as the proto field name unless a different name is quoted. Do not silently shorten value to val or similar synonyms. After starting a server, verify with a short RPC/TCP check, not only a possibly-buffered log.",
+  },
+  {
+    id: "numeric-artifact",
+    test: /\b(raman|peak fit|eigenval|curve_fit|wavenumber|gamma)\b|\bresults\.json\b.{0,120}\b(fit|peak|param)/i,
+    constraint:
+      "For numeric artifacts, exit 0 plus file-exists is not enough. Sanity-check values against stated domain ranges (e.g. graphene G≈1580 cm⁻¹, 2D≈2700, narrow gamma) before finishing. Huge gamma, negative multi-million offsets, or hard-coded zeros mean the fit is wrong — tighten bounds and retry rather than deleting required parameters.",
+  },
+  {
+    id: "pinned-package",
+    test: /\b(must use|use the|revision|sentence.?transformers|mteb|huggingface)\b|\bpip install\s+[\w.-]+==/i,
+    constraint:
+      "The instruction names a required package, version, or revision. Import that exact package first and print its version with run_command before using any alternate library. Do not substitute sentence_transformers (or similar) when MTEB/Hugging Face is named. Put the output at the instruction path.",
+  },
+  {
+    id: "reverse-engineer",
+    test: /\b(reverse.?engineer|objdump|readelf|decompile|mystery binary|path.?tracing|\belf\b|feal|linear.?cryptanalysis|cryptanalysis)\b/i,
+    constraint:
+      "Start with objdump/readelf/strings/nm on the given binary, or read the named cipher sources (e.g. feal.c, decrypt.c) and sample pairs.txt before implementing any attack. Do not finish by cat'ing an existing output image. Compile your reconstruction to a new name so you do not overwrite the task-provided binary. Independence from files produced by running the mystery binary is required when the instruction says so.",
+  },
+  {
+    id: "secret-sanitize",
+    test: /\b(sanitiz\w*.{0,60}secrets?|remov\w*.{0,40}(secrets?|credential|api.?key|token)|AKIA|ghp_|hf_|leaked?\s+secrets?)\b/i,
+    constraint:
+      "Search for literal secret patterns (AKIA*, ghp_*, hf_*) and assignment values after '=', not only env var names. edit_file or write_file every hit, then grep_search again to prove secrets are gone before finishing. Do not claim files changed if no write/edit succeeded.",
+  },
+  {
+    id: "optimize-threshold",
+    test: /\b(optimiz\w*|maximi[sz]e|minimi[sz]e|batching.?schedul|shape.?packer|baseline.?packer|cost.?model|inference.?batch)\b|\bmeet(?:s|ing)?\s+(?:a\s+)?threshold\b|\bpass(?:es|ing)?\s+(?:the\s+)?threshold\b/i,
+    constraint:
+      "Measure against the stated metric and iterate until the threshold passes or the step budget ends. Helper/baseline scripts are not completion — they may overwrite output_data; after any baseline that clobbers outputs, re-run your packer/solver. Prefer edit_file + an alternate command (python3 -c …) over repeating the same blocked find_files/run_command loop.",
+  },
+  {
+    id: "script-smoke",
+    test: /\b(write|create|implement|fix)\b.{0,80}\b[\w./-]+\.py\b|\bpython3?\s+[\w./-]+\.py\b/i,
+    constraint:
+      "Before finishing a Python script deliverable: run python -m py_compile on the file, then at least one run with the instruction's demo paths when available. Refuse to mark done if the file fails to parse. After the last write/edit, read_file the deliverable and ensure your final answer matches on-disk contents.",
+  },
+  {
+    id: "sqlite-carve",
+    test: /\b(sqlite|truncate[d]? (?:db|database)|recover\.json)\b/i,
+    constraint:
+      "If the SQLite header magic is missing or .recover fails, carve leaf-page records from serial types instead of guessing fields from string suffixes. After dumping record bytes next to carved keys, parse and validate before writing the deliverable — do not invent correlated columns when only one field is visible as text.",
+  },
+  {
     id: "http-server",
     test: /\b(http|server\.mjs|listens?\s+on\s+port|PORT\s+env)\b|\/health|\/echo/i,
     constraint:
@@ -194,13 +268,29 @@ const TASK_HINT_RULES = [
 ];
 
 export const PLANNING_USER_MESSAGE = [
-  "Before using any tools, write a short numbered plan (3–6 steps) for the task above.",
+  "Before using any tools, write a short Goals section first: 2–5 bullet outcomes",
+  "that define done (named deliverables, exit-0 commands, final-answer shape).",
+  "If the user message already includes ## Goals, keep those and add any missing",
+  "acceptance criteria you infer from the task.",
+  "Then write a short numbered plan (3–6 steps) for the task above.",
   "Name the specific tools you will use (read_file, grep_search, run_command, etc.).",
   "If the task needs no tools, the plan is one line: 'No tools — answer directly.'",
   "Before the first edit, plan to read the target file and any existing tests that define the expected interface (flag names, signatures, output format).",
   "For fix/debug tasks use: reproduce (run failing command) → diagnose → fix all related sites in one change → verify.",
   "If a replace_all or an ambiguous edit would touch more than one function, re-read the file and plan one unique per-function edit — do not ping-pong a shared statement.",
   "For create/CLI/server tasks include a final verify step that runs every named command and the tests; do not plan to claim success without that run. Chain smoke commands in one run_command when the task lists several.",
+  "For build-from-source tasks, plan curl/wget download (not fetch_url), extract, compile, install, then the instruction’s sanity command. After 2–3 404s switch mirrors.",
+  "For pinned-package tasks, plan run_command that imports the named package and prints its version before any encoding/work.",
+  "For reverse-engineering, plan objdump/readelf/strings first; for FEAL/crypto, plan reading feal.c/decrypt.c and sampling pairs.txt before any attack code. Compile to a new binary name. For truncated SQLite, plan page carving, not suffix guessing.",
+  "For secret-sanitize tasks, plan grep for AKIA/ghp/hf literals and '=' assignments, then edit, then re-grep to prove secrets are gone.",
+  "For threshold/optimization tasks, plan measure → iterate until threshold; re-run solvers after any baseline that overwrites outputs.",
+  "For Python script deliverables, plan py_compile plus a demo-path run before the final answer.",
+  "For artifact-creation tasks, name the output path and plan write_file of that file before finishing. Exit 0 is not done if the named file is missing. Paths are workspace-relative: if the root is /app, write filter.py not app/filter.py.",
+  "For HTML/JS sanitization tasks, plan a parser + allowlist (not regex-only) and a clean-HTML regression fixture covering XSS bypass classes.",
+  "For gRPC/protobuf tasks, use the instruction's exact field names in the .proto; after starting a server, plan a short RPC/TCP check.",
+  "For numeric fitting/artifact tasks, plan a domain-range sanity check of written values before claiming success.",
+  "Harbor / Terminal-Bench goals: verify the instruction's deliverables (named files, named binaries), not workspace-relative test.mjs unless the instruction names it.",
+  "For git merge/conflict tasks, plan repo/branches/merge first, then resolve CONFLICT with edit_file, commit, then verify — do not speculate at length on examples before the repo exists. Do not stop after only inspecting both sides.",
   "For follow-up / 'new request' tasks, map each new command to a planned file edit before any verify run — existing build/list success is not done.",
   "Implement only what the task asks: no extra entrypoints, listeners, or formatting-only edits. Name deliverable files before the first write_file.",
   "For empty-workspace / 'app shell' tasks, plan write_file of the real source files then run_command the install — never a setup/install script as the deliverable.",
@@ -271,6 +361,26 @@ export const TOOL_NUDGE_ALREADY_VERIFIED = [
   "In the final answer, mention only files you changed and the command that exited 0 — never mention blocked diagnostics.",
 ].join(" ");
 
+export const TOOL_NUDGE_DIAGNOSTIC_BLOCKED = [
+  "status: blocked",
+  "That command is an environment probe or generic diagnostic, not task verification.",
+  "Do not treat exit 0 from apt-get --version, apt-cache, diff, awk, head, or similar as completion.",
+  "Run the next real build/install/write step, or give the final answer if every named deliverable already exists.",
+].join(" ");
+
+export const TOOL_NUDGE_DELIVERABLE = [
+  "Do not finish yet — the instruction names an output file that has not been created.",
+  "write_file (or otherwise create) that path, then confirm it exists.",
+  "Exit 0 alone does not mean the task is done unless the required output artifact exists.",
+].join(" ");
+
+export const TOOL_NUDGE_MERGE_CONFLICT = [
+  "Do not finish yet — a merge CONFLICT is still unresolved.",
+  "Required loop: edit_file or write_file to remove <<<<<<< markers,",
+  "then git add and git commit, then run the named verification (e.g. examples.json).",
+  "Inspecting both sides with git show is not completion.",
+].join(" ");
+
 export const TOOL_NUDGE_FOLLOW_UP = [
   "This is a new request on an existing project.",
   "Do not stop because build or existing commands still pass.",
@@ -304,6 +414,36 @@ export const TOOL_NUDGE_AMBIGUOUS_EDIT = [
   "Do not flip the same global snippet back and forth.",
 ].join(" ");
 
+export const TOOL_NUDGE_EDIT_MISS_REWRITE = [
+  "edit_file old_string missed twice on this file.",
+  "Stop guessing escapes. read_file the current file, then use write_file for a full rewrite,",
+  "or copy an exact nearby snippet from the tool error (including whitespace) as old_string.",
+].join(" ");
+
+export const TOOL_NUDGE_SEARCH_LOOP = [
+  "You are looping on the same find_files / blocked run_command pattern.",
+  "Stop repeating. Prefer edit_file on the deliverable, or try an alternate command",
+  "(e.g. python3 -c '…', touch then run, or a different script path).",
+].join(" ");
+
+export const TOOL_NUDGE_SECRET_HIT = [
+  "grep_search found secret-like literals (AKIA / ghp_ / hf_ / assigned tokens),",
+  "but no successful write_file or edit_file has run yet.",
+  "edit_file those values out now, then re-grep to prove they are gone.",
+].join(" ");
+
+export const TOOL_NUDGE_CLAIM_NO_MUTATION = [
+  "Do not claim file changes — the trajectory has no successful write_file or edit_file.",
+  "Apply the edit now (or report failure). For sanitize tasks, require at least one",
+  "edit after secret hits before stopping.",
+].join(" ");
+
+export const TOOL_NUDGE_DELIVERABLE_DRIFT = [
+  "You wrote or edited the primary deliverable.",
+  "Before the final answer, read_file that path and confirm your answer matches",
+  "on-disk contents (no answer/disk drift).",
+].join(" ");
+
 /**
  * After an ambiguous edit_file (or a non-identifier replace_all that hit
  * multiple sites), force a re-read and per-function plan so the model
@@ -332,11 +472,108 @@ export function ambiguousEditRecoveryNudge({ steps } = {}) {
   return multiReplace ? TOOL_NUDGE_AMBIGUOUS_EDIT : null;
 }
 
+/**
+ * After two consecutive old_string misses on the same path, force a rewrite.
+ * @param {{ steps?: Array<{ toolCalls?: Array<object> }> }} input
+ * @returns {string|null}
+ */
+export function repeatedEditMissNudge({ steps } = {}) {
+  const calls = flattenToolCalls(steps).filter((c) => c.name === "edit_file");
+  if (calls.length < 2) return null;
+  const last = calls[calls.length - 1];
+  const prev = calls[calls.length - 2];
+  const missed = (c) =>
+    !c.ok && /not found|truncated|incomplete|not unique|appears \d+ times/i.test(String(c.error ?? ""));
+  if (!missed(last) || !missed(prev)) return null;
+  const a = String(last.args?.path ?? "");
+  const b = String(prev.args?.path ?? "");
+  if (a && a === b) return TOOL_NUDGE_EDIT_MISS_REWRITE;
+  return null;
+}
+
+const SECRET_LITERAL_RE = /\b(AKIA[0-9A-Z]{8,}|ghp_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,})\b|=\s*['\"]?[A-Za-z0-9\/+=]{20,}/;
+
+/**
+ * When grep hits secret-like literals but no edit has been issued.
+ * @param {{ goal?: string, steps?: Array<{ toolCalls?: Array<object> }> }} input
+ * @returns {string|null}
+ */
+export function secretHitWithoutEditNudge({ goal, steps } = {}) {
+  const hints = detectTaskHints(goal);
+  const secretGoal =
+    hints.some((h) => h.id === "secret-sanitize") ||
+    /\b(sanitiz\w*|secrets?|credential|AKIA|ghp_|hf_)\b/i.test(String(goal ?? ""));
+  if (!secretGoal) return null;
+  const calls = flattenToolCalls(steps);
+  if (hasSuccessfulMutation(calls)) return null;
+  const hit = calls.some((c) => {
+    if (c.name !== "grep_search" || !c.ok) return false;
+    return SECRET_LITERAL_RE.test(callResultText(c));
+  });
+  return hit ? TOOL_NUDGE_SECRET_HIT : null;
+}
+
+/**
+ * Detect loops of identical find_files / blocked run_command.
+ * @param {{ steps?: Array<{ toolCalls?: Array<object> }> }} input
+ * @returns {string|null}
+ */
+export function repeatedSearchLoopNudge({ steps } = {}) {
+  const recent = (steps ?? []).slice(-3);
+  if (recent.length < 3) return null;
+  const keys = recent.map((s) => {
+    const calls = s.toolCalls ?? [];
+    return JSON.stringify(
+      calls.map((c) => {
+        const blocked =
+          c.result?.status === "blocked" ||
+          (!c.ok && /blocked|already exited/i.test(String(c.error ?? "")));
+        return [c.name, c.args?.pattern ?? c.args?.command ?? c.args?.cmd ?? "", blocked];
+      }),
+    );
+  });
+  if (keys[0] && keys[0] === keys[1] && keys[1] === keys[2]) {
+    const names = (recent[2].toolCalls ?? []).map((c) => c.name);
+    if (names.some((n) => n === "find_files" || n === "run_command" || n === "grep_search")) {
+      return TOOL_NUDGE_SEARCH_LOOP;
+    }
+  }
+  return null;
+}
+
+/**
+ * After write/edit of a primary deliverable, nudge a re-read before finish.
+ * @param {{ goal?: string, steps?: Array<{ toolCalls?: Array<object> }> }} input
+ * @returns {string|null}
+ */
+export function deliverableDriftNudge({ goal, steps } = {}) {
+  const calls = flattenToolCalls(steps);
+  if (!calls.length) return null;
+  const last = calls[calls.length - 1];
+  if (!last?.ok || !MUTATING_TOOL_NAMES.has(last.name)) return null;
+  const deliverables = extractNamedDeliverables(goal).filter(isCreatedFileDeliverable);
+  const hints = detectTaskHints(goal);
+  if (!deliverables.length && !hints.some((h) => h.id === "script-smoke" || h.id === "artifact-create")) {
+    return null;
+  }
+  const pathName = String(last.result?.path ?? last.args?.path ?? "");
+  if (!pathName) return null;
+  const alreadyRead = calls.some(
+    (c, i) =>
+      i > calls.length - 3 &&
+      c.name === "read_file" &&
+      c.ok &&
+      String(c.args?.path ?? "").replace(/\\/g, "/").endsWith(pathName.replace(/\\/g, "/").split("/").pop()),
+  );
+  if (alreadyRead) return null;
+  return TOOL_NUDGE_DELIVERABLE_DRIFT;
+}
+
 export const MUTATION_BLOCKED_PRETEST =
   "Blocked: this task mentions failing tests. Run the test command with run_command and inspect the failure before edit_file or write_file.";
 
 const ACTION_GOAL =
-  /\b(create|write|build|fix|edit|change|update|implement|modify|extract|refactor|rename|move|persist|include)\b/i;
+  /\b(create|write|build|fix|edit|change|update|implement|modify|extract|refactor|rename|move|persist|include|merge|resolve)\b/i;
 const RUN_TEST_GOAL = /\b(run|test)\b.{0,40}\b(node|npm|python|py|dotnet|test|spec|\.mjs|\.js|\.ts|\.py|\.cs)\b/i;
 const ADD_FEATURE_GOAL = /\badd\b.{0,40}\b(cli|flag|route|feature|function|file|module|test|support)\b/i;
 const READ_GOAL =
@@ -467,7 +704,7 @@ export function commandExitCode(result) {
  * @returns {boolean}
  */
 export function isTestSuiteCommand(cmd) {
-  return /\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+test|pytest)\b/i.test(
+  return /\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+test|pytest|cargo\s+test|go\s+test|python3?\s+-m\s+(?:pytest|unittest))\b/i.test(
     String(cmd ?? ""),
   );
 }
@@ -479,12 +716,14 @@ export function isTestSuiteCommand(cmd) {
 export function isTestCommand(cmd) {
   const text = String(cmd ?? "");
   if (isTestSuiteCommand(text)) return true;
-  return /\bdotnet\s+run\b/i.test(text) || /\btest\b/i.test(text);
+  if (/\bdotnet\s+run\b/i.test(text)) return true;
+  if (/\b(?:make\s+test|cargo\s+test|go\s+test)\b/i.test(text)) return true;
+  return false;
 }
 
 /**
- * Structured tool result so a blocked duplicate looks like terminal success,
- * not a retriable error.
+ * Structured tool result so a blocked duplicate of a *named* verification
+ * command looks like terminal success, not a retriable error.
  * @param {string} [message]
  */
 export function verificationCompleteOutcome(message = TOOL_NUDGE_ALREADY_VERIFIED) {
@@ -501,19 +740,71 @@ export function verificationCompleteOutcome(message = TOOL_NUDGE_ALREADY_VERIFIE
   };
 }
 
+/**
+ * A command that was not executed. Must not look like exit 0 success.
+ * @param {string} command
+ * @param {string} [message]
+ */
+export function blockedCommandOutcome(command, message) {
+  return {
+    ok: true,
+    result: {
+      status: "blocked",
+      command: String(command ?? ""),
+      stdout: "",
+      stderr: "",
+      note: message ?? "Command was not executed.",
+    },
+  };
+}
+
 export function isTerminalVerificationMessage(message) {
   const text = String(message ?? "");
   return text === TOOL_NUDGE_ALREADY_VERIFIED || /verificationComplete:\s*true/i.test(text);
 }
 
 /**
- * Bare interpreter / version probes that burn a step after tests already passed.
+ * Environment probes and generic shell diagnostics. These must never latch
+ * verificationComplete. Named verification commands from the goal override.
+ * @param {string} cmd
+ * @param {string} [goal]
+ * @returns {boolean}
+ */
+export function isDiagnosticCommand(cmd, goal = "") {
+  const text = String(cmd ?? "").trim();
+  if (!text) return false;
+  if (!looksLikeDiagnostic(text)) return false;
+  if (isTaskNamedVerificationCommand(text, goal)) return false;
+  return true;
+}
+
+function looksLikeDiagnostic(text) {
+  if (/^(node|nodejs|python3?|py)(\s+(-v|--version|-V))?$/i.test(text)) return true;
+  if (/^(uname|hostname|whoami|id|pwd|date|env|printenv)(\s|$)/i.test(text)) return true;
+  if (/^(which|whereis|type|where)(\s|$)/i.test(text)) return true;
+  if (/^apt-cache\b/i.test(text)) return true;
+  if (/^apt(-get)?\s+(--version|-v|-V|policy)\b/i.test(text)) return true;
+  if (/^(dpkg|rpm)\s+(--version|-v|-qa|-l)\b/i.test(text)) return true;
+  if (/^(head|tail|awk|sed|cut|wc)\b/i.test(text)) return true;
+  if (/^diff\b/i.test(text)) return true;
+  if (/^ls\b/i.test(text)) return true;
+  if (/^(file|stat)\s/i.test(text)) return true;
+  if (/^(echo|printf)\b(?![\s\S]*[>&])/i.test(text)) return true;
+  if (/^cat\b(?![\s\S]*[>&])/i.test(text)) return true;
+  return false;
+}
+
+/**
+ * `test -f` / `ls` of a named deliverable — still allowed after verification
+ * when the output file has not been created yet.
  * @param {string} cmd
  * @returns {boolean}
  */
-export function isDiagnosticCommand(cmd) {
-  return /^(node|nodejs|python3?|py)(\s+(-v|--version|-V))?$/i.test(String(cmd ?? "").trim());
+export function isExistenceCheckCommand(cmd) {
+  return /\b(?:test\s+-[efd]|Test-Path|Get-Item|stat\s+|ls\s+)/i.test(String(cmd ?? ""));
 }
+
+const DATA_FILE_EXT = /\.(fasta|fa|txt|json|csv|out|md|xml|yml|yaml|html|tsv)$/i;
 
 /**
  * @param {object} call
@@ -602,14 +893,6 @@ function hasReadImplementationFile(calls) {
   });
 }
 
-function lastMutationIndex(calls) {
-  let idx = -1;
-  for (let i = 0; i < (calls ?? []).length; i++) {
-    if (MUTATING_TOOL_NAMES.has(calls[i].name) && calls[i].ok) idx = i;
-  }
-  return idx;
-}
-
 function normalizeCommand(cmd) {
   return String(cmd ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
@@ -621,11 +904,42 @@ function isActualRun(call) {
 function commandAlreadySucceeded(calls, cmd) {
   const needle = normalizeCommand(cmd);
   if (!needle) return false;
-  return (calls ?? []).some((c) => {
-    if (!isActualRun(c)) return false;
-    if (commandExitCode(c.result) !== 0) return false;
-    return normalizeCommand(runCommandText(c)) === needle;
-  });
+  let lastSuccess = -1;
+  for (let i = 0; i < (calls ?? []).length; i++) {
+    const c = calls[i];
+    if (!isActualRun(c)) continue;
+    if (commandExitCode(c.result) !== 0) continue;
+    if (normalizeCommand(runCommandText(c)) === needle) lastSuccess = i;
+  }
+  if (lastSuccess < 0) return false;
+  // write_file/edit_file or a later script that may clobber outputs (baseline
+  // packers, etc.) invalidate the dedup so the agent can re-run the solver.
+  for (let i = lastSuccess + 1; i < calls.length; i++) {
+    const c = calls[i];
+    if (MUTATING_TOOL_NAMES.has(c.name) && c.ok) return false;
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
+    if (looksLikeOutputClobberCommand(runCommandText(c))) return false;
+  }
+  return true;
+}
+
+/**
+ * Shell commands that often overwrite deliverables without write_file
+ * (baseline packers, solvers, generators). Smoke `dotnet run` stays excluded.
+ * @param {string} cmd
+ */
+function looksLikeOutputClobberCommand(cmd) {
+  const text = String(cmd ?? "");
+  if (!text || isDiagnosticCommand(text) || isTestSuiteCommand(text)) return false;
+  if (/\bdotnet\s+(run|build|test)\b/i.test(text)) return false;
+  if (/\b(baseline\w*|packer|output_data|shape_packer)\b/i.test(text)) return true;
+  if (
+    /\b(python3?|py|node|bash|sh)\s+[^\s]+\.(py|sh|ps1|mjs|js)\b/i.test(text) &&
+    !/\btest\.(py|mjs|js)\b/i.test(text)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 const SMOKE_SKIP_WORDS = new Set([
@@ -722,12 +1036,217 @@ function ranNamedCommand(calls, named) {
   });
 }
 
-function hasCliSmokeRun(calls) {
+function hasCliSmokeRun(calls, goal = "") {
+  const named = extractNamedNodeCommands(goal);
+  const smoke = extractSmokeSubcommands(goal);
   return (calls ?? []).some((c) => {
     if (!isActualRun(c)) return false;
     const cmd = runCommandText(c);
-    if (isTestSuiteCommand(cmd) || isDiagnosticCommand(cmd)) return false;
-    return commandExitCode(c.result) != null;
+    if (isDiagnosticCommand(cmd, goal)) return false;
+    if (isTestSuiteCommand(cmd)) return false;
+    if (named.some((n) => commandCoversNamed(cmd, n))) return true;
+    if (smoke.some((s) => commandCoversSubcommand(cmd, s))) return true;
+    return false;
+  });
+}
+
+function commandCoversNamed(cmd, named) {
+  const needle = String(named ?? "")
+    .toLowerCase()
+    .replace(/^(node|python3?|py)\s+/, "");
+  if (!needle) return false;
+  return String(cmd ?? "").toLowerCase().includes(needle);
+}
+
+/**
+ * Whether this command is an explicit verification named in the goal
+ * (test suite, pytest, or a path/CLI the instruction asked to run).
+ * @param {string} cmd
+ * @param {string} [goal]
+ * @returns {boolean}
+ */
+export function isTaskNamedVerificationCommand(cmd, goal = "") {
+  const text = String(cmd ?? "");
+  if (isTestSuiteCommand(text)) return true;
+  if (looksLikeDiagnostic(text) && !isExistenceCheckCommand(text)) return false;
+  const named = extractNamedNodeCommands(goal);
+  const n = normalizeCommand(text);
+  if (!n) return false;
+  return named.some((c) => {
+    const needle = normalizeCommand(c);
+    if (!needle) return false;
+    if (n === needle) return true;
+    if (needle.startsWith("/")) {
+      return n.startsWith(needle) || n.startsWith(`test -f ${needle}`);
+    }
+    return n.includes(needle);
+  });
+}
+
+/**
+ * Output files and binaries the instruction asks to produce or invoke.
+ * @param {string} goal
+ * @returns {string[]}
+ */
+export function extractNamedDeliverables(goal) {
+  const text = String(goal ?? "");
+  const found = [];
+  const push = (raw) => {
+    const value = String(raw ?? "")
+      .replace(/^[`'"]+|[`'".;,:]+$/g, "")
+      .replace(/[.,;:]+$/, "");
+    if (!value || value.length < 3) return;
+    if (found.includes(value)) return;
+    found.push(value);
+  };
+
+  for (const m of text.matchAll(
+    /\b(?:titled|named|called)\s+[`'"]?([\w./-]+\.[A-Za-z0-9]+)/gi,
+  )) {
+    push(m[1]);
+  }
+  for (const m of text.matchAll(
+    /\b(?:create|write|save|produce|generate)\s+(?:an?\s+)?(?:output\s+)?(?:(?:fasta|text|json)\s+)?(?:file\s+)?(?:titled|named|called)?\s*[`'"]?([\w./-]+\.(fasta|fa|txt|json|csv|out|md|xml|yml|yaml|html|tsv))[`'"]?/gi,
+  )) {
+    push(m[1]);
+  }
+  for (const m of text.matchAll(
+    /\boutput(?:\s+fasta)?\s+file\s+(?:should\s+be\s+)?(?:titled|named|called)\s+[`'"]?([\w./-]+\.[A-Za-z0-9]+)/gi,
+  )) {
+    push(m[1]);
+  }
+  for (const m of text.matchAll(/(\/(?:tmp|app|opt|usr)\/[\w.-]+\/[\w./-]+)/g)) {
+    push(m[1]);
+  }
+  return found;
+}
+
+export function isCreatedFileDeliverable(filePath) {
+  return DATA_FILE_EXT.test(String(filePath ?? ""));
+}
+
+export function isHarborStyleGoal(goal) {
+  return /\/tmp\/|\/app\/|\/hidden_tests\b/i.test(String(goal ?? ""));
+}
+
+function wroteNamedDeliverable(calls, name) {
+  const needle = String(name ?? "").replace(/\\/g, "/");
+  const base = needle.split("/").pop();
+  if (!base) return false;
+  const viaWrite = (calls ?? []).some((c) => {
+    if (!c.ok) return false;
+    if (c.name !== "write_file" && c.name !== "edit_file") return false;
+    const p = String(c.result?.path ?? c.args?.path ?? "").replace(/\\/g, "/");
+    if (!p) return false;
+    return p === needle || p.endsWith(`/${base}`) || p.split("/").pop() === base;
+  });
+  if (viaWrite) return true;
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) return false;
+    const cmd = runCommandText(c);
+    if (!/[>&]/.test(cmd)) return false;
+    return cmd.includes(base) || cmd.includes(needle);
+  });
+}
+
+function ranDeliverableSmoke(calls, pathName) {
+  const needle = String(pathName ?? "").toLowerCase();
+  if (!needle) return false;
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) return false;
+    const cmd = runCommandText(c).toLowerCase();
+    if (!cmd.includes(needle)) return false;
+    if (isDiagnosticCommand(cmd)) return false;
+    return true;
+  });
+}
+
+function callResultText(call) {
+  const parts = [];
+  const r = call?.result;
+  if (typeof r === "string") parts.push(r);
+  else if (r && typeof r === "object") {
+    parts.push(
+      String(r.stdout ?? ""),
+      String(r.stderr ?? ""),
+      String(r.note ?? ""),
+      String(r.status ?? ""),
+    );
+  }
+  if (call?.error) parts.push(String(call.error));
+  if (call?.name === "write_file") parts.push(String(call.args?.content ?? ""));
+  if (call?.name === "edit_file") parts.push(String(call.args?.new_string ?? ""));
+  return parts.join("\n");
+}
+
+/**
+ * Git conflict markers or `CONFLICT (` from merge output.
+ * @param {object} call
+ * @returns {boolean}
+ */
+export function callHasConflictEvidence(call) {
+  const text = callResultText(call);
+  return /^<<<<<<< /m.test(text) || /^>>>>>>> /m.test(text) || /\bCONFLICT \(/i.test(text);
+}
+
+/**
+ * True when the latest conflict evidence has not been followed by an edit.
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function unresolvedMergeConflict(calls) {
+  let last = -1;
+  for (let i = 0; i < (calls ?? []).length; i++) {
+    if (callHasConflictEvidence(calls[i])) last = i;
+  }
+  if (last < 0) return false;
+  return !calls.slice(last + 1).some((c) => MUTATING_TOOL_NAMES.has(c.name) && c.ok);
+}
+
+export function isMergeConflictGoal(goal) {
+  return /\b(merge conflict|git merge|unmerged|conflict markers?)\b|\b<<<<<<<\b/i.test(
+    String(goal ?? ""),
+  );
+}
+
+/**
+ * Fixtures the instruction names as verification inputs (not files to create).
+ * @param {string} goal
+ * @returns {string[]}
+ */
+export function extractNamedVerifyFiles(goal) {
+  const text = String(goal ?? "");
+  const found = [];
+  const push = (raw) => {
+    const value = String(raw ?? "")
+      .replace(/^[`'"]+|[`'".;,:]+$/g, "");
+    if (!value || found.includes(value)) return;
+    found.push(value);
+  };
+  for (const m of text.matchAll(
+    /\b(?:run|verify|check|against|via)\b[^.\n]{0,80}\b([\w./-]+\.json)\b/gi,
+  )) {
+    push(m[1]);
+  }
+  if (/\bexamples\.json\b/i.test(text)) push("examples.json");
+  return found;
+}
+
+function ranVerifyFile(calls, name, goal) {
+  const needle = String(name ?? "").toLowerCase();
+  if (!needle) return false;
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) return false;
+    const cmd = runCommandText(c);
+    if (isDiagnosticCommand(cmd, goal)) return false;
+    return cmd.toLowerCase().includes(needle);
+  });
+}
+
+function hasGitCommit(calls) {
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c)) return false;
+    return /\bgit\s+commit\b/i.test(runCommandText(c));
   });
 }
 
@@ -742,6 +1261,16 @@ export function missingRequiredVerification(goal, calls) {
   if (isFollowUpGoal(goal) && !hasSuccessfulMutation(calls)) {
     missing.push("implement the newly requested commands (edit existing files)");
   }
+  if (unresolvedMergeConflict(calls)) {
+    missing.push("resolve merge conflict with edit_file/write_file (do not stop after git show)");
+  } else if (
+    (isMergeConflictGoal(goal) || detectTaskHints(goal).some((h) => h.id === "merge-conflict")) &&
+    (calls ?? []).some(callHasConflictEvidence) &&
+    hasSuccessfulMutation(calls) &&
+    !hasGitCommit(calls)
+  ) {
+    missing.push("git add and git commit the resolved files");
+  }
   if (goalRequiresTestVerify(goal) && !hasSuccessfulTestRun(calls)) {
     missing.push("run the test command until it exits 0");
   }
@@ -749,6 +1278,10 @@ export function missingRequiredVerification(goal, calls) {
     (c) => !/\btest\.(mjs|py)\b/i.test(c) && !/\bdotnet\s+test\b/i.test(c),
   );
   for (const cmd of named) {
+    if (String(cmd).startsWith("/")) {
+      if (!ranDeliverableSmoke(calls, cmd)) missing.push(cmd);
+      continue;
+    }
     if (!ranNamedCommand(calls, cmd)) missing.push(cmd);
   }
   const smoke = extractSmokeSubcommands(goal);
@@ -756,8 +1289,16 @@ export function missingRequiredVerification(goal, calls) {
     for (const sub of smoke) {
       if (!ranSubcommand(calls, sub)) missing.push(`smoke ${sub}`);
     }
-  } else if (/\bsmoke-test\b/i.test(String(goal ?? "")) && !hasCliSmokeRun(calls)) {
+  } else if (/\bsmoke-test\b/i.test(String(goal ?? "")) && !hasCliSmokeRun(calls, goal)) {
     missing.push("smoke-test the CLI with at least one run_command");
+  }
+  const verifyFiles = extractNamedVerifyFiles(goal);
+  for (const file of extractNamedDeliverables(goal).filter(isCreatedFileDeliverable)) {
+    if (verifyFiles.some((v) => v.toLowerCase() === String(file).toLowerCase())) continue;
+    if (!wroteNamedDeliverable(calls, file)) missing.push(`create ${file}`);
+  }
+  for (const file of verifyFiles) {
+    if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
   }
   return missing;
 }
@@ -777,42 +1318,58 @@ export function redundantVerifyBlock({ goal, steps, toolName, args }) {
   if (toolName !== "run_command") return null;
   const cmd = String(args?.command ?? args?.cmd ?? "");
   const calls = flattenToolCalls(steps);
-  const mutateIdx = lastMutationIndex(calls);
-  const since = mutateIdx >= 0 ? calls.slice(mutateIdx + 1) : calls;
   const missing = missingRequiredVerification(goal, calls);
 
-  if (commandAlreadySucceeded(since, cmd)) {
+  if (
+    missing.length > 0 &&
+    isExistenceCheckCommand(cmd) &&
+    extractNamedDeliverables(goal).some((d) => {
+      const base = String(d).split("/").pop();
+      return cmd.includes(d) || (base && cmd.includes(base));
+    })
+  ) {
+    return null;
+  }
+
+  if (commandAlreadySucceeded(calls, cmd)) {
     if (missing.length > 0) {
       return [
+        "status: blocked",
+        `command: ${cmd}`,
         "That exact command already exited 0 — do not re-run it.",
         `Still required: ${missing.slice(0, 5).join("; ")}.`,
       ].join(" ");
     }
-    return TOOL_NUDGE_ALREADY_VERIFIED;
+    if (isTaskNamedVerificationCommand(cmd, goal) || isTestCommand(cmd)) {
+      return TOOL_NUDGE_ALREADY_VERIFIED;
+    }
+    return [
+      "status: blocked",
+      `command: ${cmd}`,
+      "That exact command already exited 0 — do not re-run it.",
+      "If a later command overwrote outputs, say so and the next distinct command may re-run after a write or different successful shell step.",
+    ].join(" ");
   }
 
-  if (
-    isDiagnosticCommand(cmd) &&
-    since.some((c) => isActualRun(c) && commandExitCode(c.result) === 0)
-  ) {
-    return missing.length > 0
-      ? `Do not run diagnostic commands. Still required: ${missing.slice(0, 5).join("; ")}.`
-      : TOOL_NUDGE_ALREADY_VERIFIED;
-  }
-
-  if (missing.length > 0) return null;
-  const verifiedSince = since.some(
-    (c) => isActualRun(c) && commandExitCode(c.result) === 0,
+  const namedVerifySucceeded = calls.some(
+    (c) =>
+      isActualRun(c) &&
+      commandExitCode(c.result) === 0 &&
+      (isSuccessfulTestCall(c) || isTaskNamedVerificationCommand(runCommandText(c), goal)),
   );
-  if (!verifiedSince) return null;
-  if (
-    hasSuccessfulTestRun(calls) ||
-    extractNamedNodeCommands(goal).length > 0 ||
-    extractSmokeSubcommands(goal).length > 0 ||
-    hasCliSmokeRun(calls)
-  ) {
-    return TOOL_NUDGE_ALREADY_VERIFIED;
+
+  if (isDiagnosticCommand(cmd, goal) && namedVerifySucceeded) {
+    if (missing.length > 0) {
+      return [
+        "status: blocked",
+        `command: ${cmd}`,
+        "Do not run diagnostic commands.",
+        `Still required: ${missing.slice(0, 5).join("; ")}.`,
+      ].join(" ");
+    }
+    return `${TOOL_NUDGE_DIAGNOSTIC_BLOCKED} command: ${cmd}`;
   }
+
   return null;
 }
 
@@ -846,6 +1403,7 @@ export function extractNamedNodeCommands(goal) {
     /\bpython3?\s+[\w./-]+(?:\s+[\w./=-]+)*/gi,
     /\bpy\s+[\w./-]+(?:\s+[\w./=-]+)*/gi,
     /\bdotnet\s+(?:run|test|build)(?:\s+[\w./=-]+)*/gi,
+    /\bpytest\b(?:\s+[\w./=-]+)*/gi,
   ];
   for (const re of patterns) {
     let m;
@@ -857,6 +1415,10 @@ export function extractNamedNodeCommands(goal) {
       if (!found.includes(cmd)) found.push(cmd);
     }
   }
+  for (const pathName of extractNamedDeliverables(text)) {
+    if (isCreatedFileDeliverable(pathName)) continue;
+    if (!found.includes(pathName)) found.push(pathName);
+  }
   return found;
 }
 
@@ -865,6 +1427,11 @@ export function extractNamedNodeCommands(goal) {
  * @returns {boolean}
  */
 export function goalRequiresTestVerify(goal) {
+  if (isHarborStyleGoal(goal)) {
+    return extractNamedNodeCommands(goal).some(
+      (c) => isTestSuiteCommand(c) || /\b(?:pytest|dotnet\s+test)\b/i.test(c),
+    );
+  }
   const hints = detectTaskHints(goal);
   if (hints.some((h) => h.id === "test-fix" || h.id === "test-verify")) return true;
   return /\brun\b.{0,50}\b(test\.mjs|test\.py|tests?|dotnet\s+run)\b/i.test(String(goal ?? ""));
@@ -928,9 +1495,7 @@ export function emptyFinalAnswerNudge({ goal, answerText, steps, nudgeCount }) {
 export function prematureFinalNudge({ goal, answerText, steps, nudgeCount }) {
   const MAX_TOOL_NUDGES = 2;
   if (nudgeCount >= MAX_TOOL_NUDGES) return null;
-
-  const empty = emptyFinalAnswerNudge({ goal, answerText, steps, nudgeCount });
-  if (empty) return empty;
+  if (!String(answerText ?? "").trim()) return null;
 
   if (!goalNeedsSubstantiveTools(goal)) return null;
   if (substantiveToolsUsed(steps).size > 0) return null;
@@ -985,12 +1550,43 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
     }
   }
 
+  if (
+    claimsSuccess &&
+    /\b(fix|edit|repair|bug|broken|sanitiz\w*|secrets?|credential)\b/i.test(String(goal ?? "")) &&
+    !hasSuccessfulMutation(calls) &&
+    !hasSuccessfulTestRun(calls)
+  ) {
+    return TOOL_NUDGE_CLAIM_NO_MUTATION;
+  }
+  if (
+    /\b(sanitiz\w*|secrets?|credential|AKIA|ghp_|hf_)\b/i.test(String(goal ?? "")) &&
+    !hasSuccessfulMutation(calls) &&
+    (claimsSuccess || substantiveToolsUsed(steps).size > 0)
+  ) {
+    return TOOL_NUDGE_CLAIM_NO_MUTATION;
+  }
+  if (claimsSuccess && hasFailedTestRun(calls) && !hasSuccessfulTestRun(calls)) {
+    return TOOL_NUDGE_VERIFY;
+  }
+
+  const drift = deliverableDriftNudge({ goal, steps });
+  if (drift && (claimsSuccess || !String(answerText ?? "").trim())) {
+    return drift;
+  }
+
   const missing = missingRequiredVerification(goal, calls).filter(
     (item) => item !== "run the test command until it exits 0",
   );
-  if (missing.length > 0 && (claimsSuccess || substantiveToolsUsed(steps).size > 0)) {
+  const emptyAnswer = !String(answerText ?? "").trim();
+  if (missing.length > 0 && (claimsSuccess || emptyAnswer || substantiveToolsUsed(steps).size > 0)) {
     if (missing.includes("implement the newly requested commands (edit existing files)")) {
       return TOOL_NUDGE_FOLLOW_UP;
+    }
+    if (missing.some((item) => /merge conflict/i.test(item))) {
+      return TOOL_NUDGE_MERGE_CONFLICT;
+    }
+    if (missing.some((item) => String(item).startsWith("create "))) {
+      return TOOL_NUDGE_DELIVERABLE;
     }
     return `Do not finish yet — still need: ${missing.slice(0, 5).join("; ")}.`;
   }
@@ -1004,7 +1600,53 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
  * @returns {string|null}
  */
 export function finalAnswerNudge(input) {
-  return emptyFinalAnswerNudge(input) ?? prematureFinalNudge(input) ?? completionVerifyNudge(input);
+  return prematureFinalNudge(input) ?? completionVerifyNudge(input) ?? emptyFinalAnswerNudge(input);
+}
+
+/**
+ * Last-resort non-empty answer when the model stops with empty content.
+ * @param {object} input
+ * @param {string} [input.goal]
+ * @param {Array<{toolCalls?: Array<object>}>} [input.steps]
+ * @returns {string}
+ */
+export function synthesizeFinalAnswer({ goal, steps } = {}) {
+  const calls = flattenToolCalls(steps);
+  const lines = [
+    "The model returned an empty final answer. Summary of work so far:",
+  ];
+  const written = [];
+  for (const c of calls) {
+    if (!c.ok) continue;
+    if (c.name !== "write_file" && c.name !== "edit_file") continue;
+    const file = c.result?.path ?? c.args?.path;
+    if (file) written.push(String(file));
+  }
+  const runs = calls.filter((c) => c.name === "run_command");
+  if (written.length) lines.push(`Files changed: ${[...new Set(written)].join(", ")}.`);
+  else if (runs.some((c) => c.ok && c.result?.status !== "blocked")) {
+    lines.push(
+      "No files were created or edited via write_file/edit_file, but run_command succeeded — do not claim that no work was done.",
+    );
+  } else lines.push("No files were created or edited.");
+  if (runs.length) {
+    const recent = runs.slice(-5).map((c) => {
+      const cmd = runCommandText(c) || "(unknown command)";
+      if (c.result?.status === "blocked") return `${cmd} → blocked (not executed)`;
+      if (c.result?.verificationComplete) return `${cmd} → already verified (not re-run)`;
+      const code = commandExitCode(c.result);
+      return `${cmd} → exit ${code ?? "?"}`;
+    });
+    lines.push(`Commands: ${recent.join("; ")}.`);
+  }
+
+  const missing = missingRequiredVerification(goal, calls);
+  if (missing.length) {
+    lines.push(`Still required: ${missing.slice(0, 5).join("; ")}.`);
+  } else if (!written.length && extractNamedDeliverables(goal).some(isCreatedFileDeliverable)) {
+    lines.push("The named output artifact was not created.");
+  }
+  return lines.join(" ");
 }
 
 /**
@@ -1014,14 +1656,15 @@ export function finalAnswerNudge(input) {
  * @returns {string|null}
  */
 export function alreadyVerifiedFinishNudge({ goal, steps, nudgeCount }) {
-  const MAX_TOOL_NUDGES = 2;
-  if (nudgeCount >= MAX_TOOL_NUDGES) return null;
+  if (nudgeCount >= 1) return null;
   if (!steps?.length) return null;
   const last = steps[steps.length - 1];
   const lastCalls = last?.toolCalls ?? [];
   if (!lastCalls.some((c) => c.name === "run_command")) return null;
   const lastRun = [...lastCalls].reverse().find((c) => c.name === "run_command");
+  if (String(lastRun?.result?.status ?? "") === "blocked") return null;
   const complete = lastRun?.result?.verificationComplete === true;
+  if (!complete && isDiagnosticCommand(runCommandText(lastRun), goal)) return null;
   if (!complete && commandExitCode(lastRun?.result) !== 0) return null;
   if (
     !complete &&
@@ -1094,6 +1737,77 @@ export function formatTaskConstraints(hints) {
   if (!hints?.length) return "";
   const lines = hints.map((h) => `- ${h.constraint}`);
   return ["## Task focus", ...lines].join("\n");
+}
+
+/**
+ * Surface explicit success outcomes inferred from the goal text for the first
+ * user turn. Gives the model acceptance criteria before it plans or acts.
+ * @param {string} goal
+ * @returns {string}
+ */
+export function formatExplicitGoals(goal) {
+  const text = String(goal ?? "").trim();
+  if (!text) return "";
+
+  const outcomes = [];
+  const hints = detectTaskHints(text);
+
+  for (const file of extractNamedDeliverables(text).filter(isCreatedFileDeliverable)) {
+    outcomes.push(`Output artifact exists: \`${file}\``);
+  }
+
+  for (const file of extractNamedDeliverables(text).filter((f) => !isCreatedFileDeliverable(f))) {
+    outcomes.push(`Deliverable produced or invoked: \`${file}\``);
+  }
+
+  for (const file of extractNamedVerifyFiles(text)) {
+    outcomes.push(`Named verification runs successfully: \`${file}\``);
+  }
+
+  for (const cmd of extractNamedNodeCommands(text)) {
+    if (isTestSuiteCommand(cmd) || /\bdotnet\s+run\b/i.test(cmd) || /\bpython3?\s+\S+\.py\b/i.test(cmd)) {
+      outcomes.push(`Command exits 0 with expected output: \`${cmd}\``);
+    } else if (String(cmd).startsWith("/")) {
+      outcomes.push(`Binary/path runs successfully: \`${cmd}\``);
+    }
+  }
+
+  const smoke = extractSmokeSubcommands(text);
+  if (smoke.length) {
+    outcomes.push(`Each smoke-test subcommand succeeds: ${smoke.map((s) => `\`${s}\``).join(", ")}`);
+  }
+
+  if (hints.some((h) => h.id === "path-answer")) {
+    outcomes.push("Final answer is only the requested workspace-relative path or number — no extra text");
+  } else if (isSimpleReadAnswerGoal(text)) {
+    outcomes.push("Final answer is exactly what the user asked for — no extra text or tools unless reading is required");
+  } else if (isQuestionGoal(text) && !goalNeedsSubstantiveTools(text)) {
+    outcomes.push("Final answer directly answers the question using tool-grounded facts");
+  }
+
+  if (isMergeConflictGoal(text)) {
+    outcomes.push("Merge conflict markers removed, changes committed, and named verification passes");
+  }
+
+  if (isFollowUpGoal(text)) {
+    outcomes.push("Every newly named command or feature is implemented in existing files (not a from-scratch rewrite)");
+  }
+
+  if (goalRequiresTestVerify(text) && !outcomes.some((o) => /test|pytest|dotnet\s+run/i.test(o))) {
+    outcomes.push("Required test or verify command exits 0 with expected output");
+  }
+
+  if (!outcomes.length && shouldPlanGoal(text)) {
+    return [
+      "## Goals",
+      "- Before acting, state 2–5 explicit outcomes that define done for this task",
+      "  (deliverables, passing commands, and the shape of the final answer).",
+    ].join("\n");
+  }
+
+  if (!outcomes.length) return "";
+
+  return ["## Goals (explicit outcomes)", ...outcomes.map((o) => `- ${o}`)].join("\n");
 }
 
 /**

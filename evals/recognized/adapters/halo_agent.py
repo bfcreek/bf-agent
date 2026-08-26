@@ -109,7 +109,7 @@ class HaloAgent(BaseInstalledAgent):
             "HALO_MAX_COMMAND_TIMEOUT": str(self._max_command_timeout),
         }
         cmd = (
-            "set -euo pipefail; "
+            "set -uo pipefail; "
             f"node {shlex.quote(CLI_PATH)} "
             f"--mode agent --quiet --no-index --no-plan "
             f"--session harbor --cwd \"$PWD\" "
@@ -118,7 +118,11 @@ class HaloAgent(BaseInstalledAgent):
             f"--max-steps {self._max_steps} "
             f"--num-ctx {self._num_ctx} "
             f"-- \"$(cat {shlex.quote(remote_instruction)})\"; "
-            "cp -f .halo-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || true"
+            "agent_code=$?; "
+            "cp -f .halo-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || true; "
+            # CLI exit 2 is max-steps: still a scored attempt, not a Harbor crash.
+            "if [ \"$agent_code\" -eq 2 ]; then exit 0; fi; "
+            "exit \"$agent_code\""
         )
         await self.exec_as_agent(environment, command=cmd, env=env)
 

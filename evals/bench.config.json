@@ -1,5 +1,5 @@
 {
-  "models": ["kimi-k2.7-code:cloud"],
+  "models": ["auto"],
   "baseUrl": "http://127.0.0.1:11434",
   "maxSteps": 15,
   "timeoutSeconds": 240,

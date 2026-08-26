@@ -237,8 +237,32 @@ export function registerSearchTools(registry, { workspaceRoot }) {
             "occurrences. Re-run with a higher max_results or a narrower pattern/path to see the rest",
         );
       if (scanTruncated) notes.push(`only the first ${MAX_FILES_SCANNED} files were scanned`);
+      const secretHits = matches.filter((line) =>
+        /\b(AKIA[0-9A-Z]{8,}|ghp_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,})\b|=\s*['"]?[A-Za-z0-9/+=]{16,}/.test(
+          line,
+        ),
+      );
+      if (secretHits.length > 0) {
+        notes.push(
+          `${secretHits.length} hit(s) look like assigned secrets (AKIA/ghp/hf/'=' values) — ` +
+            "edit_file those values out, then re-grep; truncated lines still show the assignment side",
+        );
+      }
+      // Prefer keeping assignment values visible when truncating long secret lines.
+      const displayMatches = matches.map((line) => {
+        if (line.length <= MAX_LINE_CHARS) return line;
+        if (!/AKIA|ghp_|hf_|\w+\s*=/.test(line)) return line;
+        const idx = line.indexOf(": ");
+        if (idx < 0) return line.slice(0, MAX_LINE_CHARS);
+        const head = line.slice(0, idx + 2);
+        const body = line.slice(idx + 2);
+        if (body.length <= MAX_LINE_CHARS - 20) return line;
+        return `${head}${body.slice(0, 40)}…${body.slice(-80)}`;
+      });
       const header = `${matches.length} match(es) in ${filesWithMatches} file(s)${notes.length ? ` (${notes.join("; ")})` : ""}:`;
-      const lines = globFallbackNote ? [globFallbackNote, header, ...matches] : [header, ...matches];
+      const lines = globFallbackNote
+        ? [globFallbackNote, header, ...displayMatches]
+        : [header, ...displayMatches];
       return truncateOutput(lines.join("\n"));
     },
   });
@@ -248,8 +272,9 @@ export function registerSearchTools(registry, { workspaceRoot }) {
     description:
       "Find files in the workspace by name. Glob patterns: '*' within a path " +
       "segment, '**' across segments, '?' one character. A pattern without '/' " +
-      "matches file names anywhere in the tree (e.g. '*.test.mjs'); a pattern " +
-      "with '/' matches the whole relative path (e.g. 'src/**/*.mjs').",
+      "matches file names anywhere (e.g. '*.test.mjs' or substring 'filter.py'). " +
+      "A pattern with '/' matches the relative path (e.g. 'src/**/*.mjs'). " +
+      "Plain text without glob metacharacters is a case-insensitive substring of the basename.",
     parameters: {
       type: "object",
       properties: {
@@ -270,8 +295,17 @@ export function registerSearchTools(registry, { workspaceRoot }) {
       const { files, truncated } = await collectFiles(root, start);
       const globRe = globToRegExp(pattern);
       const matchWholePath = pattern.includes("/");
+      const globMeta = /[*?\[]/.test(pattern);
+      const needle = pattern.replace(/\\/g, "/").toLowerCase();
       const found = files
-        .filter((rel) => (matchWholePath ? globRe.test(rel) : globRe.test(rel.split("/").pop())))
+        .filter((rel) => {
+          const base = rel.split("/").pop() ?? rel;
+          if (globMeta) {
+            return matchWholePath ? globRe.test(rel) : globRe.test(base);
+          }
+          if (matchWholePath) return rel.toLowerCase().includes(needle);
+          return base.toLowerCase().includes(needle);
+        })
         .slice(0, MAX_FOUND_FILES);
       if (found.length === 0) {
         return `No files matching '${pattern}' in ${files.length} file(s) scanned.`;

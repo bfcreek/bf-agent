@@ -45,10 +45,17 @@ export async function buildEnvironmentContext({
   const lines = [
     "## Environment",
     `- Workspace root: ${root} — file tool paths are relative to this directory.`,
+    `- Do not prefix paths with the workspace folder name. If the root is /app, write_file "filter.py" not "app/filter.py" or "/app/filter.py" (those create /app/app/filter.py).`,
+    `- Multi-line scripts: write_file a path then run_command that path — do not put large heredocs or nested quotes inside run_command JSON.`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
     ...(isWindows
       ? [
           "- Shell scripts: write PowerShell (.ps1). Do not default to bash or .sh — bash is not the default shell and may not be installed. Chain commands with ';' not '&&'.",
+        ]
+      : []),
+    ...(names.some((n) => n === ".git" || n === ".git/")
+      ? [
+          "- This workspace is a git repository. After a merge CONFLICT, resolve <<<<<<< markers with edit_file, then git add/commit, then verify — do not stop after git show of both sides.",
         ]
       : []),
     `- Node.js: ${process.version}`,

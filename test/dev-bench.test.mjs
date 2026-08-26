@@ -67,6 +67,78 @@ test("parseCliArgs merges file config and CLI overrides", () => {
   assert.deepEqual(opts.models, ["qwen3-coder:30b"]);
 });
 
+test("parseCliArgs accepts --tier-preset", () => {
+  const opts = parseCliArgs(["--tier-preset", "hybrid"], defaultConfig());
+  assert.equal(opts.tierPreset, "hybrid");
+});
+
+test("parseCliArgs rejects unknown --tier-preset", () => {
+  assert.throws(
+    () => parseCliArgs(["--tier-preset", "yolo"], defaultConfig()),
+    /--tier-preset|Unknown tier preset/,
+  );
+});
+
+test("loadBenchOptions resolves tier models from models config when bench omits them", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-user-tier-"));
+  const modelsConfigPath = path.join(dir, "models.yaml");
+  const benchConfigPath = path.join(dir, "bench.config.json");
+  const previous = { ...process.env };
+  process.env.HALO_MODELS_CONFIG = modelsConfigPath;
+  try {
+    await writeFile(
+      modelsConfigPath,
+      `preset: cloud
+`,
+      "utf8",
+    );
+    await writeFile(
+      benchConfigPath,
+      JSON.stringify({ models: ["auto"], progression: { enabled: false, maxTier: 5 } }),
+      "utf8",
+    );
+    const { options } = await loadBenchOptions(["--config", benchConfigPath, "--flat"]);
+    assert.ok(options.tierModels?.length);
+    assert.ok(options.tierModels.every((band) => band.model.includes(":cloud")));
+  } finally {
+    process.env = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadBenchOptions --tier-preset overrides models config bands", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-cli-tier-"));
+  const modelsConfigPath = path.join(dir, "models.yaml");
+  const benchConfigPath = path.join(dir, "bench.config.json");
+  const previous = { ...process.env };
+  process.env.HALO_MODELS_CONFIG = modelsConfigPath;
+  try {
+    await writeFile(
+      modelsConfigPath,
+      `bands:
+  - model: user-only
+`,
+      "utf8",
+    );
+    await writeFile(
+      benchConfigPath,
+      JSON.stringify({ models: ["auto"], progression: { enabled: false, maxTier: 5 } }),
+      "utf8",
+    );
+    const { options } = await loadBenchOptions([
+      "--config",
+      benchConfigPath,
+      "--flat",
+      "--tier-preset",
+      "cloud",
+    ]);
+    assert.ok(options.tierModels?.every((band) => band.model.includes(":cloud")));
+  } finally {
+    process.env = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseCliArgs enables progression from config by default", () => {
   const file = defaultConfig();
   const opts = parseCliArgs([], file);

@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 
 import { looksVacuousCliStdout } from "../prompt-enhancements.mjs";
-import { goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
+import { conflictMarkerNote, goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
 
 function positiveIntEnv(name, fallback) {
@@ -99,6 +99,17 @@ export function findInteractiveCommand(command) {
       return segment;
     }
   }
+  return null;
+}
+
+/**
+ * Shell heredocs in tool-call JSON usually arrive mangled. Prefer a script file.
+ * @param {string} command
+ * @returns {string|null}
+ */
+export function findHeredocCommand(command) {
+  const text = String(command ?? "");
+  if (/<<-?\s*['"]?\w+/.test(text) || /python3?\s+-\s*<</.test(text)) return text;
   return null;
 }
 
@@ -317,7 +328,11 @@ export function registerShellTools(registry, { workspaceRoot }) {
       (IS_WINDOWS
         ? "On Windows do not invoke bash or .sh unless the user asked for bash; write and run .ps1 instead. "
         : "") +
-      `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s).`,
+      `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s). ` +
+      "For servers that must keep running, start them in the background " +
+      "(`nohup cmd >server.log 2>&1 &` on POSIX, or Start-Process on Windows) so they do not " +
+      "burn the timeout; then check the port with a short command. " +
+      "Do not use shell heredocs (`python - <<'EOF'`); write a script file and run that instead.",
     parameters: {
       type: "object",
       properties: {
@@ -343,6 +358,14 @@ export function registerShellTools(registry, { workspaceRoot }) {
           `'${interactive}' starts an interactive REPL/shell, which hangs until the timeout ` +
             "because commands run with no input. Run a script file instead (e.g. node script.mjs, " +
             'python script.py) or pass inline code (e.g. node -e "...", python -c "...").',
+        );
+      }
+      const heredoc = findHeredocCommand(command);
+      if (heredoc) {
+        throw new Error(
+          "This command uses a shell heredoc (`<<`), which is unreliable in tool-call JSON. " +
+            "write_file a script (e.g. script.py) and run `python script.py` instead. " +
+            "Do not retry the same heredoc.",
         );
       }
       const posixShell = windowsBashCommandIssue(command, registry.runContext?.goal);
@@ -437,13 +460,25 @@ function runCommand(command, { cwd, timeoutMs }) {
         : code === 0
           ? "success"
           : `FAILED with exit code ${code}`;
-      const note = timedOut ? null : cliEmptyStdoutNote(command, code, stdout);
+      const notes = timedOut
+        ? []
+        : [cliEmptyStdoutNote(command, code, stdout), conflictMarkerNote(`${stdout}\n${stderr}`)].filter(
+            Boolean,
+          );
+      const note = notes.length > 0 ? notes.join(" ") : null;
+      const outLimit = 12_000;
+      const errLimit = 8_000;
+      const build = /\b(make|cmake|gcc|g\+\+|cargo|\.\/configure)\b/i.test(command);
+      const cappedStdout = truncateMiddle(stdout, outLimit);
+      const cappedStderr = truncateMiddle(stderr, errLimit);
+      const io = build && stderr
+        ? { stderr: cappedStderr, stdout: cappedStdout }
+        : { stdout: cappedStdout, stderr: cappedStderr };
       resolve({
         status,
         exitCode: code,
         timedOut,
-        stdout: truncateMiddle(stdout),
-        stderr: truncateMiddle(stderr),
+        ...io,
         ...(note ? { note } : {}),
       });
     };

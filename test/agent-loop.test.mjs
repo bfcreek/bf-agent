@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 
-import { AgentLoop, isToolCallParseError } from "../src/agent-loop.mjs";
+import { AgentLoop, DEFAULT_SYSTEM_PROMPT, isToolCallParseError } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /** Client that replays a scripted sequence of assistant messages. */
@@ -46,6 +46,17 @@ function makeRegistry() {
 }
 
 const toolCall = (name, args) => ({ function: { name, arguments: args } });
+
+test("system prompt covers build pipelines, artifacts, and tool-call discipline", () => {
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Goals:/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /acceptance criteria/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Environment probes \(apt-get/i);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Exit 0 alone does not mean/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Keep reasoning in thinking/i);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /not app\/filter\.py/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Only use[\s\S]*search_project if that tool is listed/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /git merge CONFLICT|<<<<<<< markers/i);
+});
 
 test("plain answer with no tool calls completes in one step", async () => {
   const client = new FakeClient([{ role: "assistant", content: "hi there" }]);
@@ -170,7 +181,7 @@ test("stops at maxSteps and asks for a plain-text wrap-up answer", async () => {
   assert.match(client.calls[2].messages.at(-1).content, /last tool step|diagnosed/i);
 });
 
-test("wrap-up failure still returns the max-steps result with empty text", async () => {
+test("wrap-up failure still returns max-steps with a synthesized summary", async () => {
   const endless = { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] };
   // Script exhausts after the loop steps, so the wrap-up call throws.
   const client = new FakeClient([endless, endless]);
@@ -179,7 +190,7 @@ test("wrap-up failure still returns the max-steps result with empty text", async
   const result = await loop.run("loop forever");
 
   assert.equal(result.stopReason, "max-steps");
-  assert.equal(result.text, "");
+  assert.match(result.text, /empty final answer|No files were created/i);
   assert.equal(result.steps.length, 2);
 });
 
@@ -280,7 +291,9 @@ test("after a passing test run, extra verify and diagnostic commands are not exe
   assert.equal(result.steps[1].toolCalls[0].result.verificationComplete, true);
   assert.match(result.steps[1].toolCalls[0].result.note, /Verification already succeeded/);
   assert.equal(result.steps[2].toolCalls[0].ok, true);
-  assert.equal(result.steps[2].toolCalls[0].result.verificationComplete, true);
+  assert.equal(result.steps[2].toolCalls[0].result.status, "blocked");
+  assert.equal(result.steps[2].toolCalls[0].result.verificationComplete, undefined);
+  assert.match(result.steps[2].toolCalls[0].result.command, /node -v/);
   assert.equal(result.text, "done");
 });
 
@@ -390,7 +403,11 @@ test("tool-call parse 500s are nudged and recovered", async () => {
   const result = await loop.run("add 1 and 2");
 
   assert.equal(result.text, "3");
-  assert.equal(result.steps[0].toolCalls[0].result, 3);
+  const parseStep = result.steps.find((s) => s.kind === "tool-parse-error");
+  assert.ok(parseStep, "expected a logged tool-parse-error step");
+  assert.match(parseStep.content, /error parsing tool call/i);
+  const toolStep = result.steps.find((s) => s.kind === "tool-calls");
+  assert.equal(toolStep.toolCalls[0].result, 3);
   assert.equal(phase, 3);
 });
 
@@ -577,8 +594,25 @@ test("task hints are injected into the user message", async () => {
   await loop.run("fix the failing test in auth.spec.mjs");
 
   const user = client.calls[0].messages.find((m) => m.role === "user");
+  assert.match(user.content, /## Goals/);
   assert.match(user.content, /## Task focus/);
   assert.match(user.content, /Mandatory first step/);
+});
+
+test("explicit goals are injected for artifact-creation tasks", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "done" },
+    { role: "assistant", content: "done" },
+    { role: "assistant", content: "done" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, taskHints: false });
+
+  await loop.run("Write the output fasta file titled primers.fasta from sequences.fasta.");
+
+  const user = client.calls[0].messages.find((m) => m.role === "user");
+  assert.match(user.content, /## Goals \(explicit outcomes\)/);
+  assert.match(user.content, /primers\.fasta/);
+  assert.doesNotMatch(user.content, /## Task focus/);
 });
 
 test("planning and hints can be disabled", async () => {
@@ -804,4 +838,100 @@ test("ambiguous edit_file injects a re-read and per-function plan nudge", async 
       ),
     ),
   );
+});
+
+test("apt-get --version does not block later install/build commands", async () => {
+  const ran = [];
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "run_command",
+    execute: ({ command }) => {
+      ran.push(command);
+      return { status: "success", exitCode: 0, stdout: `${command} ok\n`, stderr: "" };
+    },
+  });
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "apt-get --version" })],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "apt-get install -y ocaml" })],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "wget https://example.com/compcert.tgz" })],
+    },
+    { role: "assistant", content: "installed deps" },
+    { role: "assistant", content: "Build is still in progress; /tmp/CompCert/ccomp is not ready." },
+    { role: "assistant", content: "Stopping here; ccomp was not produced." },
+  ]);
+  const loop = new AgentLoop({ client, registry, planning: false });
+  const result = await loop.run(
+    "Under /tmp/CompCert/, build CompCert from source. Ensure it can be invoked through /tmp/CompCert/ccomp.",
+  );
+  assert.deepEqual(ran, [
+    "apt-get --version",
+    "apt-get install -y ocaml",
+    "wget https://example.com/compcert.tgz",
+  ]);
+  assert.equal(result.steps[0].toolCalls[0].result.verificationComplete, undefined);
+  assert.match(result.text, /ccomp|Stopping/i);
+  assert.ok(
+    client.calls.some((call) =>
+      call.messages.some((m) => m.role === "user" && /ccomp|still need/i.test(m.content)),
+    ),
+  );
+});
+
+test("write_file still runs after a passing test verification", async () => {
+  const wrote = [];
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "run_command",
+    execute: () => ({ status: "success", exitCode: 0, stdout: "ok\n", stderr: "" }),
+  });
+  registry.register({
+    name: "write_file",
+    execute: ({ path: p, content }) => {
+      wrote.push(p);
+      return { path: p, bytes: String(content ?? "").length };
+    },
+  });
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "node test.mjs" })],
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("write_file", { path: "primers.fasta", content: ">fwd\nATGC\n" })],
+    },
+    { role: "assistant", content: "wrote primers.fasta" },
+  ]);
+  const loop = new AgentLoop({ client, registry, planning: false });
+  const result = await loop.run(
+    "The output fasta file should be titled primers.fasta. Also run node test.mjs.",
+  );
+  assert.deepEqual(wrote, ["primers.fasta"]);
+  assert.equal(result.text, "wrote primers.fasta");
+});
+
+test("empty final answers are synthesized instead of completing blank", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "" },
+    { role: "assistant", content: "" },
+    { role: "assistant", content: "" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+  const result = await loop.run("say hello");
+  assert.equal(result.stopReason, "completed");
+  assert.ok(result.text.trim().length > 0);
+  assert.match(result.text, /empty final answer/i);
 });

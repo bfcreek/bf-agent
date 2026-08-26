@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { replaceFlexible, replaceOnce, truncatedSourceIssue, suggestedUniqueSnippets, windowsBashScriptIssue } from "../src/tools/fs.mjs";
+import { nearbySnippet, normalizeWorkspaceRelativePath, replaceFlexible, replaceOnce, truncatedSourceIssue, suggestedUniqueSnippets, windowsBashScriptIssue } from "../src/tools/fs.mjs";
 
 let root;
 let registry;
@@ -43,6 +43,15 @@ async function assertFileUnchanged(relativePath, before, editResult) {
 test("replaceOnce treats dollar signs in the replacement literally", () => {
   assert.equal(replaceOnce("cost = OLD", "OLD", "$$100"), "cost = $$100");
   assert.equal(replaceOnce("use $& here", "$&", "literal"), "use literal here");
+});
+
+test("normalizeWorkspaceRelativePath strips /app and app/ prefixes", () => {
+  assert.equal(normalizeWorkspaceRelativePath("/app", "app/filter.py"), "filter.py");
+  assert.equal(normalizeWorkspaceRelativePath("/app", "/app/filter.py"), "filter.py");
+  assert.equal(normalizeWorkspaceRelativePath("/app", "filter.py"), "filter.py");
+  const snippet = nearbySnippet("alpha\n  target line\nomega\n", "target line");
+  assert.match(snippet, /Nearby file text/);
+  assert.match(snippet, /target line/);
 });
 
 test("replaceFlexible returns null for whitespace-only snippets", () => {

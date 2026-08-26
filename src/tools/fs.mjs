@@ -16,9 +16,35 @@ import {
 
 export const MAX_TOOL_OUTPUT_CHARS = 64_000;
 
+/** Git merge conflict start marker (must be at column 0). */
+export const CONFLICT_MARKER_RE = /^<<<<<<< /m;
+
+/**
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function containsConflictMarkers(text) {
+  const s = String(text ?? "");
+  return CONFLICT_MARKER_RE.test(s) || /^>>>>>>> /m.test(s);
+}
+
+/**
+ * Nudge appended when a file or command dump still has merge conflict markers.
+ * @param {string} text
+ * @returns {string|null}
+ */
+export function conflictMarkerNote(text) {
+  if (!containsConflictMarkers(text)) return null;
+  return (
+    "This output contains unresolved merge conflict markers (<<<<<<<). " +
+    "Do not stop after git show of both sides — edit_file or write_file to remove the markers, " +
+    "then git add and git commit, then run the named verification."
+  );
+}
+
 /**
  * Catch obviously truncated source before it lands on disk (unbalanced braces
- * or an unclosed string). Applied to .cs/.mjs/.js so a botched write_file
+ * or an unclosed string). Applied to .cs/.mjs/.js/.py so a botched write_file
  * cannot replace a good file with a fragment.
  *
  * @param {string} filePath
@@ -27,10 +53,16 @@ export const MAX_TOOL_OUTPUT_CHARS = 64_000;
  */
 export function truncatedSourceIssue(filePath, content) {
   const ext = path.extname(String(filePath ?? "")).toLowerCase();
-  if (![".cs", ".mjs", ".js"].includes(ext)) return null;
+  if (![".cs", ".mjs", ".js", ".py"].includes(ext)) return null;
   const text = String(content ?? "");
   if (!text.trim()) return null;
-  if (/\/\/\s*(\.\.\.|incomplete)|NotImplementedException/i.test(text)) {
+  if (ext !== ".py" && /\/\/\s*(\.\.\.|incomplete)|NotImplementedException/i.test(text)) {
+    return (
+      `Refused to write '${filePath}': content contains placeholder/incomplete stubs. ` +
+      "Write the full implementation and try again."
+    );
+  }
+  if (ext === ".py" && /raise NotImplementedError|#\s*\.\.\.\s*$/m.test(text)) {
     return (
       `Refused to write '${filePath}': content contains placeholder/incomplete stubs. ` +
       "Write the full implementation and try again."
@@ -41,7 +73,8 @@ export function truncatedSourceIssue(filePath, content) {
   if (!hasUnbalancedDelimiters(text)) return null;
   return (
     `Refused to write '${filePath}': the content looks truncated or syntactically incomplete ` +
-    "(unbalanced braces/parens or an unclosed string). Rewrite the full file and try again."
+    "(unbalanced braces/parens or an unclosed string). Rewrite the full file and try again." +
+    (ext === ".py" ? " Then run `python -m py_compile` on this path before finishing." : "")
   );
 }
 
@@ -170,8 +203,40 @@ function hasUnbalancedDelimiters(text) {
  * @param {string} [relativePath] Path from the model; defaults to the root.
  * @returns {string} Absolute path inside the root.
  */
+/**
+ * Strip workspace-folder prefixes so `app/foo` and `/app/foo` resolve to
+ * `foo` when the workspace root is `/app` (Harbor) instead of `/app/app/foo`.
+ * @param {string} root
+ * @param {string} relativePath
+ * @returns {string}
+ */
+export function normalizeWorkspaceRelativePath(root, relativePath) {
+  const raw = String(relativePath ?? ".").trim() || ".";
+  const rootAbs = path.resolve(root);
+  const unix = raw.replace(/\\/g, "/");
+  const posixRoot = rootAbs.replace(/\\/g, "/").replace(/\/$/, "");
+  const base = path.basename(rootAbs);
+
+  if (unix === posixRoot || unix === posixRoot + "/") return ".";
+  if (unix.startsWith(posixRoot + "/")) return unix.slice(posixRoot.length + 1) || ".";
+
+  if (path.isAbsolute(raw)) {
+    const abs = path.resolve(raw);
+    const rel = path.relative(rootAbs, abs);
+    if (rel === "") return ".";
+    if (!rel.startsWith("..") && !path.isAbsolute(rel)) return rel.replace(/\\/g, "/");
+  }
+
+  let rel = unix.replace(/^\.\//, "");
+  if (base && (rel === base || rel.startsWith(`${base}/`))) {
+    rel = rel === base ? "." : rel.slice(base.length + 1);
+  }
+  return rel || ".";
+}
+
 export function resolveWithinRoot(root, relativePath) {
-  const target = path.resolve(root, relativePath ?? ".");
+  const normalized = normalizeWorkspaceRelativePath(root, relativePath ?? ".");
+  const target = path.resolve(root, normalized);
   const rel = path.relative(root, target);
   if (rel !== "" && (rel.startsWith("..") || path.isAbsolute(rel))) {
     throw new Error(
@@ -196,7 +261,46 @@ export function truncateMiddle(text, limit = MAX_TOOL_OUTPUT_CHARS) {
   if (text.length <= limit) return text;
   const half = Math.floor(limit / 2);
   const omitted = text.length - half * 2;
-  return `${text.slice(0, half)}\n[... ${omitted} characters omitted ...]\n${text.slice(text.length - half)}`;
+  const bytes = Buffer.byteLength(text);
+  let extra = `${omitted} characters / ${bytes} bytes omitted`;
+  const trimmed = text.trim();
+  if (text.length <= 500_000 && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) extra += `; JSON array length ${parsed.length}`;
+      else if (parsed && typeof parsed === "object") {
+        const keys = Object.keys(parsed);
+        extra += `; JSON keys (${keys.length}): ${keys.slice(0, 12).join(", ")}${keys.length > 12 ? ", …" : ""}`;
+      }
+    } catch {
+      // not JSON
+    }
+  }
+  return `${text.slice(0, half)}\n[... ${extra} ...]\n${text.slice(text.length - half)}`;
+}
+
+/**
+ * Nearby file lines when old_string missed, so the model can copy exact text.
+ * @param {string} text
+ * @param {string} oldString
+ * @returns {string}
+ */
+export function nearbySnippet(text, oldString) {
+  const needle = String(oldString ?? "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .find((s) => s.length >= 4);
+  if (!needle) return "";
+  const probe = needle.slice(0, Math.min(40, needle.length));
+  const lines = String(text ?? "").split(/\n/);
+  const idx = lines.findIndex((l) => l.includes(probe));
+  if (idx < 0) return "";
+  const from = Math.max(0, idx - 2);
+  const to = Math.min(lines.length, idx + 3);
+  return (
+    `\n Nearby file text (lines ${from + 1}-${to}, copy exact whitespace into old_string):\n` +
+    lines.slice(from, to).join("\n")
+  );
 }
 
 async function similarPathHint(root, filePath) {
@@ -407,22 +511,33 @@ export function registerFileTools(registry, { workspaceRoot }) {
         path: { type: "string", description: "File path relative to the workspace root." },
         offset: {
           type: "integer",
-          description: "1-based line number to start reading from (optional).",
+          description: "1-based line number to start reading from (optional). Aliases: line_start, start_line.",
         },
         limit: { type: "integer", description: "Maximum number of lines to read (optional)." },
+        line_start: { type: "integer", description: "Alias for offset (1-based start line)." },
+        line_end: { type: "integer", description: "1-based inclusive end line (optional)." },
+        start_line: { type: "integer", description: "Alias for offset." },
+        end_line: { type: "integer", description: "Alias for line_end." },
       },
       required: ["path"],
     },
-    async execute({ path: filePath, offset, limit }) {
+    async execute({ path: filePath, offset, limit, line_start, line_end, start_line, end_line }) {
       const target = resolveWithinRoot(root, filePath);
       let text = await readFile(target, "utf8");
-      if (offset || limit) {
+      const startLine = offset ?? line_start ?? start_line;
+      const endLine = line_end ?? end_line;
+      const lineCount =
+        limit ??
+        (startLine != null && endLine != null ? Number(endLine) - Number(startLine) + 1 : undefined);
+      if (startLine || lineCount) {
         const lines = text.split("\n");
-        const start = Math.max(0, (offset ?? 1) - 1);
-        const end = limit ? start + limit : lines.length;
+        const start = Math.max(0, (startLine ?? 1) - 1);
+        const end = lineCount ? start + lineCount : lines.length;
         text = lines.slice(start, end).join("\n");
       }
-      return truncateOutput(text);
+      const capped = truncateOutput(text);
+      const warning = conflictMarkerNote(text);
+      return warning ? `${capped}\n[${warning}]` : capped;
     },
   });
 
@@ -530,7 +645,9 @@ export function registerFileTools(registry, { workspaceRoot }) {
         const flexible = replaceFlexible(text, old_string, String(new_string ?? ""));
         if (!flexible) {
           throw new Error(
-            "old_string was not found in the file, even ignoring indentation differences. Re-read the file and copy the exact text.",
+            "old_string was not found in the file, even ignoring indentation differences. Re-read the file and copy the exact text." +
+              nearbySnippet(text, old_string) +
+              " After 2 misses on the same region, use write_file for a full rewrite instead of guessing escapes.",
           );
         }
         if (flexible.matches > 1) {
@@ -545,10 +662,16 @@ export function registerFileTools(registry, { workspaceRoot }) {
         const flexibleTruncated = truncatedSourceIssue(filePath, flexible.updated);
         if (flexibleTruncated) throw new Error(flexibleTruncated);
         await writeFile(target, flexible.updated, "utf8");
+        const pyNote =
+          path.extname(filePath).toLowerCase() === ".py"
+            ? "; run `python -m py_compile` on this path before finishing so indentation/syntax errors are caught"
+            : "";
         return {
           path: path.relative(root, target),
           replacements: 1,
-          note: "matched with indentation differences ignored; the file's original indentation was kept",
+          note:
+            "matched with indentation differences ignored; the file's original indentation was kept" +
+            pyNote,
         };
       }
       if (occurrences > 1 && replace_all && !isIdentifierOnlySnippet(old_string)) {
@@ -565,7 +688,13 @@ export function registerFileTools(registry, { workspaceRoot }) {
       const truncated = truncatedSourceIssue(filePath, updated);
       if (truncated) throw new Error(truncated);
       await writeFile(target, updated, "utf8");
-      return { path: path.relative(root, target), replacements: replace_all ? occurrences : 1 };
+      const result = { path: path.relative(root, target), replacements: replace_all ? occurrences : 1 };
+      if (path.extname(filePath).toLowerCase() === ".py") {
+        result.note =
+          "After editing Python, run `python -m py_compile` on this path before finishing " +
+          "(catches try/except indent breaks).";
+      }
+      return result;
     },
   });
 

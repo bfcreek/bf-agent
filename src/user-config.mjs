@@ -32,6 +32,7 @@ const CONFIG_TEMPLATE = `# halo-agent user configuration
 # no-plan: false
 # no-hints: false
 # json: false
+#
 # mcp:
 #   - "npx -y some-mcp-server"
 `;
@@ -84,20 +85,9 @@ export function parseSimpleYaml(text) {
     const inlineValue = keyMatch[2].trim();
 
     if (inlineValue === "" || inlineValue === "|" || inlineValue === ">") {
-      const list = [];
-      i++;
-      while (i < lines.length) {
-        const child = stripComment(lines[i]);
-        if (!child.trim()) {
-          i++;
-          continue;
-        }
-        const listMatch = child.match(/^\s+-\s+(.*)$/);
-        if (!listMatch) break;
-        list.push(parseScalar(listMatch[1].trim()));
-        i++;
-      }
+      const { list, nextIndex } = parseYamlList(lines, i + 1);
       result[key] = list;
+      i = nextIndex;
       continue;
     }
 
@@ -106,6 +96,55 @@ export function parseSimpleYaml(text) {
   }
 
   return result;
+}
+
+/**
+ * @param {string[]} lines
+ * @param {number} startIndex Index of the first list item line.
+ */
+function parseYamlList(lines, startIndex) {
+  const list = [];
+  let i = startIndex;
+
+  while (i < lines.length) {
+    const child = stripComment(lines[i]);
+    if (!child.trim()) {
+      i++;
+      continue;
+    }
+
+    const listMatch = child.match(/^(\s+)-\s*(.*)$/);
+    if (!listMatch) break;
+
+    const itemIndent = listMatch[1].length;
+    const rest = listMatch[2].trim();
+
+    if (rest.includes(":")) {
+      const obj = {};
+      const firstKv = rest.match(/^([^:]+):\s*(.*)$/);
+      if (firstKv) obj[firstKv[1]] = parseScalar(firstKv[2].trim());
+      i++;
+      while (i < lines.length) {
+        const cont = stripComment(lines[i]);
+        if (!cont.trim()) {
+          i++;
+          continue;
+        }
+        if (/^\s*-\s/.test(cont)) break;
+        const propMatch = cont.match(/^(\s+)([^:]+):\s*(.*)$/);
+        if (!propMatch || propMatch[1].length <= itemIndent) break;
+        obj[propMatch[2]] = parseScalar(propMatch[3].trim());
+        i++;
+      }
+      list.push(obj);
+      continue;
+    }
+
+    list.push(parseScalar(rest));
+    i++;
+  }
+
+  return { list, nextIndex: i };
 }
 
 function stripComment(line) {
@@ -340,6 +379,8 @@ export function getBuiltinDefaults() {
     think: DEFAULT_THINK,
     noPlan: false,
     noHints: false,
+    tierPreset: null,
+    taskTier: null,
     goal: "",
     errors: [],
   };

@@ -5,7 +5,7 @@
  *
  *   npm run bench
  *   node evals/dev-bench.mjs --tier 3          # auto-loads bench.config.json if present
- *   node evals/dev-bench.mjs --flat              # all scenarios, no tier pauses
+ *   node evals/dev-bench.mjs --tier-preset cloud   # cloud-only models (no GPU)
  *   node evals/dev-bench.mjs --scenario greet-module
  *   node evals/dev-bench.mjs --language csharp --flat
  *   node evals/dev-bench.mjs --list-scenarios
@@ -24,7 +24,7 @@ import path from "node:path";
 import { createAgent } from "../src/index.mjs";
 import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
-import { loadBenchOptions } from "./config.mjs";
+import { loadBenchOptions, resolveTierModel, uniqueTierModels } from "./config.mjs";
 import {
   DEFAULT_CHECKPOINT_REL,
   buildCheckpointRecord,
@@ -283,6 +283,27 @@ async function logResolvedModel(model, options) {
   }
 }
 
+async function logResolvedModels(models, options) {
+  /** @type {Map<string, string>} */
+  const resolved = new Map();
+  for (const model of models) {
+    resolved.set(model, await logResolvedModel(model, options));
+  }
+  return resolved;
+}
+
+function describeTierModels(tierModels) {
+  let prev = -1;
+  for (const band of tierModels) {
+    const range =
+      band.throughTier != null
+        ? `tier ${prev + 1}–${band.throughTier}`
+        : `tier ${prev + 1}+`;
+    console.error(`  ${range}: ${band.model}`);
+    prev = band.throughTier ?? prev;
+  }
+}
+
 function printProgress(row) {
   const pre = row.error
     ? "runner error"
@@ -316,12 +337,16 @@ function printTierProgress(tier, tierResults, avg) {
   console.error(`── tier ${tier} complete: avg ${avg != null ? avg.toFixed(1) : "n/a"}/100 (${tierResults.length} scenario(s)) ──`);
 }
 
-async function runAllScenarios(scenarios, model, options, resumeState = null) {
+async function runAllScenarios(scenarios, fixedModel, options, resumeState = null, resolvedModels = null) {
   const completedNames = new Set(resumeState?.completedNames ?? []);
   const results = [...(resumeState?.results ?? [])];
   const groups = options.progression ? groupByTier(scenarios) : [[null, scenarios]];
   let stoppedAtTier = resumeState?.stoppedAtTier ?? null;
   let stopReason = resumeState?.stopReason ?? null;
+  const modelFor = (scenario) => {
+    const requested = fixedModel ?? resolveTierModel(scenario.tier, options.tierModels, options.models[0]);
+    return resolvedModels?.get(requested) ?? requested;
+  };
 
   if (completedNames.size > 0) {
     console.error(
@@ -330,7 +355,10 @@ async function runAllScenarios(scenarios, model, options, resumeState = null) {
   }
 
   for (const [tier, tierScenarios] of groups) {
-    if (tier != null) console.error(`== tier ${tier} (${tierScenarios.length} scenario(s)) ==`);
+    if (tier != null) {
+      const tierModel = modelFor(tierScenarios[0]);
+      console.error(`== tier ${tier} (model: ${tierModel}, ${tierScenarios.length} scenario(s)) ==`);
+    }
 
     const tierResults = [];
     for (const scenario of tierScenarios) {
@@ -341,6 +369,7 @@ async function runAllScenarios(scenarios, model, options, resumeState = null) {
         continue;
       }
 
+      const model = modelFor(scenario);
       console.error(`  running: ${scenario.name}...`);
       const row = await runScenario({ scenario, model, options });
       printProgress(row);
@@ -593,6 +622,10 @@ async function main() {
   let stopReason = checkpoint?.stopReason ?? null;
   let stoppedOnError = false;
   let resolvedModel = checkpoint?.resolvedModel ?? options.models[0];
+  const useTierRouting = Boolean(options.tierModels?.length);
+  const reportModels = useTierRouting ? uniqueTierModels(options.tierModels) : options.models;
+  /** @type {Map<string, string>} */
+  let resolvedModels = new Map();
 
   const persistCheckpoint = async ({
     results,
@@ -618,10 +651,47 @@ async function main() {
     );
   };
 
-  for (const model of options.models) {
-    console.error(`== halo-agent model: ${model} ==`);
-    resolvedModel = await logResolvedModel(model, options);
-    const outcome = await runAllScenarios(scenarios, resolvedModel, options, {
+  if (useTierRouting) {
+    console.error("== tier-routed models ==");
+    describeTierModels(options.tierModels);
+    resolvedModels = await logResolvedModels(reportModels, options);
+    resolvedModel = resolvedModels.get(options.tierModels[0].model) ?? resolvedModel;
+    const outcome = await runAllScenarios(scenarios, null, options, {
+      completedNames: [...resumeCompleted],
+      results: resumeResults,
+      stoppedAtTier,
+      stopReason,
+      onProgress: async (progress) => {
+        resumeCompleted = new Set(progress.completedNames);
+        resumeResults = progress.results;
+        stoppedAtTier = progress.stoppedAtTier;
+        stopReason = progress.stopReason;
+        await persistCheckpoint({
+          results: progress.results,
+          completedNames: progress.completedNames,
+          stoppedAtTier: progress.stoppedAtTier,
+          stopReason: progress.stopReason,
+          resolvedModel,
+        });
+      },
+    }, resolvedModels);
+    const { results, stoppedAtTier: stopped, stopReason: reason, completedNames } = outcome;
+    allResults.push(...results);
+    resumeCompleted = new Set(completedNames);
+    resumeResults = results;
+    if (outcome.stoppedOnError) {
+      stoppedOnError = true;
+      stoppedAtTier = stopped;
+      stopReason = reason;
+    } else if (stopped != null) {
+      stoppedAtTier = stopped;
+      stopReason = reason;
+    }
+  } else {
+    for (const model of options.models) {
+      console.error(`== halo-agent model: ${model} ==`);
+      resolvedModel = await logResolvedModel(model, options);
+      const outcome = await runAllScenarios(scenarios, resolvedModel, options, {
         completedNames: [...resumeCompleted],
         results: resumeResults,
         stoppedAtTier,
@@ -640,20 +710,21 @@ async function main() {
           });
         },
       });
-    const { results, stoppedAtTier: stopped, stopReason: reason, completedNames } = outcome;
-    allResults.push(...results);
-    resumeCompleted = new Set(completedNames);
-    resumeResults = results;
-    if (outcome.stoppedOnError) {
-      stoppedOnError = true;
-      stoppedAtTier = stopped;
-      stopReason = reason;
-      break;
-    }
-    if (stopped != null) {
-      stoppedAtTier = stopped;
-      stopReason = reason;
-      break;
+      const { results, stoppedAtTier: stopped, stopReason: reason, completedNames } = outcome;
+      allResults.push(...results);
+      resumeCompleted = new Set(completedNames);
+      resumeResults = results;
+      if (outcome.stoppedOnError) {
+        stoppedOnError = true;
+        stoppedAtTier = stopped;
+        stopReason = reason;
+        break;
+      }
+      if (stopped != null) {
+        stoppedAtTier = stopped;
+        stopReason = reason;
+        break;
+      }
     }
   }
 
@@ -670,7 +741,7 @@ async function main() {
 
   const report = buildAssessmentReport(allResults, {
     ranAt: new Date().toISOString(),
-    models: options.models,
+    models: reportModels,
     judgeModel: options.judgeModel,
     progression: options.progression,
     stoppedAtTier,

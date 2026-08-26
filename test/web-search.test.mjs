@@ -62,6 +62,23 @@ test("formatWebSearchResults is numbered and includes URLs", () => {
   assert.match(text, /A site\./);
 });
 
+test("formatWebSearchResults explains empty results and local-inspect fallback", () => {
+  const text = formatWebSearchResults([], "mobile_sam docs");
+  assert.match(text, /0 web result/);
+  assert.match(text, /do not retry the same query/i);
+  assert.match(text, /import mobile_sam|installed package|grep_search/i);
+});
+
+test("web_search tool returns empty guidance instead of throwing on no hits", async () => {
+  const registry = registerWebSearchTool(new ToolRegistry(), {
+    fetchImpl: async () => ({ ok: true, status: 200, async text() { return "<html></html>"; } }),
+  });
+  const outcome = await registry.execute("web_search", { query: "zzznothing" });
+  assert.equal(outcome.ok, true);
+  assert.match(outcome.result, /0 web result/);
+  assert.match(outcome.result, /error:.*No web results/i);
+});
+
 test("searchDuckDuckGo posts the query and returns parsed hits", async () => {
   let seen;
   const fetchImpl = async (url, init) => {

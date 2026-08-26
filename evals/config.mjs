@@ -6,12 +6,23 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  normalizeTierModels,
+  parseTierPresetArg,
+  resolveEffectiveTierModels,
+  resolveTierModel,
+  uniqueTierModels,
+} from "../src/tier-models.mjs";
+import { loadModelsConfig } from "../src/models-config.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CONFIG_PATH = path.join(__dirname, "bench.config.json");
 export const CWD_CONFIG_NAME = "bench.config.json";
 /**
+ * @typedef {{throughTier?: number, model: string}} TierModelBand
  * @typedef {object} BenchConfig
  * @property {string[]} models
+ * @property {TierModelBand[]|null} tierModels Route scenario tiers to different Ollama models.
  * @property {string} baseUrl
  * @property {number} maxSteps
  * @property {number} timeoutSeconds
@@ -67,10 +78,12 @@ export function parseLanguageFilter(raw) {
   return out.length ? out : null;
 }
 
-/** @returns {BenchConfig} */
+export { resolveTierModel, uniqueTierModels };
+
 export function defaultConfig() {
   return {
     models: ["auto"],
+    tierModels: null,
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: 15,
     timeoutSeconds: 240,
@@ -136,7 +149,9 @@ export async function loadBenchConfig(configPath) {
   const base = defaultConfig();
   try {
     const raw = JSON.parse(await readFile(configPath, "utf8"));
-    return mergeConfig(base, raw);
+    const merged = mergeConfig(base, raw);
+    merged._benchTierModelsExplicit = Object.hasOwn(raw, "tierModels");
+    return merged;
   } catch (err) {
     if (err.code === "ENOENT") return base;
     throw new Error(`Failed to load config ${configPath}: ${err.message}`);
@@ -152,7 +167,25 @@ export async function loadBenchConfig(configPath) {
 export async function loadBenchOptions(argv, cwd = process.cwd()) {
   const resolved = await resolveBenchConfigPath(argv, cwd);
   const fileConfig = resolved.path ? await loadBenchConfig(resolved.path) : defaultConfig();
+  const { values: modelsValues, errors: modelsErrors } = await loadModelsConfig();
   const options = parseCliArgs(argv, fileConfig);
+  if (modelsErrors.length > 0) {
+    throw new Error(modelsErrors.join("\n"));
+  }
+
+  options.tierModels = await resolveEffectiveTierModels({
+    benchTierModels: fileConfig.tierModels,
+    benchTierModelsExplicit: Boolean(fileConfig._benchTierModelsExplicit),
+    cliTierPreset: options.tierPreset,
+    userTierModels: modelsValues.tierModels ?? null,
+    userTierPreset: modelsValues.tierPreset,
+    baseUrl: options.baseUrl,
+  });
+
+  if (options.tierModels?.length && options.models.length === 1 && options.models[0] === "auto") {
+    options.models = [options.tierModels[0].model];
+  }
+
   return { options, configPath: resolved.path, configExplicit: resolved.explicit };
 }
 
@@ -164,6 +197,7 @@ function mergeConfig(base, patch) {
   return {
     ...base,
     ...patch,
+    tierModels: patch.tierModels !== undefined ? normalizeTierModels(patch.tierModels) : base.tierModels,
     progression: { ...base.progression, ...patch.progression },
     gates: { ...base.gates, ...patch.gates },
     report: { ...base.report, ...patch.report },
@@ -203,6 +237,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     taskHints: null,
     enforceGates: null,
     gatePreset: null,
+    tierPreset: null,
     capabilityJson: null,
     publicJson: null,
     checkpointPath: null,
@@ -266,6 +301,10 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
       }
       cli.gatePreset = preset;
       cli.enforceGates = true;
+    } else if (arg === "--tier-preset") {
+      const raw = argv[++i];
+      if (!raw) throw new Error("--tier-preset requires auto, cloud, hybrid, or local.");
+      cli.tierPreset = parseTierPresetArg(raw);
     } else if (arg === "--capability-json") cli.capabilityJson = argv[++i];
     else if (arg === "--public-json") cli.publicJson = argv[++i];
     else if (arg === "--checkpoint") cli.checkpointPath = argv[++i];
@@ -287,6 +326,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
   return {
     configPath: cli.configPath ?? null,
     models: cli.models ?? fileConfig.models,
+    tierModels: fileConfig.tierModels,
     baseUrl: cli.baseUrl ?? fileConfig.baseUrl,
     maxSteps: cli.maxSteps ?? fileConfig.maxSteps,
     timeoutSeconds: cli.timeoutSeconds ?? fileConfig.timeoutSeconds,
@@ -314,6 +354,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     gates: fileConfig.gates,
     enforceGates: cli.enforceGates ?? fileConfig.enforceGates,
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,
+    tierPreset: cli.tierPreset ?? null,
     capabilityJson: cli.noReport ? null : cli.capabilityJson ?? fileConfig.report.capability,
     publicJson: cli.noReport ? null : cli.publicJson ?? fileConfig.report.public,
     checkpointPath,

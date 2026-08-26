@@ -26,6 +26,7 @@
     "bench:tb": "node evals/recognized/run.mjs terminal-bench",
     "bench:tb:mini": "node evals/recognized/run.mjs terminal-bench --sample 5",
     "bench:tb:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb.ps1",
-    "bench:tb:mini:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb-mini.ps1"
+    "bench:tb:mini:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb-mini.ps1",
+    "bench:hv-tb": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/hv-bench-tb.ps1"
   }
 }

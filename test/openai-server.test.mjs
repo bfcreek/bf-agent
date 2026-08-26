@@ -193,7 +193,8 @@ test("array-of-parts content is flattened to text", async () => {
     ],
   });
   const goal = client.calls[0].messages.at(-1);
-  assert.equal(goal.content, "part one\npart two");
+  assert.match(goal.content, /part one\npart two/);
+  assert.match(goal.content, /## Goals/);
 });
 
 test("GET /v1/models lists only tool-capable Ollama models", async () => {

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AgentLoop } from "../src/agent-loop.mjs";
-import { compactMessages, estimateTokens, formatVerificationRecap, transcriptSize } from "../src/compaction.mjs";
+import {
+  capSpeculativeReasoning,
+  compactMessages,
+  estimateTokens,
+  extractOriginalInstruction,
+  formatVerificationRecap,
+  transcriptSize,
+} from "../src/compaction.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 class FakeClient {
@@ -58,6 +65,8 @@ test("over budget: old turns are replaced by a summary, recent turns kept", asyn
   assert.equal(result[0].content, "SYSTEM");
   assert.match(result[1].content, /compacted to save space/);
   assert.match(result[1].content, /SUMMARY OF OLD TURNS/);
+  assert.match(result[1].content, /Original user instruction \(verbatim/);
+  assert.match(result[1].content, /question 0/);
   // summary + system + last 4 verbatim
   assert.equal(result.length, 6);
   assert.deepEqual(result.slice(2), messages.slice(-4));
@@ -228,6 +237,19 @@ test("formatVerificationRecap lists passing and failing command results", () => 
   assert.match(withCompiler, /compiler:.*CS0136/);
 });
 
+test("formatVerificationRecap reminds after many empty searches", () => {
+  const messages = [];
+  for (let i = 0; i < 3; i++) {
+    messages.push({
+      role: "tool",
+      tool_name: "web_search",
+      content: "0 web result(s) for 'hidden verifier'.\nEmpty results are a real outcome.",
+    });
+  }
+  const recap = formatVerificationRecap(messages);
+  assert.match(recap, /no hidden verifier|cost_model|consecutive searches returned empty/i);
+});
+
 test("formatVerificationRecap keeps file snapshots and failing assertions", () => {
   const recap = formatVerificationRecap([
     {
@@ -256,4 +278,70 @@ test("formatVerificationRecap keeps file snapshots and failing assertions", () =
   assert.match(recap, /calc\.py:.*def add/);
   assert.match(recap, /Known assertion outcomes/);
   assert.match(recap, /assert mul\(3, 4\) == 12/);
+});
+
+test("formatVerificationRecap keeps verbatim stdout for recent commands", () => {
+  const recap = formatVerificationRecap([
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: "status: success\nexitCode: 0\nstdout:\napt 2.4.11\n",
+    },
+    {
+      role: "tool",
+      tool_name: "run_command",
+      content: "status: blocked\ncommand: apt-get install -y ocaml\nnote: not executed\n",
+    },
+  ]);
+  assert.match(recap, /Last command outputs/);
+  assert.match(recap, /apt 2\.4\.11/);
+  assert.match(recap, /blocked/);
+  assert.match(recap, /stdout:\n\(empty\)|blocked/);
+});
+
+test("capSpeculativeReasoning truncates long think before git setup", async () => {
+  const messages = [
+    { role: "system", content: "SYSTEM" },
+    {
+      role: "user",
+      content:
+        "Merge the two branches. After the merge conflict, implement map() and verify with examples.json.",
+    },
+    { role: "assistant", content: "x".repeat(3000), thinking: "y".repeat(3000) },
+  ];
+  const client = new FakeClient([]);
+  const result = await compactMessages({ client, messages, maxChars: 100_000 });
+  assert.notEqual(result, messages);
+  assert.ok(result[2].thinking.length < 2000);
+  assert.match(result[2].thinking, /truncated/);
+  assert.match(result[2].content, /truncated/);
+  assert.equal(client.calls.length, 0);
+});
+
+test("capSpeculativeReasoning leaves thinking once git setup started", () => {
+  const thinking = "y".repeat(3000);
+  const messages = [
+    { role: "system", content: "SYSTEM" },
+    { role: "user", content: "Merge the two branches and resolve the merge conflict." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ function: { name: "run_command", arguments: { command: "git merge feature" } } }],
+    },
+    { role: "assistant", thinking, content: "ok" },
+  ];
+  const result = capSpeculativeReasoning(messages);
+  assert.equal(result, messages);
+  assert.equal(result[3].thinking, thinking);
+});
+
+test("summarizer prompt prefers act-on-instruction git order", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "SUMMARY OF OLD TURNS" }]);
+  const messages = longTranscript();
+  messages[1] = {
+    role: "user",
+    content: `Merge the two branches. ${"x".repeat(500)}`,
+  };
+  await compactMessages({ client, messages, maxChars: 2000, keepRecent: 4 });
+  assert.match(client.calls[0].messages[0].content, /act-on-instruction|repo\/branches\/merge/i);
 });

@@ -1,0 +1,198 @@
+/**
+ * Tier-based model routing: map scenario difficulty tiers to Ollama models.
+ * Presets and explicit bands live in ~/.config/halo-agent/models.yaml; bench
+ * config can override per project.
+ */
+
+import { OllamaClient } from "./ollama-client.mjs";
+import { suggestModel } from "./model-routing.mjs";
+
+/** @typedef {{throughTier?: number, model: string}} TierModelBand */
+
+export const DEFAULT_TIER_PRESET = "auto";
+
+/** @type {Record<string, TierModelBand[]>} */
+export const TIER_PRESETS = {
+  /** Ollama cloud only — no local GPU or RAM required. */
+  cloud: [
+    { throughTier: 1, model: "glm-4.6:cloud" },
+    { throughTier: 3, model: "kimi-k2.6:cloud" },
+    { model: "kimi-k2.7-code:cloud" },
+  ],
+  /** Local models for easy/medium work; cloud for hard tiers. */
+  hybrid: [
+    { throughTier: 1, model: "qwen3-coder:14b" },
+    { throughTier: 3, model: "qwen3-coder:30b" },
+    { model: "kimi-k2.7-code:cloud" },
+  ],
+  /** Local models only — needs a capable GPU and enough RAM/VRAM. */
+  local: [
+    { throughTier: 1, model: "qwen3-coder:14b" },
+    { throughTier: 3, model: "qwen3-coder:30b" },
+    { model: "qwen3-coder:30b" },
+  ],
+};
+
+const VALID_PRESETS = new Set(["auto", ...Object.keys(TIER_PRESETS)]);
+
+/**
+ * @param {string} raw
+ * @returns {"auto"|"cloud"|"hybrid"|"local"}
+ */
+export function parseTierPresetArg(raw) {
+  const name = String(raw ?? "").trim().toLowerCase();
+  if (!VALID_PRESETS.has(name)) {
+    throw new Error(`Unknown tier preset '${raw}'. Use auto, cloud, hybrid, or local.`);
+  }
+  return /** @type {"auto"|"cloud"|"hybrid"|"local"} */ (name);
+}
+
+/**
+ * @param {number} tier
+ * @param {TierModelBand[]|null|undefined} tierModels
+ * @param {string} fallback
+ * @returns {string}
+ */
+export function resolveTierModel(tier, tierModels, fallback) {
+  if (!tierModels?.length) return fallback;
+  for (const band of tierModels) {
+    if (band.throughTier == null) continue;
+    if (tier <= band.throughTier) return band.model;
+  }
+  return tierModels[tierModels.length - 1]?.model ?? fallback;
+}
+
+/**
+ * @param {TierModelBand[]|null|undefined} tierModels
+ * @returns {string[]}
+ */
+export function uniqueTierModels(tierModels) {
+  if (!tierModels?.length) return [];
+  const seen = new Set();
+  const out = [];
+  for (const band of tierModels) {
+    if (!band.model || seen.has(band.model)) continue;
+    seen.add(band.model);
+    out.push(band.model);
+  }
+  return out;
+}
+
+/**
+ * @param {unknown} band
+ * @param {number} index
+ * @returns {TierModelBand}
+ */
+export function normalizeTierModelBand(band, index) {
+  if (!band || typeof band !== "object" || Array.isArray(band)) {
+    throw new Error(`tier-models[${index}] must be an object with model.`);
+  }
+  const raw = /** @type {Record<string, unknown>} */ (band);
+  const model = raw.model ?? raw.Model;
+  const throughTier = raw.throughTier ?? raw["through-tier"];
+  if (typeof model !== "string" || !model.trim()) {
+    throw new Error(`tier-models[${index}] requires a model string.`);
+  }
+  if (throughTier != null && !Number.isFinite(Number(throughTier))) {
+    throw new Error(`tier-models[${index}].through-tier must be a number when set.`);
+  }
+  return {
+    model: model.trim(),
+    ...(throughTier != null ? { throughTier: Number(throughTier) } : {}),
+  };
+}
+
+/** @param {unknown} raw */
+export function normalizeTierModels(raw) {
+  if (raw == null) return null;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error("tier-models must be a non-empty list of { through-tier?, model } bands.");
+  }
+  return raw.map((band, index) => normalizeTierModelBand(band, index));
+}
+
+/**
+ * @param {string} preset
+ * @returns {TierModelBand[]}
+ */
+export function getTierPresetBands(preset) {
+  const bands = TIER_PRESETS[preset];
+  if (!bands) {
+    throw new Error(
+      `Unknown tier preset '${preset}'. Use auto, cloud, hybrid, or local.`,
+    );
+  }
+  return bands.map((band) => ({ ...band }));
+}
+
+/**
+ * Pick hybrid when a suitable local model is installed; otherwise cloud.
+ *
+ * @param {object} [options]
+ * @param {{listModelsDetailed?: Function}} [options.client]
+ * @param {string} [options.baseUrl]
+ * @returns {Promise<"cloud"|"hybrid">}
+ */
+export async function detectAutoTierPreset({ client, baseUrl = "http://127.0.0.1:11434" } = {}) {
+  try {
+    const probe = client ?? new OllamaClient({ baseUrl });
+    const models = await probe.listModelsDetailed();
+    const suggestion = await suggestModel({ client: probe, models });
+    if (suggestion && !suggestion.cloud) return "hybrid";
+  } catch {
+    // Ollama unreachable or no models — default to cloud (no GPU required).
+  }
+  return "cloud";
+}
+
+/**
+ * @param {string} preset
+ * @param {object} [options]
+ * @param {{listModelsDetailed?: Function}} [options.client]
+ * @param {string} [options.baseUrl]
+ * @returns {Promise<TierModelBand[]>}
+ */
+export async function resolveTierPreset(preset, options = {}) {
+  const name = parseTierPresetArg(preset || DEFAULT_TIER_PRESET);
+  if (!VALID_PRESETS.has(name)) {
+    throw new Error(`Unknown tier preset '${preset}'. Use auto, cloud, hybrid, or local.`);
+  }
+  const resolved = name === "auto" ? await detectAutoTierPreset(options) : name;
+  return getTierPresetBands(resolved);
+}
+
+/**
+ * Merge bench file config with user config tier routing.
+ *
+ * Priority: bench tierModels (when set) > CLI tierPreset > user tierModels > user tierPreset.
+ *
+ * @param {object} options
+ * @param {TierModelBand[]|null} [options.benchTierModels]
+ * @param {boolean} [options.benchTierModelsExplicit]
+ * @param {string|null} [options.cliTierPreset]
+ * @param {TierModelBand[]|null} [options.userTierModels]
+ * @param {string} [options.userTierPreset]
+ * @param {string} [options.baseUrl]
+ * @param {{listModelsDetailed?: Function}} [options.client]
+ * @returns {Promise<TierModelBand[]|null>}
+ */
+export async function resolveEffectiveTierModels({
+  benchTierModels = null,
+  benchTierModelsExplicit = false,
+  cliTierPreset = null,
+  userTierModels = null,
+  userTierPreset = DEFAULT_TIER_PRESET,
+  baseUrl = "http://127.0.0.1:11434",
+  client = null,
+} = {}) {
+  if (benchTierModelsExplicit) {
+    return benchTierModels;
+  }
+  if (cliTierPreset) {
+    return resolveTierPreset(cliTierPreset, { client, baseUrl });
+  }
+  if (userTierModels?.length) {
+    return userTierModels;
+  }
+  return resolveTierPreset(userTierPreset, { client, baseUrl });
+}

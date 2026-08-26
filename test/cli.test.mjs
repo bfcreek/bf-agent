@@ -15,6 +15,7 @@ function cli(...args) {
   return spawnSync(process.execPath, [path.join(root, "src", "cli.mjs"), ...args], {
     encoding: "utf8",
     cwd: root,
+    env: { ...process.env, HALO_AGENT_FORCE_INTERACTIVE: "" },
   });
 }
 
@@ -23,7 +24,7 @@ function cliAsync(args, options = {}) {
     const child = spawn(process.execPath, [path.join(root, "src", "cli.mjs"), ...args], {
       encoding: "utf8",
       cwd: root,
-      env: options.env ?? process.env,
+      env: { ...process.env, HALO_AGENT_FORCE_INTERACTIVE: "", ...(options.env ?? {}) },
     });
     let stdout = "";
     let stderr = "";
@@ -42,6 +43,7 @@ test("--help prints usage, options, examples, and exit codes", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
   assert.match(run.stdout, /Usage:/);
+  assert.match(run.stdout, /Interactive terminal mode/);
   assert.match(run.stdout, /halo-agent serve/);
   assert.match(run.stdout, /halo-agent models/);
   for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json"]) {
@@ -63,11 +65,84 @@ test("--version prints the package version", () => {
   assert.equal(run.stdout.trim(), pkg.version);
 });
 
-test("no arguments is a usage error with help on stderr+stdout", () => {
+test("no arguments is a usage error when stdin is not a TTY", () => {
   const run = cli();
   assert.equal(run.status, 1);
   assert.match(run.stderr, /No goal given/);
   assert.match(run.stdout, /Usage:/);
+});
+
+test("interactive mode accepts prompts until /quit", async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/api/tags") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          models: [
+            {
+              name: "qwen3:30b",
+              size: 20_000_000_000,
+              details: { parameter_size: "30B" },
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    if (req.url === "/api/show") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ capabilities: ["tools", "thinking"] }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
+  try {
+    const child = spawn(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "--no-index", "--quiet", "--base-url", `http://127.0.0.1:${port}`],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          HALO_AGENT_FORCE_INTERACTIVE: "1",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    let phase = 0;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (phase === 1 && stdout.includes("Interactive commands")) {
+        phase = 2;
+        child.stdin.write("/quit\n");
+        child.stdin.end();
+      }
+    });
+    let sent = false;
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      if (!sent && stderr.includes("Enter a prompt")) {
+        sent = true;
+        phase = 1;
+        child.stdin.write("/help\n");
+      }
+    });
+    const status = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    assert.equal(status, 0);
+    assert.match(stderr, /interactive/);
+    assert.match(stdout, /Interactive commands:/);
+    assert.match(stdout, /\/quit/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("unknown options are rejected instead of silently joining the goal", () => {
@@ -169,6 +244,16 @@ test("models exits with code 3 when Ollama is unreachable", () => {
   assert.match(run.stderr, /Cannot reach Ollama/);
 });
 
+test("--help documents config edit, models config, and tier flags", () => {
+  const run = cli("--help");
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /halo-agent config edit/);
+  assert.match(run.stdout, /halo-agent models config edit/);
+  assert.match(run.stdout, /models\.yaml/);
+  assert.match(run.stdout, /--tier-preset/);
+  assert.match(run.stdout, /--tier/);
+});
+
 test("--help documents config edit and the config file", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
@@ -240,6 +325,38 @@ test("invalid config values are reported before running", async () => {
     );
     assert.equal(run.status, 1);
     assert.match(run.stderr, /config 'max-steps'/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("models config edit creates models.yaml", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-models-config-"));
+  const configPath = path.join(dir, "models.yaml");
+  const editorPath = path.join(dir, "fake-editor.mjs");
+  await writeFile(
+    editorPath,
+    `import { readFileSync } from "node:fs";
+console.log(readFileSync(process.argv[2], "utf8").includes("halo-agent model routing") ? "ok" : "bad");
+`,
+    "utf8",
+  );
+  try {
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "cli.mjs"), "models", "config", "edit"],
+      {
+        encoding: "utf8",
+        cwd: root,
+        env: {
+          ...process.env,
+          HALO_MODELS_CONFIG: configPath,
+          EDITOR: `"${process.execPath}" "${editorPath}"`,
+        },
+      },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /ok/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

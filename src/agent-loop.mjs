@@ -9,16 +9,23 @@ import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
   alreadyVerifiedFinishNudge,
   ambiguousEditRecoveryNudge,
+  blockedCommandOutcome,
   detectTaskHints,
   extractCompilerDiagnostics,
   finalAnswerNudge,
+  formatExplicitGoals,
   formatTaskConstraints,
   shouldPlanGoal,
   isTerminalVerificationMessage,
   mutationBlockedUntilPretest,
   PLANNING_USER_MESSAGE,
   redundantVerifyBlock,
+  repeatedEditMissNudge,
+  repeatedSearchLoopNudge,
   repeatedToolCallMessage,
+  secretHitWithoutEditNudge,
+  deliverableDriftNudge,
+  synthesizeFinalAnswer,
   TOOL_NUDGE_NEAR_LIMIT,
   verificationCompleteOutcome,
 } from "./prompt-enhancements.mjs";
@@ -53,9 +60,11 @@ const TOOL_CALL_PARSE_NUDGE = [
   "tool-call channel (Ollama could not parse the tool call).",
   "Call tools using the native tool-calling format only — function name plus",
   "JSON arguments matching the schema. Put reasoning in thinking, not inside",
-  "the tool call. Retry the tool call now.",
+  "the tool call.",
+  "For multi-line Python/shell, do not put a large heredoc in run_command:",
+  "write_file a .py/.sh path, then run_command that path (e.g. python script.py).",
+  "Retry with a short, valid tool call now.",
 ].join(" ");
-
 /**
  * Written for small local models, which need procedural guidance, not just
  * permission to use tools: each rule below maps to a known failure mode
@@ -66,17 +75,30 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "You are a capable local assistant that completes tasks using tools.",
   "Call tools with valid arguments matching their schemas.",
   "",
+  "Goals:",
+  "- At the start of every task, make success explicit: what artifacts must exist,",
+  "  which commands must exit 0 (and with what output), and what shape the final",
+  "  answer must take. The user message may include a ## Goals section — treat",
+  "  those bullets as acceptance criteria and do not finish until each is satisfied.",
+  "  When planning, restate or refine those goals before your numbered steps.",
+  "",
   "Rules:",
   "- Ground answers in facts from tools; never guess. For questions about this",
   "  project, use the README and auto-retrieved passages from the first turn,",
-  "  then read_file, grep_search, or search_project for more detail.",
+  "  then read_file, grep_search, or find_files for more detail. Only use",
+  "  search_project if that tool is listed in your available tools.",
   "- For current events, upstream docs, release notes, or anything outside",
   "  this workspace, use web_search, then fetch_url on promising links.",
   "  Pass a query to fetch_url so micro-RAG returns relevant passages instead",
   "  of the whole page.",
   "- To find where something is defined or used, use grep_search or find_files",
   "  first — do not list_dir to hunt for a symbol. Read the matching file after",
-  "  the search hit.",
+  "  the search hit. Do not call search_project or a bare `tail` tool unless",
+  "  those tools appear in your available tool list — use grep_search,",
+  "  read_file, and run_command instead.",
+  "- Multi-line scripts: write_file (or cat/heredoc redirected to a file) then",
+  "  run that path. Never embed large heredocs or nested quote soup as",
+  "  run_command arguments — tool JSON mangles them.",
   "- Read a file before editing it. Before your first edit, also read any",
   "  existing tests or callers that define the expected interface (flag names,",
   "  function signatures, output format) so your first attempt matches them.",
@@ -103,6 +125,51 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  fix the entry-point guard, then re-run. A repeated-call refusal after a",
   "  passing verification means the task is done: give your final answer, do",
   "  not run node -v or other diagnostics, and do not mention blocked commands.",
+  "- For build/install tasks (apt install, wget, tar, ./configure, make): each",
+  "  step needs its own successful run_command. Environment probes (apt-get",
+  "  --version, apt-cache policy, uname, which, diff, awk, head) are not task",
+  "  completion. Finish only after a smoke test matching the instruction path",
+  "  (e.g. /tmp/CompCert/ccomp --version).",
+  "- For artifact-creation (write X to file Y, or an output titled foo.fasta):",
+  "  you must write_file that path before finishing. Exit 0 alone does not mean",
+  "  the task is done unless the required output artifact exists. If no files",
+  "  were changed, keep working or report failure — do not stop.",
+  "  File paths are relative to the workspace root. If the root is /app, write",
+  "  filter.py — not app/filter.py or /app/filter.py (those create /app/app/filter.py).",
+  "- For script deliverables (.py/.sh/.ps1), smoke-test before finishing:",
+  "  python -m py_compile <file> (or equivalent) and at least one run with the",
+  "  instruction's demo paths when available. Do not mark done if the file fails",
+  "  to parse. After write/edit, re-read the deliverable so the final answer",
+  "  matches on-disk contents.",
+  "- Threshold / optimization tasks: measure against the stated metric and",
+  "  iterate until the threshold passes or the step budget is gone. Helper or",
+  "  baseline scripts are not completion — and they may overwrite output_data;",
+  "  re-run your packer/solver after any baseline that clobbers outputs.",
+  "- Secret-sanitize tasks: search literal token patterns (AKIA*, ghp_*, hf_*)",
+  "  and values after '=', not only env var names. After edits, grep again to",
+  "  prove secrets are gone. Do not claim files were changed if write_file/",
+  "  edit_file never succeeded.",
+  "- When instructions describe RPC/message fields in English (e.g. 'a value (int)'),",
+  "  use that exact identifier as the proto/JSON field name unless a different name",
+  "  is quoted; do not shorten value to val.",
+  "- For numeric artifacts (fits, peaks, eigenvalues), check that written values",
+  "  sit in the stated domain range before finishing; file-exists plus exit 0 is",
+  "  not enough when numbers look physically absurd.",
+  "- For HTML/JS sanitization, prefer a parser and allowlist over regex-only",
+  "  stripping, and regression-test common XSS bypasses before finishing.",
+  "- After 2–3 identical tool failures (same URL, query, or edit), stop repeating",
+  "  that call. Switch approach: curl/wget instead of fetch_url, archive.org or",
+  "  apt-cache instead of a 404 page, write_file instead of another edit_file.",
+  "- Do not finish with a proposed patch table. Apply changes with write_file or",
+  "  edit_file. Outline-only stubs and unimplemented syscalls are not done.",
+  "- For download/build tasks use run_command (curl/wget) for the archive, not",
+  "  fetch_url. Then extract, compile, install, and run the named sanity command.",
+  "- When the instruction pins a package/version/revision, import that package",
+  "  first. For reverse-engineering, start with objdump/readelf/strings; do not",
+  "  overwrite the provided binary. For truncated SQLite, carve pages, do not guess.",
+  "- Keep reasoning in thinking or plain content only. When you call tools,",
+  "  leave assistant content empty or minimal so the tool-call JSON is not",
+  "  rejected. Do not mix prose into the tool-call channel.",
   "- When the task mentions failing tests, your first tool step must be",
   "  run_command with that test command; do not edit until you have seen the",
   "  failure exit code and output. If the first run already exits 0, read the",
@@ -176,6 +243,11 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  a symbol, not an import site) and do not call more tools.",
   "- When creating or fixing tests, run them with run_command before finishing",
   "  and report whether they passed in your final answer.",
+  "- After a git merge CONFLICT, do not stop after inspecting both sides",
+  "  (git show). Resolve <<<<<<< markers with edit_file or write_file, then",
+  "  git add and git commit, then run named verification (e.g. examples.json).",
+  "  An empty reply with no further tools is incomplete while conflict markers",
+  "  remain or that verification has not run — keep going.",
   "- Keep going until the task is done, then reply to the user in plain text",
   "  with no tool calls. State what you did and what, if anything, remains.",
   "- If the user says this is a new request or the workspace already contains a",
@@ -268,18 +340,23 @@ export class AgentLoop {
     // Give tools the user's own words for safety decisions (e.g. the shell
     // tool only deletes files the goal explicitly names).
     this.registry.setRunContext?.({ goal });
+    const freshTurn = isFreshTurn(history);
     let messages =
       history && history.length > 0
         ? [...history]
         : [{ role: "system", content: this.systemPrompt }];
     let userContent = goal;
+    if (freshTurn) {
+      const explicitGoals = formatExplicitGoals(goal);
+      if (explicitGoals) userContent = `${explicitGoals}\n\n${userContent}`;
+    }
     const hints = this.taskHints ? detectTaskHints(goal) : [];
-    const taskFocus = formatTaskConstraints(hints);
+    const taskFocus = this.taskHints ? formatTaskConstraints(hints) : "";
     if (taskFocus) userContent = `${taskFocus}\n\n${userContent}`;
 
     messages.push({ role: "user", content: userContent });
 
-    if (this.projectBootstrap && isFreshTurn(history)) {
+    if (this.projectBootstrap && freshTurn) {
       const bootstrap = await gatherFirstTurnProjectContext({
         workspaceRoot: this.projectBootstrap.workspaceRoot,
         goal,
@@ -295,7 +372,6 @@ export class AgentLoop {
     messages[messages.length - 1].content = userContent;
 
     const steps = [];
-    const freshTurn = isFreshTurn(history);
 
     if (this.planning && freshTurn && shouldPlanGoal(goal) && !signal?.aborted) {
       try {
@@ -354,11 +430,27 @@ export class AgentLoop {
         messages.push({ role: "user", content: TOOL_NUDGE_NEAR_LIMIT });
       }
 
-      const { message, raw } = await chatWithParseRecovery(this.client, {
-        messages,
-        tools,
-        signal,
-      });
+      const { message, raw } = await chatWithParseRecovery(
+        this.client,
+        {
+          messages,
+          tools,
+          signal,
+        },
+        {
+          onParseError: ({ recovery, error }) => {
+            const step = {
+              index,
+              kind: "tool-parse-error",
+              content: String(error?.message ?? "error parsing tool call"),
+              toolCalls: [],
+              recoveries: recovery,
+            };
+            steps.push(step);
+            this.onStep?.(step);
+          },
+        },
+      );
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
       messages.push(normalizeAssistantMessage(message));
@@ -377,16 +469,17 @@ export class AgentLoop {
           messages.push({ role: "user", content: nudge });
           continue;
         }
+        const text = String(answerText ?? "").trim() || synthesizeFinalAnswer({ goal, steps });
         const step = {
           index,
           kind: "final",
-          content: answerText,
+          content: text,
           toolCalls: [],
         };
         steps.push(step);
         this.onStep?.(step);
         return {
-          text: answerText,
+          text,
           stopReason: "completed",
           steps,
           messages,
@@ -400,36 +493,34 @@ export class AgentLoop {
       repeatedKey = stepKey;
       const refuseRepeat = repeatedCount >= MAX_REPEATED_STEPS;
 
-      const forceFinish =
-        toolNudgeCount > 0 &&
-        alreadyVerifiedFinishNudge({ goal, steps, nudgeCount: 0 });
-
       const executed = [];
       for (const call of toolCalls) {
         const name = call?.function?.name ?? "";
         const args = call?.function?.arguments ?? {};
-        const pretestBlock = refuseRepeat || forceFinish
+        const commandText = String(args?.command ?? args?.cmd ?? "");
+        const pretestBlock = refuseRepeat
           ? null
           : mutationBlockedUntilPretest({ goal, toolName: name, steps });
         const verifyBlock =
-          refuseRepeat || forceFinish || pretestBlock
+          refuseRepeat || pretestBlock
             ? null
             : redundantVerifyBlock({ goal, steps, toolName: name, args });
-        const outcome = refuseRepeat
-          ? blockedToolOutcome(
-              repeatedToolCallMessage({
-                repeatedCount,
-                goal,
-                steps,
-              }),
-            )
-          : forceFinish
-            ? verificationCompleteOutcome(forceFinish)
-            : pretestBlock
-            ? { ok: false, error: pretestBlock }
-            : verifyBlock
-              ? blockedToolOutcome(verifyBlock)
-              : await this.registry.execute(name, args);
+        let outcome;
+        if (refuseRepeat) {
+          outcome = refusedRepeatOutcome(
+            name,
+            commandText,
+            repeatedToolCallMessage({ repeatedCount, goal, steps }),
+          );
+        } else if (pretestBlock) {
+          outcome = { ok: false, error: pretestBlock };
+        } else if (verifyBlock) {
+          outcome = isTerminalVerificationMessage(verifyBlock)
+            ? verificationCompleteOutcome(verifyBlock)
+            : blockedCommandOutcome(commandText, verifyBlock);
+        } else {
+          outcome = await this.registry.execute(name, args);
+        }
         executed.push({ name, args, ...outcome });
         messages.push({
           role: "tool",
@@ -456,7 +547,12 @@ export class AgentLoop {
         toolNudgeCount += 1;
         messages.push({ role: "user", content: stopNudge });
       } else {
-        const editNudge = ambiguousEditRecoveryNudge({ steps });
+        const editNudge =
+          ambiguousEditRecoveryNudge({ steps }) ??
+          repeatedEditMissNudge({ steps }) ??
+          repeatedSearchLoopNudge({ steps }) ??
+          secretHitWithoutEditNudge({ goal, steps }) ??
+          deliverableDriftNudge({ goal, steps });
         if (editNudge) messages.push({ role: "user", content: editNudge });
       }
     }
@@ -481,6 +577,7 @@ export class AgentLoop {
         // keep text = ""
       }
     }
+    if (!text) text = synthesizeFinalAnswer({ goal, steps });
     return { text: text ?? "", stopReason: "max-steps", steps, messages };
   }
 }
@@ -524,15 +621,17 @@ async function chatWithRetry(client, request) {
 
 /**
  * When Ollama rejects a malformed tool call, nudge the model and retry
- * instead of aborting the whole agent run.
+ * instead of aborting the whole agent run. Failed parse attempts are reported
+ * via onParseError so session logs still show progress.
  *
  * @param {object} client
  * @param {object} request
  * @param {Array<object>} request.messages Mutated in place when recovering.
  * @param {Array<object>} [request.tools]
  * @param {AbortSignal} [request.signal]
+ * @param {{ onParseError?: (info: { recovery: number, error: Error }) => void }} [hooks]
  */
-async function chatWithParseRecovery(client, request) {
+async function chatWithParseRecovery(client, request, hooks = {}) {
   const { messages, tools, signal } = request;
   let recoveries = 0;
   while (true) {
@@ -544,6 +643,7 @@ async function chatWithParseRecovery(client, request) {
         throw err;
       }
       recoveries += 1;
+      hooks.onParseError?.({ recovery: recoveries, error: err });
       messages.push({ role: "user", content: TOOL_CALL_PARSE_NUDGE });
     }
   }
@@ -554,10 +654,13 @@ async function chatWithParseRecovery(client, request) {
  * echoed back on the next round-trip.
  */
 function normalizeAssistantMessage(message) {
-  const normalized = { role: "assistant", content: textOf(message.content) };
-  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-    normalized.tool_calls = message.tool_calls;
-  }
+  const hasTools = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+  const normalized = {
+    role: "assistant",
+    content: hasTools ? "" : textOf(message.content),
+  };
+  if (hasTools) normalized.tool_calls = message.tool_calls;
+  if (message.thinking) normalized.thinking = message.thinking;
   return normalized;
 }
 
@@ -565,8 +668,11 @@ function textOf(content) {
   return typeof content === "string" ? content : "";
 }
 
-function blockedToolOutcome(message) {
-  if (isTerminalVerificationMessage(message)) return verificationCompleteOutcome(message);
+function refusedRepeatOutcome(name, commandText, message) {
+  if (name === "run_command" && isTerminalVerificationMessage(message)) {
+    return verificationCompleteOutcome(message);
+  }
+  if (name === "run_command") return blockedCommandOutcome(commandText, message);
   return { ok: false, error: message };
 }
 
@@ -581,6 +687,13 @@ function toolResultContent(outcome) {
         "status: verification already succeeded",
         "verificationComplete: true",
         "exitCode: 0",
+        `note: ${result.note ?? ""}`.trim(),
+      ].join("\n");
+    }
+    if (String(result.status ?? "") === "blocked") {
+      return [
+        "status: blocked",
+        `command: ${result.command ?? ""}`,
         `note: ${result.note ?? ""}`.trim(),
       ].join("\n");
     }

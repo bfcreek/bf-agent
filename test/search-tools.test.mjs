@@ -86,6 +86,9 @@ test("find_files matches basenames anywhere without '/', whole paths with '/'", 
   const byPath = await registry.execute("find_files", { pattern: "src/deep/*.mjs" });
   assert.match(byPath.result, /src\/deep\/util\.mjs/);
   assert.ok(!byPath.result.includes("src/app.mjs"));
+
+  const bySubstring = await registry.execute("find_files", { pattern: "util" });
+  assert.match(bySubstring.result, /src\/deep\/util\.mjs/);
 });
 
 test("find_files reports when nothing matches", async () => {

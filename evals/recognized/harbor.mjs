@@ -126,6 +126,8 @@ export function buildHarborEnv(input) {
   env.HALO_AGENT_VERSION = input.agentVersion ?? "0.1.0";
   env.HALO_AGENT_MODEL = input.model;
   env.HALO_AGENT_BASE_URL = input.containerBaseUrl;
+  env.PYTHONUTF8 = "1";
+  env.PYTHONIOENCODING = "utf-8";
   return env;
 }
 

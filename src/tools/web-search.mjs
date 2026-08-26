@@ -163,6 +163,15 @@ export async function searchDuckDuckGo({
  * @returns {string}
  */
 export function formatWebSearchResults(results, query) {
+  if (!results?.length) {
+    return [
+      `0 web result(s) for '${query}'.`,
+      "Empty results are a real outcome — do not retry the same query.",
+      "If you were looking up an installed package or local API, inspect the",
+      "environment instead, e.g. `python -c \"import mobile_sam; print(dir(mobile_sam))\"`",
+      "or read local docs / installed package files with grep_search and read_file.",
+    ].join("\n");
+  }
   const lines = [`${results.length} web result(s) for '${query}':`, ""];
   for (let i = 0; i < results.length; i++) {
     const hit = results[i];
@@ -187,7 +196,7 @@ export function registerWebSearchTool(registry, { fetchImpl } = {}) {
       "snippets. Use for current events, upstream docs, release notes, package " +
       "versions, and anything outside this workspace. Follow up with fetch_url on " +
       "promising result URLs (pass a query for micro-RAG). Prefer workspace tools " +
-      "(read_file, grep_search, search_project) for project-local questions.",
+      "(read_file, grep_search, find_files) for project-local questions.",
     parameters: {
       type: "object",
       properties: {
@@ -203,12 +212,18 @@ export function registerWebSearchTool(registry, { fetchImpl } = {}) {
       required: ["query"],
     },
     async execute({ query, max_results }) {
+      if (!String(query ?? "").trim()) {
+        throw new Error("query must not be empty.");
+      }
       const { results, error } = await searchDuckDuckGo({
         query,
         maxResults: max_results,
         fetchImpl,
       });
-      if (error && results.length === 0) throw new Error(error);
+      if (error && results.length === 0) {
+        const empty = formatWebSearchResults([], String(query).trim());
+        return `${empty}\n\nerror: ${error}`;
+      }
       return formatWebSearchResults(results, String(query).trim());
     },
   });

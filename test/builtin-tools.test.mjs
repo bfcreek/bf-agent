@@ -7,7 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { AgentLoop } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot } from "../src/tools/fs.mjs";
+import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot, containsConflictMarkers, conflictMarkerNote } from "../src/tools/fs.mjs";
 import {
   classifyCleanupFileMutation,
 } from "../src/tools/mutation-safety.mjs";
@@ -16,6 +16,7 @@ import {
   cliEmptyStdoutNote,
   extractDeleteTargets,
   findDeleteCommand,
+  findHeredocCommand,
   findInteractiveCommand,
   windowsBashCommandIssue,
 } from "../src/tools/shell.mjs";
@@ -85,6 +86,13 @@ test("read_file supports offset and limit line ranges", async () => {
 
   const tail = await registry.execute("read_file", { path: "lines.txt", offset: 4 });
   assert.deepEqual(tail, { ok: true, result: "four\nfive" });
+
+  const aliased = await registry.execute("read_file", {
+    path: "lines.txt",
+    line_start: 2,
+    line_end: 3,
+  });
+  assert.deepEqual(aliased, { ok: true, result: "two\nthree" });
 });
 
 test("read_file truncates very large files with a marker", async () => {
@@ -99,6 +107,21 @@ test("read_file on a missing file fails gracefully", async () => {
   const read = await registry.execute("read_file", { path: "no-such-file.txt" });
   assert.equal(read.ok, false);
   assert.match(read.error, /read_file/);
+});
+
+test("read_file warns when the file still has merge conflict markers", async () => {
+  await writeFile(
+    path.join(root, "conflict.py"),
+    "<<<<<<< HEAD\ndef map():\n    return 1\n=======\ndef map():\n    return 2\n>>>>>>> feature\n",
+    "utf8",
+  );
+  const read = await registry.execute("read_file", { path: "conflict.py" });
+  assert.equal(read.ok, true);
+  assert.match(read.result, /<<<<<<< HEAD/);
+  assert.match(read.result, /unresolved merge conflict markers/);
+  assert.match(read.result, /edit_file or write_file/);
+  assert.equal(containsConflictMarkers("<<<<<<< HEAD\n"), true);
+  assert.match(conflictMarkerNote("<<<<<<< ours\nfoo\n>>>>>>> theirs\n") ?? "", /<<<<<<</);
 });
 
 test("list_dir marks directories with a trailing slash", async () => {
@@ -293,6 +316,20 @@ test("findInteractiveCommand leaves script and inline invocations alone", () => 
   ]) {
     assert.equal(findInteractiveCommand(command), null, `should not flag: ${command}`);
   }
+});
+
+test("findHeredocCommand flags python/shell heredocs", () => {
+  assert.ok(findHeredocCommand("python - <<'EOF'\nprint(1)\nEOF"));
+  assert.ok(findHeredocCommand("cat <<EOF\nhi\nEOF"));
+  assert.equal(findHeredocCommand("python script.py"), null);
+});
+
+test("run_command refuses heredocs", async () => {
+  const run = await registry.execute("run_command", {
+    command: "python - <<'EOF'\nprint(1)\nEOF",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /heredoc|script file/i);
 });
 
 test("windowsBashCommandIssue blocks bash on Windows unless the user asked for it", () => {
