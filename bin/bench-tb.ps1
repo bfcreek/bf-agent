@@ -30,6 +30,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $RunScript = Join-Path $RepoRoot "evals\recognized\run.mjs"
 $ConfigPath = Join-Path $RepoRoot "evals\recognized\config.json"

@@ -37,6 +37,7 @@ import {
   TOOL_NUDGE_AMBIGUOUS_EDIT,
   TOOL_NUDGE_EDIT_MISS_REWRITE,
   TOOL_NUDGE_DELIVERABLE,
+  TOOL_NUDGE_DELIVERABLE_VERIFY,
   TOOL_NUDGE_EMPTY_AFTER_TOOLS,
   TOOL_NUDGE_EMPTY_ANSWER,
   TOOL_NUDGE_EMPTY_VALUE,
@@ -1069,6 +1070,39 @@ test("generic diff/awk/head exit 0 is not task verification", () => {
       nudgeCount: 0,
     }),
     TOOL_NUDGE_DELIVERABLE,
+  );
+});
+
+test("completionVerifyNudge requires behavioral verification after stub deliverable exists", () => {
+  const goal =
+    "Write sim.out and run the simulator — it must print fib(10)=55 and fib(20)=6765.";
+  const steps = [
+    {
+      kind: "tool-calls",
+      toolCalls: [
+        {
+          name: "write_file",
+          ok: true,
+          args: { path: "sim.out", content: "" },
+          result: { path: "sim.out" },
+        },
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "test -f sim.out" },
+          result: { status: "success", exitCode: 0, stdout: "" },
+        },
+      ],
+    },
+  ];
+  assert.equal(
+    completionVerifyNudge({
+      goal,
+      answerText: "Done.",
+      steps,
+      nudgeCount: 0,
+    }),
+    TOOL_NUDGE_DELIVERABLE_VERIFY,
   );
 });
 

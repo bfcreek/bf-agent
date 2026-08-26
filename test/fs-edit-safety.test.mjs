@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { nearbySnippet, normalizeWorkspaceRelativePath, replaceFlexible, replaceOnce, truncatedSourceIssue, suggestedUniqueSnippets, windowsBashScriptIssue } from "../src/tools/fs.mjs";
+import { nearbySnippet, normalizeWorkspaceRelativePath, replaceFlexible, replaceOnce, truncatedSourceIssue, suggestedUniqueSnippets, windowsBashScriptIssue, largeInlineWriteHint } from "../src/tools/fs.mjs";
 
 let root;
 let registry;
@@ -314,6 +314,16 @@ test("edit_file suggests similar paths when the target is missing", async () => 
   assert.equal(edit.ok, false);
   assert.match(edit.error, /does not exist/);
   assert.match(edit.error, /MathOps\.cs|Did you mean/i);
+});
+
+test("largeInlineWriteHint steers toward generator scripts for huge artifacts", () => {
+  const goal = "Generate output.txt with at least 5000 lines of data.";
+  assert.match(
+    largeInlineWriteHint(goal, "line1\nline2\n"),
+    /generator script|run_command/i,
+  );
+  assert.equal(largeInlineWriteHint(goal, "x\n".repeat(400)), null);
+  assert.equal(largeInlineWriteHint("Write hello.txt", "hi"), null);
 });
 
 test("truncatedSourceIssue flags unbalanced C# and accepts a complete class", () => {

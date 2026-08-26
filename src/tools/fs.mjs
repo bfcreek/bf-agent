@@ -253,6 +253,33 @@ export function truncateOutput(text, limit = MAX_TOOL_OUTPUT_CHARS) {
 }
 
 /**
+ * When the goal implies a very large generated artifact but write_file content
+ * is tiny, steer toward a generator script + run_command.
+ *
+ * @param {string} [goal]
+ * @param {string} content
+ * @returns {string|null}
+ */
+export function largeInlineWriteHint(goal, content) {
+  const text = String(goal ?? "");
+  const sizeMatch =
+    text.match(/\b(\d{3,})\s*lines?\b/i) ||
+    text.match(/\b(?:at least|over|more than)\s+(\d{3,})\s*lines?\b/i);
+  if (!sizeMatch) return null;
+  const expectedMin = Number(sizeMatch[1]);
+  if (!Number.isFinite(expectedMin) || expectedMin < 1000) return null;
+  const body = String(content ?? "");
+  const lines = body ? body.split(/\n/).length : 0;
+  if (lines >= Math.max(50, Math.floor(expectedMin * 0.05))) return null;
+  if (body.length > 8000) return null;
+  return (
+    `Note: the goal implies ~${expectedMin}+ lines, but write_file content is only ${lines} line(s). ` +
+    "Prefer write_file a short generator script, then run_command it to produce the large artifact " +
+    "instead of inlining the full output."
+  );
+}
+
+/**
  * Cap output keeping the head and tail. Command output (build logs, test
  * runs) usually has the interesting part — the error — at the end, so plain
  * head truncation would hide it.
@@ -568,7 +595,7 @@ export function registerFileTools(registry, { workspaceRoot }) {
     name: "write_file",
     requiresApproval: true,
     description:
-      "Create or overwrite a text file inside the workspace. Missing parent directories are created. Use edit_file to change part of an existing file. Do not create a file the user asked you to edit if that file is missing; report the missing path instead." +
+      "Create or overwrite a text file inside the workspace. Missing parent directories are created. Use edit_file to change part of an existing file. Do not create a file the user asked you to edit if that file is missing; report the missing path instead. For very large generated artifacts (1000+ lines), prefer write_file a short generator script then run_command it — do not inline the full output." +
       (process.platform === "win32"
         ? " On Windows, new shell scripts must be PowerShell (.ps1), not bash/.sh, unless the user asked for bash."
         : ""),
@@ -596,7 +623,10 @@ export function registerFileTools(registry, { workspaceRoot }) {
       if (bashScript) throw new Error(bashScript);
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, text, "utf8");
-      return { path: path.relative(root, target), bytesWritten: Buffer.byteLength(text) };
+      const result = { path: path.relative(root, target), bytesWritten: Buffer.byteLength(text) };
+      const largeHint = largeInlineWriteHint(registry.runContext?.goal, text);
+      if (largeHint) result.note = largeHint;
+      return result;
     },
   });
 

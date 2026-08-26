@@ -76,6 +76,88 @@ export function estimateTokens(messages, observedTokens = 0) {
  * @returns {Promise<Array<object>>} The original array when nothing was
  *   compacted, otherwise a new compacted array.
  */
+const REPETITIVE_PHRASE_MIN_REPEATS = 5;
+const REPETITIVE_PHRASE_MIN_LEN = 12;
+
+/**
+ * Detect degenerate loops where the same phrase is repeated many times in
+ * assistant thinking/prose and collapse it with a forced-replan note.
+ *
+ * @param {Array<object>} messages
+ * @param {{ minRepeats?: number, minPhraseLen?: number }} [options]
+ * @returns {Array<object>}
+ */
+export function collapseRepetitiveThinking(
+  messages,
+  { minRepeats = REPETITIVE_PHRASE_MIN_REPEATS, minPhraseLen = REPETITIVE_PHRASE_MIN_LEN } = {},
+) {
+  const replanNote =
+    "\n[repetitive thinking collapsed — stop looping on the same phrase; " +
+    "state one concrete next action or pivot (e.g. write a generator script and run_command it)]";
+  let changed = false;
+  const out = (messages ?? []).map((m) => {
+    if (m.role !== "assistant") return m;
+    const next = { ...m };
+    const text = typeof next.thinking === "string" ? next.thinking : "";
+    if (!text || next.tool_calls) return m;
+    const collapsed = collapseRepeatedPhrase(text, minRepeats, minPhraseLen);
+    if (collapsed !== text) {
+      next.thinking = collapsed + replanNote;
+      changed = true;
+      return next;
+    }
+    return m;
+  });
+  return changed ? out : messages;
+}
+
+/**
+ * @param {string} text
+ * @param {number} minRepeats
+ * @param {number} minPhraseLen
+ * @returns {string}
+ */
+export function collapseRepeatedPhrase(text, minRepeats, minPhraseLen) {
+  const body = String(text ?? "");
+  if (body.length < minPhraseLen * minRepeats) return body;
+
+  const sentences = body.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  if (sentences.length >= minRepeats) {
+    const first = sentences[0];
+    if (first.length >= minPhraseLen && sentences.every((s) => s === first)) {
+      return `${first} …`;
+    }
+  }
+
+  const lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length >= minRepeats) {
+    const first = lines[0];
+    if (first.length >= minPhraseLen && /\s/.test(first)) {
+      const same = lines.filter((l) => l === first);
+      if (same.length >= minRepeats) return `${first} …`;
+    }
+  }
+
+  const maxPhrase = Math.min(120, Math.floor(body.length / minRepeats));
+  for (let len = maxPhrase; len >= minPhraseLen; len--) {
+    for (let i = 0; i <= body.length - len * minRepeats; i++) {
+      const phrase = body.slice(i, i + len);
+      if (!phrase.trim() || !/\s/.test(phrase)) continue;
+      if (new Set(phrase.replace(/\s/g, "")).size <= 2) continue;
+      let count = 1;
+      let pos = i + len;
+      while (pos + len <= body.length && body.slice(pos, pos + len) === phrase) {
+        count++;
+        pos += len;
+      }
+      if (count >= minRepeats) {
+        return body.slice(0, i) + phrase.trim() + " …";
+      }
+    }
+  }
+  return body;
+}
+
 export async function compactMessages({
   client,
   messages,
@@ -85,6 +167,7 @@ export async function compactMessages({
   keepRecent = DEFAULT_KEEP_RECENT,
 }) {
   messages = capSpeculativeReasoning(messages);
+  messages = collapseRepetitiveThinking(messages);
   const overBudget = maxTokens
     ? estimateTokens(messages, observedTokens) > maxTokens
     : transcriptSize(messages) > maxChars;

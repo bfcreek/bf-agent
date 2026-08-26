@@ -13,3 +13,5 @@ evals/recognized/results/
 workspace/*
 !workspace/.gitkeep
 docker-compose.override.yml
+artifacts/
+scripts/release/.env.release

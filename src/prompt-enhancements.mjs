@@ -156,7 +156,14 @@ const TASK_HINT_RULES = [
     test:
       /\b(?:titled|named|called|output (?:fasta )?file|save as|write (?:to|into))\b.{0,80}\b[\w./-]+\.[A-Za-z0-9]+\b|\b[\w.-]+\.(fasta|fa|csv|json|txt)\b.{0,40}\b(?:output|create|write|save)\b/i,
     constraint:
-      "The instruction names an output artifact. Create it with write_file (or an explicit redirect to that path) before any stop condition. Exit 0 alone does not mean the task is done unless the required output artifact exists. If no files were changed, keep working or report failure — do not stop. Workspace paths are relative to the root: if the root is /app, write_file 'filter.py' not 'app/filter.py' or '/app/filter.py' (those create /app/app/filter.py).",
+      "The instruction names an output artifact. Create it with write_file (or an explicit redirect to that path) before any stop condition. Exit 0 alone does not mean the task is done unless the required output artifact exists. If no files were changed, keep working or report failure — do not stop. Workspace paths are relative to the root: if the root is /app, write_file 'filter.py' not 'app/filter.py' or '/app/filter.py' (those create /app/app/filter.py). After the file exists, run the instruction's behavioral verification (simulation, CLI, or named test) and confirm stdout matches — file-exists is not completion when output values are specified.",
+  },
+  {
+    id: "computation-deliverable",
+    test:
+      /\b(simulat|comput|generat|fibonacci|circuit|intractable|must print|should print|prints?\s+(?:the\s+)?(?:value|result|output)|expected (?:output|value))\b/i,
+    constraint:
+      "This is a computation/simulation task — an empty or stub output file is not done. If brute force looks intractable, pivot: write_file a short generator script, then run_command it (do not inline thousands of lines in write_file). 'Create file then finish' is invalid; require a verification run whose stdout matches the instruction before stopping.",
   },
   {
     id: "html-sanitize",
@@ -286,6 +293,7 @@ export const PLANNING_USER_MESSAGE = [
   "For threshold/optimization tasks, plan measure → iterate until threshold; re-run solvers after any baseline that overwrites outputs.",
   "For Python script deliverables, plan py_compile plus a demo-path run before the final answer.",
   "For artifact-creation tasks, name the output path and plan write_file of that file before finishing. Exit 0 is not done if the named file is missing. Paths are workspace-relative: if the root is /app, write filter.py not app/filter.py.",
+  "For computation/simulation tasks, plan a generator script + run_command when inline content would be huge; block placeholder stubs. Plan a final verify step with named stdout checks.",
   "For HTML/JS sanitization tasks, plan a parser + allowlist (not regex-only) and a clean-HTML regression fixture covering XSS bypass classes.",
   "For gRPC/protobuf tasks, use the instruction's exact field names in the .proto; after starting a server, plan a short RPC/TCP check.",
   "For numeric fitting/artifact tasks, plan a domain-range sanity check of written values before claiming success.",
@@ -372,6 +380,13 @@ export const TOOL_NUDGE_DELIVERABLE = [
   "Do not finish yet — the instruction names an output file that has not been created.",
   "write_file (or otherwise create) that path, then confirm it exists.",
   "Exit 0 alone does not mean the task is done unless the required output artifact exists.",
+].join(" ");
+
+export const TOOL_NUDGE_DELIVERABLE_VERIFY = [
+  "The output file exists, but that alone is not completion when the instruction defines behavioral output.",
+  "Re-read the original goal and run the named verification command (simulation, CLI, or test)",
+  "with run_command; confirm stdout matches the expected values before stopping.",
+  "Empty or stub file contents do not satisfy a computation/simulation task.",
 ].join(" ");
 
 export const TOOL_NUDGE_MERGE_CONFLICT = [
@@ -1161,6 +1176,45 @@ function ranDeliverableSmoke(calls, pathName) {
   });
 }
 
+/**
+ * Goals where file-exists is insufficient — behavioral stdout is required.
+ * @param {string} goal
+ * @returns {boolean}
+ */
+export function goalRequiresBehavioralVerification(goal) {
+  const text = String(goal ?? "");
+  if (goalRequiresTestVerify(text)) return true;
+  if (extractNamedNodeCommands(text).some((c) => !String(c).startsWith("/"))) return true;
+  if (extractSmokeSubcommands(text).length > 0) return true;
+  if (/\b(must print|should print|prints?\s+(?:the\s+)?(?:value|result|output)|simulate|sim\b|expected (?:output|value)|stdout)\b/i.test(text)) {
+    return true;
+  }
+  return detectTaskHints(text).some((h) =>
+    ["computation-deliverable", "numeric-artifact", "test-verify", "script-smoke", "artifact-create"].includes(
+      h.id,
+    ),
+  );
+}
+
+/**
+ * @param {Array<object>} calls
+ * @param {string} goal
+ * @returns {boolean}
+ */
+export function hasBehavioralVerification(calls, goal) {
+  if (hasSuccessfulTestRun(calls)) return true;
+  if (hasCliSmokeRun(calls, goal)) return true;
+  const named = extractNamedNodeCommands(goal).filter((c) => !String(c).startsWith("/"));
+  if (named.some((cmd) => ranNamedCommand(calls, cmd))) return true;
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) return false;
+    const cmd = runCommandText(c);
+    if (isDiagnosticCommand(cmd, goal) || isExistenceCheckCommand(cmd)) return false;
+    if (isTaskNamedVerificationCommand(cmd, goal)) return true;
+    return commandStdout(c.result).trim().length > 0;
+  });
+}
+
 function callResultText(call) {
   const parts = [];
   const r = call?.result;
@@ -1293,9 +1347,17 @@ export function missingRequiredVerification(goal, calls) {
     missing.push("smoke-test the CLI with at least one run_command");
   }
   const verifyFiles = extractNamedVerifyFiles(goal);
-  for (const file of extractNamedDeliverables(goal).filter(isCreatedFileDeliverable)) {
+  const createdDeliverables = extractNamedDeliverables(goal).filter(isCreatedFileDeliverable);
+  for (const file of createdDeliverables) {
     if (verifyFiles.some((v) => v.toLowerCase() === String(file).toLowerCase())) continue;
     if (!wroteNamedDeliverable(calls, file)) missing.push(`create ${file}`);
+  }
+  if (
+    createdDeliverables.some((file) => wroteNamedDeliverable(calls, file)) &&
+    goalRequiresBehavioralVerification(goal) &&
+    !hasBehavioralVerification(calls, goal)
+  ) {
+    missing.push("run behavioral verification (named command with expected stdout)");
   }
   for (const file of verifyFiles) {
     if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
@@ -1587,6 +1649,9 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
     }
     if (missing.some((item) => String(item).startsWith("create "))) {
       return TOOL_NUDGE_DELIVERABLE;
+    }
+    if (missing.some((item) => /behavioral verification/i.test(item))) {
+      return TOOL_NUDGE_DELIVERABLE_VERIFY;
     }
     return `Do not finish yet — still need: ${missing.slice(0, 5).join("; ")}.`;
   }

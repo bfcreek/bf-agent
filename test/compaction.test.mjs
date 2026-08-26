@@ -4,6 +4,8 @@ import { test } from "node:test";
 import { AgentLoop } from "../src/agent-loop.mjs";
 import {
   capSpeculativeReasoning,
+  collapseRepetitiveThinking,
+  collapseRepeatedPhrase,
   compactMessages,
   estimateTokens,
   extractOriginalInstruction,
@@ -297,6 +299,26 @@ test("formatVerificationRecap keeps verbatim stdout for recent commands", () => 
   assert.match(recap, /apt 2\.4\.11/);
   assert.match(recap, /blocked/);
   assert.match(recap, /stdout:\n\(empty\)|blocked/);
+});
+
+test("collapseRepetitiveThinking truncates degenerate repeated phrases", () => {
+  const phrase = "I need to reconsider the approach. ";
+  const thinking = phrase.repeat(8);
+  const messages = [
+    { role: "system", content: "SYSTEM" },
+    { role: "user", content: "Build the circuit output." },
+    { role: "assistant", content: "working", thinking },
+  ];
+  const result = collapseRepetitiveThinking(messages);
+  assert.notEqual(result, messages);
+  assert.ok(result[2].thinking.length < thinking.length);
+  assert.match(result[2].thinking, /repetitive thinking collapsed/i);
+  assert.equal(result[2].content, "working");
+});
+
+test("collapseRepeatedPhrase leaves normal prose alone", () => {
+  const text = "Plan: read the spec, write a generator, run_command it, verify stdout.";
+  assert.equal(collapseRepeatedPhrase(text, 5, 12), text);
 });
 
 test("capSpeculativeReasoning truncates long think before git setup", async () => {

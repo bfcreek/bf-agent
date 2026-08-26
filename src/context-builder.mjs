@@ -47,6 +47,7 @@ export async function buildEnvironmentContext({
     `- Workspace root: ${root} — file tool paths are relative to this directory.`,
     `- Do not prefix paths with the workspace folder name. If the root is /app, write_file "filter.py" not "app/filter.py" or "/app/filter.py" (those create /app/app/filter.py).`,
     `- Multi-line scripts: write_file a path then run_command that path — do not put large heredocs or nested quotes inside run_command JSON.`,
+    `- Artifact tasks: creating an empty/stub file is not completion when the instruction defines behavioral output — run the named verification command and match stdout before stopping.`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
     ...(isWindows
       ? [
