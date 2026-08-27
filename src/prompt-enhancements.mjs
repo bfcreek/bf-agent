@@ -34,6 +34,12 @@ export function isGreenfieldScaffoldGoal(goal) {
  */
 const TASK_HINT_RULES = [
   {
+    id: "artifact-only",
+    test: (text) => isArtifactOnlyGoal(text),
+    constraint:
+      "This is artifact-only: read the named input files, compute the result, write_file the output path. Do not hunt for test.mjs/test.py — the instruction did not name them. After write_file, read_file the output to confirm format, then finish.",
+  },
+  {
     id: "test-fix",
     test: /\b(failing tests?|tests?\s+fail|\bit fails?\b|fix.{0,60}\btests?\b|(?:test|spec|suite).{0,40}\b(fail|fails|broken|error)\b)\b/i,
     constraint:
@@ -149,7 +155,7 @@ const TASK_HINT_RULES = [
     test:
       /\b(?:from source|compile|compcert|\.\/configure|make\s+install|apt-?get\s+install|wget\s+https?:)\b/i,
     constraint:
-      "This is a multi-step build. Prefer run_command with curl/wget over fetch_url for archives. Checklist: locate a direct URL → shell download → extract to the named path → compile → install → run the instruction’s sanity command. After 2–3 HTTP 404/empty-search failures, switch approach (archive.org, apt-cache, FTP mirrors). Environment probes are not completion.",
+      "This is a multi-step build. Prefer run_command with curl/wget over fetch_url for archives. When the instruction names a specific source channel (e.g. Debian packages, apt), use that channel via shell tools — do not switch to alternate mirrors because fetch_url returned 503. System paths (/etc/apt, /usr/local/bin) must be changed with run_command (tee, apt, install), not write_file. Checklist: locate source → download → extract → compile → install → run every acceptance command named in the instruction (exit 0 + expected output shape). After installing build-essential or similar, re-run the last failed compile/make step before exploring new strategies. After 2–3 HTTP 404/empty-search failures, switch approach within the required channel. Environment probes are not completion.",
   },
   {
     id: "artifact-create",
@@ -722,7 +728,7 @@ export function deliverableDriftNudge({ goal, steps } = {}) {
   if (!last?.ok || !MUTATING_TOOL_NAMES.has(last.name)) return null;
   const deliverables = extractNamedDeliverables(goal).filter(isCreatedFileDeliverable);
   const hints = detectTaskHints(goal);
-  if (!deliverables.length && !hints.some((h) => h.id === "script-smoke" || h.id === "artifact-create")) {
+  if (!deliverables.length && !hints.some((h) => h.id === "script-smoke" || h.id === "artifact-create" || h.id === "artifact-only")) {
     return null;
   }
   const pathName = String(last.result?.path ?? last.args?.path ?? "");
@@ -973,7 +979,86 @@ export function isExistenceCheckCommand(cmd) {
   return /\b(?:test\s+-[efd]|Test-Path|Get-Item|stat\s+|ls\s+)/i.test(String(cmd ?? ""));
 }
 
-const DATA_FILE_EXT = /\.(fasta|fa|txt|json|csv|out|md|xml|yml|yaml|html|tsv)$/i;
+const DATA_FILE_EXT = /\.(fasta|fa|txt|json|csv|out|md|xml|yml|yaml|html|tsv|ics)$/i;
+
+const SOURCE_OR_TEST_EXT =
+  /\.(mjs|js|ts|py|cs|sh|ps1|go|rs|c|cpp|h|java|rb|tsx|jsx|vue)$/i;
+const TEST_FILE_RE = /\b(?:test|spec|suite)\./i;
+
+/**
+ * True when the workspace listing has no source or test scripts (data-only).
+ * @param {string[]} [entries] Top-level names from listWorkspaceTopLevel.
+ * @returns {boolean}
+ */
+export function workspaceHasOnlyDataFiles(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return false;
+  return entries.every((name) => {
+    const base = String(name).replace(/\/$/, "");
+    if (TEST_FILE_RE.test(base)) return false;
+    if (SOURCE_OR_TEST_EXT.test(base)) return false;
+    return true;
+  });
+}
+
+/**
+ * Instruction names an output artifact and does not name test/verify commands.
+ * @param {string} goal
+ * @param {{ workspaceEntries?: string[] }} [options]
+ * @returns {boolean}
+ */
+export function isArtifactOnlyGoal(goal, { workspaceEntries } = {}) {
+  const text = String(goal ?? "");
+  const deliverables = extractNamedDeliverables(text).filter(isCreatedFileDeliverable);
+  if (deliverables.length === 0) return false;
+  if (isHarborStyleGoal(text)) {
+    if (
+      extractNamedNodeCommands(text).some(
+        (c) => isTestSuiteCommand(c) || /\b(?:pytest|dotnet\s+test)\b/i.test(c),
+      )
+    ) {
+      return false;
+    }
+  } else if (
+    /\b(failing tests?|tests?\s+fail|\brun\b.{0,50}\b(test\.mjs|test\.py|tests?|dotnet\s+run)\b)/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  const named = extractNamedNodeCommands(text).filter((c) => !String(c).startsWith("/"));
+  if (named.some((c) => isTestSuiteCommand(c) || /\bdotnet\s+run\b/i.test(c))) return false;
+  if (named.some((c) => !isExistenceCheckCommand(c))) return false;
+  if (/\b(must print|should print|simulate|sim\b|expected (?:output|value))\b/i.test(text)) {
+    return false;
+  }
+  if (workspaceEntries?.length && !workspaceHasOnlyDataFiles(workspaceEntries)) return false;
+  return true;
+}
+
+/**
+ * Artifact deliverable written with no instruction-named verify command left.
+ * @param {string} goal
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function isArtifactOnlyTerminalSuccess(goal, calls) {
+  if (!isArtifactOnlyGoal(goal)) return false;
+  const deliverables = extractNamedDeliverables(goal).filter(isCreatedFileDeliverable);
+  if (!deliverables.every((file) => wroteNamedDeliverable(calls, file))) return false;
+  return missingInstructionNamedVerification(goal, calls).length === 0;
+}
+
+function missingInstructionNamedVerification(goal, calls) {
+  const missing = [];
+  for (const cmd of extractNamedNodeCommands(goal).filter((c) => !String(c).startsWith("/"))) {
+    if (isExistenceCheckCommand(cmd)) continue;
+    if (!ranNamedCommand(calls, cmd)) missing.push(cmd);
+  }
+  for (const file of extractNamedVerifyFiles(goal)) {
+    if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
+  }
+  return missing;
+}
 
 /**
  * @param {object} call
@@ -1087,9 +1172,67 @@ function commandAlreadySucceeded(calls, cmd) {
     const c = calls[i];
     if (MUTATING_TOOL_NAMES.has(c.name) && c.ok) return false;
     if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
-    if (looksLikeOutputClobberCommand(runCommandText(c))) return false;
+    const cmdText = runCommandText(c);
+    if (looksLikeOutputClobberCommand(cmdText)) return false;
+    if (looksLikeAptSourcesConfigChange(cmdText)) return false;
+  }
+  if (/\bapt(-get)?\s+update\b/i.test(needle)) {
+    for (let i = 0; i < calls.length; i++) {
+      const c = calls[i];
+      if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
+      if (looksLikeAptSourcesConfigChange(runCommandText(c)) && i > lastSuccess) return false;
+    }
   }
   return true;
+}
+
+/**
+ * Shell edits to apt sources invalidate a prior successful apt-get update dedup.
+ * @param {string} cmd
+ */
+export function looksLikeAptSourcesConfigChange(cmd) {
+  const text = String(cmd ?? "");
+  if (!/\b(?:sources\.list|\.sources)\b/i.test(text)) return false;
+  return /(?:tee|>>|>|sed\s+-i|\bcp\s+|\bmv\s+|echo\s+[^|]+\|)/i.test(text);
+}
+
+export const TOOL_NUDGE_BUILD_RERUN = [
+  "Build dependencies were just installed.",
+  "Re-run the last failed compile/make/configure command before exploring a new strategy.",
+].join(" ");
+
+/**
+ * After apt install of build tools, nudge re-running the last failed build step.
+ * @param {{ steps?: Array<{ toolCalls?: Array<object> }> }} input
+ * @returns {string|null}
+ */
+export function buildDepsInstallRerunNudge({ steps } = {}) {
+  const calls = flattenToolCalls(steps);
+  let lastFailedBuild = -1;
+  let lastBuildInstall = -1;
+  for (let i = 0; i < calls.length; i++) {
+    const c = calls[i];
+    if (!isActualRun(c)) continue;
+    const cmd = runCommandText(c);
+    if (/\b(?:\.\/configure|make\b|cmake|compile\.sh|npm\s+run\s+build|dotnet\s+build)\b/i.test(cmd)) {
+      if (commandExitCode(c.result) !== 0) lastFailedBuild = i;
+    }
+    if (
+      /\bapt(-get)?\s+install\b/i.test(cmd) &&
+      commandExitCode(c.result) === 0 &&
+      /\b(build-essential|gcc|g\+\+|make|cmake)\b/i.test(cmd)
+    ) {
+      lastBuildInstall = i;
+    }
+  }
+  if (lastBuildInstall < 0 || lastFailedBuild < 0) return null;
+  if (lastBuildInstall <= lastFailedBuild) return null;
+  const reran = calls.slice(lastBuildInstall + 1).some((c) => {
+    if (!isActualRun(c)) return false;
+    const cmd = runCommandText(c);
+    return /\b(?:\.\/configure|make\b|cmake|compile\.sh)\b/i.test(cmd);
+  });
+  return reran ? null : TOOL_NUDGE_BUILD_RERUN;
 }
 
 /**
@@ -1336,6 +1479,7 @@ function ranDeliverableSmoke(calls, pathName) {
  * @returns {boolean}
  */
 export function goalRequiresBehavioralVerification(goal) {
+  if (isArtifactOnlyGoal(goal)) return false;
   const text = String(goal ?? "");
   if (goalRequiresTestVerify(text)) return true;
   if (extractNamedNodeCommands(text).some((c) => !String(c).startsWith("/"))) return true;
@@ -1513,6 +1657,13 @@ export function missingRequiredVerification(goal, calls) {
   ) {
     missing.push("run behavioral verification (named command with expected stdout)");
   }
+  if (isArtifactOnlyTerminalSuccess(goal, calls)) {
+    return missing.filter(
+      (item) =>
+        item !== "run the test command until it exits 0" &&
+        !/behavioral verification/i.test(item),
+    );
+  }
   for (const file of verifyFiles) {
     if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
   }
@@ -1684,6 +1835,34 @@ export function extractCompilerDiagnostics(text) {
   return [...new Set(hits.map((l) => l.trim()))].slice(0, 20).join("\n");
 }
 
+export const TOOL_NUDGE_DIAGNOSTIC_FINAL_ANSWER = [
+  "Do not cite environment probes (node -v, python --version, apt-get --version) as task verification.",
+  "State only files you changed and instruction-named commands that exited 0.",
+].join(" ");
+
+/**
+ * @param {string} answerText
+ * @returns {boolean}
+ */
+export function finalAnswerCitesDiagnostics(answerText) {
+  return /\b(node|nodejs|python3?|py)\s+(-v|--version|-V)\b|\bapt(-get)?\s+--version\b|\buname\b|\bwhich\b/i.test(
+    String(answerText ?? ""),
+  );
+}
+
+/**
+ * Block completion when the final answer treats probes as verification.
+ * @param {object} input
+ * @returns {string|null}
+ */
+export function diagnosticProbeFinalNudge({ answerText, nudgeCount }) {
+  const MAX_TOOL_NUDGES = 2;
+  if (nudgeCount >= MAX_TOOL_NUDGES) return null;
+  if (!String(answerText ?? "").trim()) return null;
+  if (!finalAnswerCitesDiagnostics(answerText)) return null;
+  return TOOL_NUDGE_DIAGNOSTIC_FINAL_ANSWER;
+}
+
 /**
  * Block completion when the model tries to finish with an empty message.
  * @param {object} input
@@ -1762,7 +1941,9 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
 
   if (goalRequiresTestVerify(goal)) {
     if (!hasSuccessfulTestRun(calls)) {
-      if (claimsSuccess || substantiveToolsUsed(steps).size > 0) return TOOL_NUDGE_VERIFY;
+      if (!isArtifactOnlyGoal(goal) && (claimsSuccess || substantiveToolsUsed(steps).size > 0)) {
+        return TOOL_NUDGE_VERIFY;
+      }
     }
   }
 
@@ -1828,7 +2009,7 @@ export function finalAnswerNudge(input) {
   ) {
     return null;
   }
-  return prematureFinalNudge(input) ?? completionVerifyNudge(input) ?? emptyFinalAnswerNudge(input);
+  return prematureFinalNudge(input) ?? completionVerifyNudge(input) ?? diagnosticProbeFinalNudge(input) ?? emptyFinalAnswerNudge(input);
 }
 
 /**
@@ -1940,13 +2121,16 @@ export function repeatedToolCallMessage({ repeatedCount, goal, steps }) {
 
 /**
  * @param {string} goal
+ * @param {{ workspaceEntries?: string[] }} [options]
  * @returns {Array<{id: string, constraint: string}>}
  */
-export function detectTaskHints(goal) {
+export function detectTaskHints(goal, options = {}) {
   const text = String(goal ?? "");
+  const artifactOnly = isArtifactOnlyGoal(text, options);
   const seen = new Set();
   const hints = [];
   for (const rule of TASK_HINT_RULES) {
+    if (artifactOnly && rule.id === "test-fix") continue;
     const matched =
       typeof rule.test === "function" ? rule.test(text) : rule.test?.test?.(text) === true;
     if (matched && !seen.has(rule.id)) {

@@ -11,6 +11,21 @@ import path from "node:path";
 const DEFAULT_MAX_ENTRIES = 40;
 
 /**
+ * Top-level workspace entry names (directories suffixed with `/`).
+ * @param {string} [workspaceRoot]
+ * @param {number} [maxEntries]
+ * @returns {Promise<string[]>}
+ */
+export async function listWorkspaceTopLevel(workspaceRoot, maxEntries = DEFAULT_MAX_ENTRIES) {
+  const root = path.resolve(workspaceRoot ?? process.cwd());
+  const entries = await readdir(root, { withFileTypes: true });
+  const names = entries
+    .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+    .sort((a, b) => a.localeCompare(b));
+  return names.length > maxEntries ? names.slice(0, maxEntries) : names;
+}
+
+/**
  * Describe the environment and workspace as a text block for the system
  * prompt: platform, shell, workspace root, and a top-level listing.
  *
@@ -30,13 +45,12 @@ export async function buildEnvironmentContext({
   let names = [];
   let listingNote = "";
   try {
-    const entries = await readdir(root, { withFileTypes: true });
-    names = entries
-      .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
-      .sort((a, b) => a.localeCompare(b));
-    if (names.length > maxEntries) {
-      listingNote = `(and ${names.length - maxEntries} more entries — use list_dir to see the rest)`;
-      names = names.slice(0, maxEntries);
+    const all = await listWorkspaceTopLevel(root, Number.MAX_SAFE_INTEGER);
+    if (all.length > maxEntries) {
+      listingNote = `(and ${all.length - maxEntries} more entries — use list_dir to see the rest)`;
+      names = all.slice(0, maxEntries);
+    } else {
+      names = all;
     }
   } catch (err) {
     listingNote = `(could not list workspace: ${err?.message ?? err})`;
@@ -48,6 +62,9 @@ export async function buildEnvironmentContext({
     `- Do not prefix paths with the workspace folder name. If the root is /app, write_file "filter.py" not "app/filter.py" or "/app/filter.py" (those create /app/app/filter.py).`,
     `- Multi-line scripts: write_file a path then run_command that path — do not put large heredocs or nested quotes inside run_command JSON.`,
     `- Artifact tasks: creating an empty/stub file is not completion when the instruction defines behavioral output — run the named verification command and match stdout before stopping.`,
+    `- Verification means commands explicitly named in the user instruction — not generic examples like test.mjs or test.py unless the instruction names them. If no such command exists after the artifact is written, re-read the output file and stop.`,
+    `- Never declare a task complete without running every acceptance command named in the instruction and confirming exit 0 plus the expected output shape.`,
+    `- For system paths outside the workspace (/etc/apt, /usr/local/bin), use run_command — write_file cannot touch them.`,
     `- Internal thinking/reasoning never counts as progress — artifact-creation tasks require an early write_file or run_command tool call.`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
     ...(isWindows

@@ -5,7 +5,7 @@
  * summarization call fails, the transcript is left untouched.
  */
 
-import { extractCompilerDiagnostics } from "./prompt-enhancements.mjs";
+import { extractCompilerDiagnostics, isArtifactOnlyGoal, missingRequiredVerification } from "./prompt-enhancements.mjs";
 
 export const DEFAULT_MAX_CHARS = 24_000;
 export const DEFAULT_KEEP_RECENT = 6;
@@ -416,8 +416,13 @@ export function formatVerificationRecap(messages) {
   const fileLines = [...files.entries()].map(([p, s]) => `- ${p}: ${s}`);
   const parts = [];
   if (commandLines.length) {
+    const original = extractOriginalInstruction(messages);
+    const wroteArtifact =
+      isArtifactOnlyGoal(original) && fileLines.some((line) => /: wrote file/.test(line));
     parts.push(
-      "Known verification results (do not re-run a command that already exited 0; still run any named smoke commands that are missing):",
+      wroteArtifact
+        ? "Artifact deliverable written — re-read the output file to confirm format; no test runner is required unless named in the instruction:"
+        : "Known verification results (do not re-run a command that already exited 0; still run any named smoke commands that are missing):",
       ...commandLines,
     );
   }
@@ -470,7 +475,66 @@ export function formatVerificationRecap(messages) {
     );
   }
 
+  const unmet = formatUnmetGoalsChecklist(messages);
+  if (unmet) parts.push(unmet);
+
   return parts.join("\n");
+}
+
+/**
+ * Reconstruct tool outcomes from messages for goal tracking during compaction.
+ * @param {Array<object>} messages
+ * @returns {Array<object>}
+ */
+function callsFromCompactionMessages(messages) {
+  const calls = [];
+  let pending = [];
+  for (const m of messages ?? []) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      pending = m.tool_calls.map((c) => ({
+        name: c.function?.name ?? c.name ?? "",
+        args: parseToolCallArgs(c),
+      }));
+      continue;
+    }
+    if (m.role !== "tool") continue;
+    const call = pending.shift() ?? {};
+    const name = m.tool_name ?? call.name ?? "";
+    const content = String(m.content ?? "");
+    if (name === "run_command") {
+      const { code, status } = parseCommandFields(content);
+      calls.push({
+        name: "run_command",
+        ok: true,
+        args: call.args,
+        result: { exitCode: code, status },
+      });
+    } else if (name === "write_file" || name === "edit_file") {
+      calls.push({
+        name,
+        ok: !/^ERROR:/i.test(content),
+        args: call.args,
+        result: { path: String(call.args?.path ?? jsonField(content, "path") ?? "") },
+      });
+    }
+  }
+  return calls;
+}
+
+/**
+ * Checklist of still-unmet instruction goals for compaction summaries.
+ * @param {Array<object>} messages
+ * @returns {string}
+ */
+export function formatUnmetGoalsChecklist(messages) {
+  const goal = extractOriginalInstruction(messages);
+  if (!goal) return "";
+  const missing = missingRequiredVerification(goal, callsFromCompactionMessages(messages));
+  if (!missing.length) return "";
+  return [
+    "Unmet goals checklist (do not forget near step limits):",
+    ...missing.slice(0, 8).map((item) => `- ${item}`),
+  ].join("\n");
 }
 
 function renderMessage(m) {

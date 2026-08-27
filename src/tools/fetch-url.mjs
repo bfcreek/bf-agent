@@ -78,6 +78,28 @@ export function isPrivateOrLinkLocalIp(host) {
   return false;
 }
 
+function isBinaryContentType(contentType) {
+  const type = String(contentType ?? "").toLowerCase();
+  return (
+    /octet-stream|\/(?:gzip|x-tar|x-bzip|zip|x-compress)/.test(type) ||
+    type.includes("application/tar")
+  );
+}
+
+/**
+ * @param {Buffer} buf
+ * @returns {boolean}
+ */
+function looksLikeBinaryBody(buf) {
+  if (!buf?.length) return false;
+  const sample = buf.subarray(0, Math.min(buf.length, 512));
+  let nonText = 0;
+  for (const byte of sample) {
+    if (byte === 0 || (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13)) nonText++;
+  }
+  return nonText / sample.length > 0.05;
+}
+
 /**
  * HTML → plain text: drop scripts/styles, keep block breaks, strip tags.
  * @param {string} html
@@ -280,13 +302,29 @@ export async function fetchUrlContent({
 
     const contentType = response.headers?.get?.("content-type") ?? "";
     const buf = await readCapped(response, MAX_DOWNLOAD_BYTES);
+    const finalUrl = String(response.url || parsed.toString());
+
+    if (isBinaryContentType(contentType) || looksLikeBinaryBody(buf)) {
+      const suggested = `curl -L -o <path> '${finalUrl}'`;
+      return {
+        ok: true,
+        url: finalUrl,
+        title: "",
+        content: [
+          `Binary or archive content at ${finalUrl} (${contentType || "unknown type"}, ${buf.length} bytes).`,
+          "fetch_url is for readable pages — persist archives with run_command instead:",
+          suggested,
+          "Example: curl -L -o orig.tar.gz 'URL' then tar -xzf orig.tar.gz",
+        ].join("\n"),
+      };
+    }
+
     const body = buf.toString("utf8");
     const { title, text } = bodyToText(body, contentType);
     if (!text) {
       return { ok: false, error: `No readable text extracted from ${parsed}` };
     }
 
-    const finalUrl = String(response.url || parsed.toString());
     const q = String(query ?? "").trim();
 
     if (!q) {

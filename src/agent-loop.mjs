@@ -5,6 +5,7 @@
  */
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
+import { listWorkspaceTopLevel } from "./context-builder.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
   alreadyVerifiedFinishNudge,
@@ -21,6 +22,7 @@ import {
   mutationBlockedUntilPretest,
   PLANNING_USER_MESSAGE,
   redundantVerifyBlock,
+  buildDepsInstallRerunNudge,
   repeatedEditMissNudge,
   repeatedSearchLoopNudge,
   repeatedToolCallMessage,
@@ -116,7 +118,12 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  smallest exact replacement (one key or one line, e.g. '\"debug\": false' ->",
   "  '\"debug\": true') over rewriting the file.",
   "- After changing files, verify the result: re-read the changed part, or run",
-  "  the project's tests or build with run_command when the task calls for it.",
+  "  commands explicitly named in the user instruction with run_command.",
+  "  Generic examples like test.mjs or test.py are not verification unless the",
+  "  instruction names them. If no such command exists after the artifact is",
+  "  written, re-read the output file and stop.",
+  "  Never declare completion without running every acceptance command named",
+  "  in the instruction and confirming exit 0 plus expected output shape.",
   "  Once a required verification command exits 0 with the expected output,",
   "  do not re-run that same command. Different named checks (dotnet build vs a",
   "  smoke-test subcommand, or test.mjs vs a CLI invocation) still each need",
@@ -133,6 +140,11 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  passing verification means the task is done: give your final answer, do",
   "  not run node -v or other diagnostics, and do not mention blocked commands.",
   "- For build/install tasks (apt install, wget, tar, ./configure, make): each",
+  "  step needs its own successful run_command. When the instruction names a",
+  "  specific source channel (Debian packages, apt), stay on that channel —",
+  "  do not switch mirrors because fetch_url failed. System paths (/etc/apt,",
+  "  /usr/local/bin) require run_command, not write_file. After installing",
+  "  build-essential, re-run the last failed compile/make before new strategies.",
   "  step needs its own successful run_command. Environment probes (apt-get",
   "  --version, apt-cache policy, uname, which, diff, awk, head) are not task",
   "  completion. Finish only after a smoke test matching the instruction path",
@@ -365,7 +377,16 @@ export class AgentLoop {
       const explicitGoals = formatExplicitGoals(goal);
       if (explicitGoals) userContent = `${explicitGoals}\n\n${userContent}`;
     }
-    const hints = this.taskHints ? detectTaskHints(goal) : [];
+    const workspaceRoot = this.projectBootstrap?.workspaceRoot ?? process.cwd();
+    let workspaceEntries = [];
+    if (freshTurn) {
+      try {
+        workspaceEntries = await listWorkspaceTopLevel(workspaceRoot);
+      } catch {
+        workspaceEntries = [];
+      }
+    }
+    const hints = this.taskHints ? detectTaskHints(goal, { workspaceEntries }) : [];
     const taskFocus = this.taskHints ? formatTaskConstraints(hints) : "";
     if (taskFocus) userContent = `${taskFocus}\n\n${userContent}`;
 
@@ -658,6 +679,7 @@ export class AgentLoop {
         const editNudge =
           ambiguousEditRecoveryNudge({ steps }) ??
           repeatedEditMissNudge({ steps }) ??
+          buildDepsInstallRerunNudge({ steps }) ??
           repeatedSearchLoopNudge({ steps }) ??
           secretHitWithoutEditNudge({ goal, steps }) ??
           deliverableDriftNudge({ goal, steps });

@@ -29,6 +29,8 @@ import {
   looksVacuousCliStdout,
   missingRequiredVerification,
   PLANNING_USER_MESSAGE,
+  buildDepsInstallRerunNudge,
+  looksLikeAptSourcesConfigChange,
   redundantVerifyBlock,
   isComplexGoal,
   shouldPlanGoal,
@@ -53,6 +55,11 @@ import {
   TOOL_NUDGE_READ_IMPL,
   TOOL_NUDGE_SECRET_HIT,
   secretHitWithoutEditNudge,
+  diagnosticProbeFinalNudge,
+  finalAnswerCitesDiagnostics,
+  isArtifactOnlyGoal,
+  isArtifactOnlyTerminalSuccess,
+  workspaceHasOnlyDataFiles,
 } from "../src/prompt-enhancements.mjs";
 
 test("detectTaskHints matches test-fix and debug goals", () => {
@@ -1375,5 +1382,110 @@ test("completionVerifyNudge blocks sanitize success claims without mutations", (
     }) ?? "",
     /no successful write_file|Do not claim file changes/i,
   );
+});
+
+test("isArtifactOnlyGoal detects ICS output without named tests", () => {
+  const goal =
+    "Read the input constraints and write the output calendar file titled schedule.ics.";
+  assert.equal(isArtifactOnlyGoal(goal), true);
+  assert.ok(detectTaskHints(goal).some((h) => h.id === "artifact-only"));
+  assert.equal(detectTaskHints(goal).some((h) => h.id === "test-fix"), false);
+});
+
+test("workspaceHasOnlyDataFiles requires data-only listing for artifact-only", () => {
+  const goal = "Write the output file titled schedule.ics from input.json.";
+  assert.equal(isArtifactOnlyGoal(goal, { workspaceEntries: ["input.json", "notes.txt"] }), true);
+  assert.equal(
+    isArtifactOnlyGoal(goal, { workspaceEntries: ["input.json", "test.mjs"] }),
+    false,
+  );
+  assert.equal(workspaceHasOnlyDataFiles(["input.json", "data.csv"]), true);
+  assert.equal(workspaceHasOnlyDataFiles(["test.mjs", "input.json"]), false);
+});
+
+test("isArtifactOnlyTerminalSuccess after write_file without test runner", () => {
+  const goal = "Write the calendar output file titled schedule.ics.";
+  const calls = [
+    { name: "write_file", ok: true, args: { path: "schedule.ics" }, result: { path: "schedule.ics" } },
+  ];
+  assert.equal(isArtifactOnlyTerminalSuccess(goal, calls), true);
+  assert.deepEqual(missingRequiredVerification(goal, calls), []);
+});
+
+test("diagnosticProbeFinalNudge blocks node -v in final answer", () => {
+  assert.equal(finalAnswerCitesDiagnostics("Verified with node -v and wrote schedule.ics"), true);
+  assert.match(
+    diagnosticProbeFinalNudge({
+      answerText: "Done — node -v succeeded and schedule.ics was written.",
+      nudgeCount: 0,
+    }) ?? "",
+    /environment probes/i,
+  );
+});
+
+test("looksLikeAptSourcesConfigChange detects shell edits to apt sources", () => {
+  assert.equal(looksLikeAptSourcesConfigChange("echo 'deb ...' | tee /etc/apt/sources.list"), true);
+  assert.equal(looksLikeAptSourcesConfigChange("apt-get update"), false);
+});
+
+test("redundantVerifyBlock allows apt-get update after sources.list change", () => {
+  const goal = "Install pmars from Debian packages.";
+  const steps = [
+    {
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "apt-get update" },
+          result: { exitCode: 0, status: "success" },
+        },
+      ],
+    },
+    {
+      toolCalls: [
+        {
+          name: "run_command",
+          ok: true,
+          args: { command: "echo 'deb http://deb.debian.org/debian stable main' | tee /etc/apt/sources.list" },
+          result: { exitCode: 0, status: "success" },
+        },
+      ],
+    },
+  ];
+  const block = redundantVerifyBlock({
+    goal,
+    steps,
+    toolName: "run_command",
+    args: { command: "apt-get update" },
+  });
+  assert.equal(block, null);
+});
+
+test("buildDepsInstallRerunNudge fires after build-essential install", () => {
+  const nudge = buildDepsInstallRerunNudge({
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "make" },
+            result: { exitCode: 2, status: "FAILED" },
+          },
+        ],
+      },
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "apt-get install -y build-essential" },
+            result: { exitCode: 0, status: "success" },
+          },
+        ],
+      },
+    ],
+  });
+  assert.match(nudge ?? "", /Re-run the last failed compile/i);
 });
 

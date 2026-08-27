@@ -177,3 +177,22 @@ test("fetch_url tool succeeds end to end with mocked HTML", async () => {
   assert.equal(outcome.ok, true);
   assert.match(outcome.result, /Micro-RAG/);
 });
+
+test("fetchUrlContent suggests curl for binary archive responses", async () => {
+  const tarBytes = Buffer.from([0x1f, 0x8b, 0x08, 0x00, ...Array(100).fill(0)]);
+  const result = await fetchUrlContent({
+    url: "https://example.com/package.tar.gz",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      url: "https://example.com/package.tar.gz",
+      headers: { get: () => "application/gzip" },
+      async arrayBuffer() {
+        return tarBytes;
+      },
+    }),
+  });
+  assert.equal(result.ok, true);
+  assert.match(result.content, /curl -L -o/);
+  assert.match(result.content, /run_command/i);
+});

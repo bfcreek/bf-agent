@@ -253,6 +253,19 @@ export function truncateOutput(text, limit = MAX_TOOL_OUTPUT_CHARS) {
 }
 
 /**
+ * After writing structured deliverables, nudge a read_file before completion.
+ * @param {string} filePath
+ * @returns {string|null}
+ */
+export function structuredArtifactReadHint(filePath) {
+  if (/\.(ics|json|yaml|yml|xml|csv|tsv)$/i.test(String(filePath ?? ""))) {
+    const rel = String(filePath).replace(/\\/g, "/");
+    return `Before finishing, read_file ${rel} to confirm the on-disk format.`;
+  }
+  return null;
+}
+
+/**
  * When the goal implies a very large generated artifact but write_file content
  * is tiny, steer toward a generator script + run_command.
  *
@@ -625,7 +638,9 @@ export function registerFileTools(registry, { workspaceRoot }) {
       await writeFile(target, text, "utf8");
       const result = { path: path.relative(root, target), bytesWritten: Buffer.byteLength(text) };
       const largeHint = largeInlineWriteHint(registry.runContext?.goal, text);
-      if (largeHint) result.note = largeHint;
+      const readHint = structuredArtifactReadHint(filePath);
+      const notes = [largeHint, readHint].filter(Boolean);
+      if (notes.length) result.note = notes.join(" ");
       return result;
     },
   });
