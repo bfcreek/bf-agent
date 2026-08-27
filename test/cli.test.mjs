@@ -46,7 +46,7 @@ test("--help prints usage, options, examples, and exit codes", () => {
   assert.match(run.stdout, /Interactive terminal mode/);
   assert.match(run.stdout, /halo-agent serve/);
   assert.match(run.stdout, /halo-agent models/);
-  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json"]) {
+  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json", "--show-plan"]) {
     assert.ok(run.stdout.includes(flag), `help should document ${flag}`);
   }
   assert.match(run.stdout, /Examples:/);

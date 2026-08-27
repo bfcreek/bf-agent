@@ -40,12 +40,14 @@ test("parseCliArgs loads single scenario from config file", () => {
     "base-url": "http://example:11434",
     "max-steps": 5,
     "no-index": true,
+    "show-plan": true,
   });
   assert.deepEqual(errors, []);
   assert.equal(values.model, "llama3.2");
   assert.equal(values.baseUrl, "http://example:11434");
   assert.equal(values.maxSteps, 5);
   assert.equal(values.noIndex, true);
+  assert.equal(values.showPlan, true);
 });
 
 test("normalizeConfigValues reports invalid values", () => {
@@ -79,6 +81,7 @@ test("ensureConfigFile creates a commented template", async () => {
     const text = await readFile(configPath, "utf8");
     assert.match(text, /halo-agent user configuration/);
     assert.match(text, /base-url:/);
+    assert.match(text, /show-plan:/);
 
     await ensureConfigFile();
     const again = await readFile(configPath, "utf8");

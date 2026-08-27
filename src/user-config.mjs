@@ -28,8 +28,10 @@ const CONFIG_TEMPLATE = `# halo-agent user configuration
 # embed-model: nomic-embed-text
 # think: auto
 # quiet: false
+# show-plan: false
 # no-index: false
 # no-plan: false
+# no-replan: false
 # no-hints: false
 # no-memory: false
 # memory-readonly: false
@@ -229,9 +231,11 @@ export function normalizeConfigValues(raw) {
         break;
       }
       case "quiet":
+      case "show-plan":
       case "no-index":
       case "json":
       case "no-plan":
+      case "no-replan":
       case "no-hints":
       case "no-memory":
       case "memory-readonly":
@@ -300,6 +304,10 @@ function configKeyToOption(key) {
       return "noIndex";
     case "no-plan":
       return "noPlan";
+    case "no-replan":
+      return "noReplan";
+    case "show-plan":
+      return "showPlan";
     case "no-hints":
       return "noHints";
     case "no-memory":
@@ -400,6 +408,7 @@ export function getBuiltinDefaults() {
     maxSteps: 10,
     numCtx: DEFAULT_NUM_CTX,
     quiet: false,
+    showPlan: false,
     cwd: process.cwd(),
     port: 11435,
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
@@ -409,6 +418,7 @@ export function getBuiltinDefaults() {
     json: false,
     think: DEFAULT_THINK,
     noPlan: false,
+    noReplan: false,
     noHints: false,
     noMemory: false,
     memoryReadonly: false,

@@ -13,12 +13,27 @@ import {
   verifyAcceptanceContract,
 } from "./acceptance.mjs";
 import { listWorkspaceTopLevel } from "./context-builder.mjs";
-import { computeStruggleScore, EscalationController } from "./escalation.mjs";
+import {
+  computeStruggleScore,
+  DEFAULT_ESCALATION_THRESHOLD,
+  EscalationController,
+} from "./escalation.mjs";
 import {
   maybeWriteLesson,
   recordLessonOutcomes,
   retrieveMemoryHints,
 } from "./memory-store.mjs";
+import {
+  ADJUST_PLAN_MESSAGE,
+  createPlanState,
+  findLastPlanText,
+  formatCheckpoint,
+  markProgress,
+  MAX_REMAINING_REPLANS,
+  missingKey,
+  parsePlanSteps,
+  REPLAN_REMAINING_MESSAGE,
+} from "./plan-state.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
   alreadyVerifiedFinishNudge,
@@ -116,6 +131,8 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  answer must take. The user message may include a ## Goals section — treat",
   "  those bullets as acceptance criteria and do not finish until each is satisfied.",
   "  When planning, restate or refine those goals before your numbered steps.",
+  "  Goals, the numbered plan, and ## Acceptance are internal working notes —",
+  "  do not include them in your final answer unless the user asked for a plan.",
   "",
   "Rules:",
   "- Ground answers in facts from tools; never guess. For questions about this",
@@ -306,7 +323,8 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- In your final answer, mention only files you actually created or edited;",
   "  do not claim you added tests or docs you did not write. If tests were",
   "  already present and left unchanged, say so. Never mention blocked",
-  "  diagnostic commands such as node -v.",
+  "  diagnostic commands such as node -v. Do not paste Goals, Acceptance, or",
+  "  the numbered plan into the final answer — those stay in the planning turn.",
   "- Deleting files is destructive. Delete a file only when the user",
   "  explicitly named it for deletion, and never delete a file the user asked",
   "  to keep. If the task implies deleting files the user did not name (e.g.",
@@ -375,6 +393,8 @@ export class AgentLoop {
    * @param {(info: {readme: boolean, ragHits: number}) => void} [options.onBootstrap]
    * @param {boolean} [options.planning] Pre-pass plan on first turns (default true).
    *   Skips only empty goals and simple read-and-answer prompts.
+   * @param {boolean} [options.replan] Mid-run remaining-step replan + follow-up adjust (default true).
+   *   Ignored when `planning` is false.
    * @param {boolean} [options.taskHints] Append task-type constraints to the user message (default true).
    * @param {boolean} [options.memory] Retrieve episodic memory hints (default true when embed client available).
    * @param {boolean} [options.memoryReadonly] Do not write or update memory stats.
@@ -394,6 +414,7 @@ export class AgentLoop {
     projectBootstrap = false,
     onBootstrap,
     planning = true,
+    replan = true,
     taskHints = true,
     memory = true,
     memoryReadonly = false,
@@ -414,6 +435,7 @@ export class AgentLoop {
     this.projectBootstrap = projectBootstrap;
     this.onBootstrap = onBootstrap;
     this.planning = planning;
+    this.replan = replan;
     this.taskHints = taskHints;
     this.memory = memory;
     this.memoryReadonly = memoryReadonly;
@@ -499,6 +521,24 @@ export class AgentLoop {
     const steps = [];
     let acceptanceContract = buildAcceptanceContract(goal);
     let planText = "";
+    /** @type {import("./plan-state.mjs").PlanState|null} */
+    let planState = null;
+
+    const applyPlanText = (nextPlan, { critique = false } = {}) => {
+      if (!nextPlan) return;
+      planText = nextPlan;
+      planState = createPlanState(planText);
+      acceptanceContract = buildAcceptanceContract(goal, planText);
+      this.onPlan?.({ plan: planText, hints });
+      if (!critique) {
+        const contractBlock = formatAcceptanceContract(acceptanceContract);
+        if (contractBlock) {
+          userContent = `${userContent}\n\n${contractBlock}`;
+          const userMsg = messages.find((m) => m.role === "user");
+          if (userMsg) userMsg.content = userContent;
+        }
+      }
+    };
 
     if (this.planning && freshTurn && shouldPlanGoal(goal) && !signal?.aborted) {
       try {
@@ -510,21 +550,14 @@ export class AgentLoop {
           messages: planMessages,
           signal,
         });
-        planText = textOf(message.content).trim();
-        if (planText) {
+        const firstPlan = textOf(message.content).trim();
+        if (firstPlan) {
           messages.push({ role: "user", content: PLANNING_USER_MESSAGE });
-          messages.push({ role: "assistant", content: planText });
-          const planStep = { index: 0, kind: "plan", content: planText, toolCalls: [] };
+          messages.push({ role: "assistant", content: firstPlan });
+          const planStep = { index: 0, kind: "plan", content: firstPlan, toolCalls: [] };
           steps.push(planStep);
           this.onStep?.(planStep);
-          this.onPlan?.({ plan: planText, hints });
-          acceptanceContract = buildAcceptanceContract(goal, planText);
-          const contractBlock = formatAcceptanceContract(acceptanceContract);
-          if (contractBlock) {
-            userContent = `${userContent}\n\n${contractBlock}`;
-            const userMsg = messages.find((m) => m.role === "user");
-            if (userMsg) userMsg.content = userContent;
-          }
+          applyPlanText(firstPlan);
 
           if (this.critique && !signal?.aborted) {
             try {
@@ -548,8 +581,7 @@ export class AgentLoop {
                 };
                 steps.push(critiqueStep);
                 this.onStep?.(critiqueStep);
-                planText = critiqueText;
-                acceptanceContract = buildAcceptanceContract(goal, critiqueText);
+                applyPlanText(critiqueText, { critique: true });
               }
             } catch {
               // Critique is best-effort.
@@ -558,6 +590,45 @@ export class AgentLoop {
         }
       } catch {
         // Planning is best-effort — proceed without it.
+      }
+    } else if (
+      this.planning &&
+      this.replan &&
+      !freshTurn &&
+      shouldPlanGoal(goal) &&
+      !signal?.aborted
+    ) {
+      try {
+        const priorPlan = findLastPlanText(messages);
+        if (priorPlan) {
+          const adjustMessages = [
+            ...messages,
+            {
+              role: "user",
+              content: `Prior plan for context:\n${priorPlan}`,
+            },
+            { role: "user", content: ADJUST_PLAN_MESSAGE },
+          ];
+          const { message } = await chatWithRetry(this.client, {
+            messages: adjustMessages,
+            signal,
+          });
+          const adjusted = textOf(message.content).trim();
+          if (adjusted && isUsablePlanText(adjusted)) {
+            messages.push({
+              role: "user",
+              content: `Prior plan for context:\n${priorPlan}`,
+            });
+            messages.push({ role: "user", content: ADJUST_PLAN_MESSAGE });
+            messages.push({ role: "assistant", content: adjusted });
+            const adjustStep = { index: 0, kind: "plan", content: adjusted, toolCalls: [] };
+            steps.push(adjustStep);
+            this.onStep?.(adjustStep);
+            applyPlanText(adjusted);
+          }
+        }
+      } catch {
+        // Adjust-plan is best-effort.
       }
     }
 
@@ -580,6 +651,11 @@ export class AgentLoop {
     let workOutstanding = false;
     let escalationBlockReported = false;
     let acceptanceNudgeCount = 0;
+    let replanCount = 0;
+    let checkpointInjected = false;
+    let lastMissingFingerprint = "";
+    let stuckMissingCount = 0;
+    let lastReplanPaidSteps = -Infinity;
     const maxAcceptanceNudges = Math.max(
       MIN_ACCEPTANCE_NUDGES,
       Math.floor(this.maxSteps * ACCEPTANCE_NUDGE_BUDGET_RATIO),
@@ -641,10 +717,10 @@ export class AgentLoop {
         return finalizeRun({ text: "", stopReason: "aborted", steps, messages });
       }
 
-      if (this.escalation) {
-        budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
-        // Only probed once the budget is half gone, so early steps pay nothing.
-        if (this.acceptance && acceptanceContract?.checks?.length && budgetPressure >= 0.5) {
+      budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
+
+      if (budgetPressure >= 0.5) {
+        if (this.acceptance && acceptanceContract?.checks?.length) {
           const progress = await verifyAcceptanceContract({
             contract: acceptanceContract,
             steps,
@@ -652,7 +728,108 @@ export class AgentLoop {
             workspaceRoot,
           });
           workOutstanding = !progress.passed;
+          const fingerprint = missingKey(progress.missing);
+          if (!progress.passed && fingerprint) {
+            if (fingerprint === lastMissingFingerprint) stuckMissingCount += 1;
+            else {
+              lastMissingFingerprint = fingerprint;
+              stuckMissingCount = 1;
+            }
+          } else {
+            lastMissingFingerprint = "";
+            stuckMissingCount = 0;
+          }
         }
+
+        if (planState?.steps?.length && !checkpointInjected) {
+          planState = markProgress(planState, { steps });
+          const checkpoint = formatCheckpoint(planState);
+          if (checkpoint) {
+            messages.push({ role: "user", content: checkpoint });
+            const checkpointStep = {
+              index,
+              kind: "checkpoint",
+              content: checkpoint,
+              toolCalls: [],
+            };
+            steps.push(checkpointStep);
+            this.onStep?.(checkpointStep);
+            checkpointInjected = true;
+          }
+        }
+      }
+
+      if (
+        this.planning &&
+        this.replan &&
+        planState &&
+        replanCount < MAX_REMAINING_REPLANS &&
+        paidSteps >= 1 &&
+        paidSteps - lastReplanPaidSteps >= 2 &&
+        !signal?.aborted
+      ) {
+        const struggle = computeStruggleScore(struggleState());
+        const shouldReplan =
+          struggle >= DEFAULT_ESCALATION_THRESHOLD ||
+          stuckMissingCount >= 2 ||
+          repeatedCount >= MAX_REPEATED_STEPS ||
+          Boolean(ambiguousEditRecoveryNudge({ steps }));
+        if (shouldReplan) {
+          try {
+            planState = markProgress(planState, { steps });
+            const checkpoint = formatCheckpoint(planState);
+            const replanMessages = [...messages];
+            if (checkpoint && !checkpointInjected) {
+              replanMessages.push({ role: "user", content: checkpoint });
+            }
+            replanMessages.push({ role: "user", content: REPLAN_REMAINING_MESSAGE });
+            const { message } = await chatWithRetry(this.client, {
+              messages: replanMessages,
+              signal,
+            });
+            const revised = textOf(message.content).trim();
+            if (revised && isUsablePlanText(revised)) {
+              if (checkpoint && !checkpointInjected) {
+                messages.push({ role: "user", content: checkpoint });
+                const checkpointStep = {
+                  index,
+                  kind: "checkpoint",
+                  content: checkpoint,
+                  toolCalls: [],
+                };
+                steps.push(checkpointStep);
+                this.onStep?.(checkpointStep);
+              }
+              messages.push({ role: "user", content: REPLAN_REMAINING_MESSAGE });
+              messages.push({ role: "assistant", content: revised });
+              const replanStep = {
+                index,
+                kind: "plan",
+                content: revised,
+                toolCalls: [],
+              };
+              steps.push(replanStep);
+              this.onStep?.(replanStep);
+              applyPlanText(revised, { critique: true });
+              replanCount += 1;
+              checkpointInjected = false;
+              stuckMissingCount = 0;
+              lastMissingFingerprint = "";
+              // Give the revised plan a clean runway; otherwise the same
+              // repeat/edit-miss signals immediately consume the replan budget.
+              repeatedCount = 0;
+              repeatedKey = "";
+            }
+            // Cool down even when the model reply is not a usable plan, so a
+            // stuck loop cannot burn the step budget on replan chat calls.
+            lastReplanPaidSteps = paidSteps;
+          } catch {
+            // Remaining-step replan is best-effort.
+          }
+        }
+      }
+
+      if (this.escalation) {
         const escalated = await this.escalation.maybeEscalate(struggleState());
         if (escalated?.escalated) {
           const escStep = {
@@ -976,6 +1153,19 @@ export function isToolCallParseError(err) {
     err.status >= 500 &&
     /error parsing tool call/i.test(String(err.message ?? ""))
   );
+}
+
+/**
+ * Whether a model reply is a real plan update (numbered steps or Acceptance).
+ * Plain final answers must not replace the live plan / acceptance contract.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isUsablePlanText(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return false;
+  if (parsePlanSteps(trimmed).length > 0) return true;
+  return /##\s*Acceptance\b/i.test(trimmed);
 }
 
 /**

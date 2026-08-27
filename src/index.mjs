@@ -31,6 +31,20 @@ export {
 } from "./acceptance.mjs";
 
 export {
+  ADJUST_PLAN_MESSAGE,
+  createPlanState,
+  findLastPlanText,
+  formatCheckpoint,
+  isPlanPrompt,
+  markProgress,
+  MAX_REMAINING_REPLANS,
+  missingKey,
+  parsePlanSteps,
+  pathsInStepText,
+  REPLAN_REMAINING_MESSAGE,
+} from "./plan-state.mjs";
+
+export {
   buildModelLadder,
   computeStruggleScore,
   DEFAULT_ESCALATION_THRESHOLD,
@@ -216,6 +230,7 @@ export {
  * @param {boolean} [options.projectBootstrap] First-turn README/RAG injection (default true).
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
  * @param {boolean} [options.planning] Planning pre-pass on first turns (default true).
+ * @param {boolean} [options.replan] Mid-run replan + follow-up adjust (default true; off when planning is false).
  * @param {boolean} [options.taskHints] Task-type constraint hints (default true).
  * @param {boolean} [options.memory] Episodic memory retrieval (default true when embed available).
  * @param {boolean} [options.memoryReadonly] Read-only memory mode for evals.
@@ -245,6 +260,7 @@ export async function createAgent({
   embeddingModel,
   systemPrompt,
   planning = true,
+  replan = true,
   taskHints = true,
   memory = true,
   memoryReadonly = false,
@@ -330,6 +346,7 @@ export async function createAgent({
     onStep,
     compaction,
     planning,
+    replan: planning !== false && replan !== false,
     taskHints,
     memory: memory && Boolean(resolvedClient.embed),
     memoryReadonly,

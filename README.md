@@ -82,6 +82,8 @@ Options:
 | `--quiet` | off | Suppress step trace; print only the final answer |
 | `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
 | `--no-plan` | off | Skip the planning pre-pass on the first turn |
+| `--no-replan` | off | Keep first-turn planning but skip mid-run remaining-step replan and follow-up adjust |
+| `--show-plan` | off | Print Goals/plan/Acceptance/checkpoints on stderr (still managed internally when off) |
 | `--no-hints` | off | Skip task-type constraint hints in the user message |
 
 The model is resolved against Ollama's installed list at startup. With
@@ -209,13 +211,19 @@ The system prompt is built per run by the context builder: platform, shell,
 workspace root, and a top-level file listing, so the model starts oriented
 instead of spending steps exploring. On the first turn, a planning pre-pass
 asks the model for a short numbered plan before any tools run (skipped only
-for empty prompts and simple read-and-answer goals). Task-type
-heuristics (test-fix, debug, refactor, etc.) append focused constraints to
-the user message. Thinking-capable models get Ollama's native `think` mode
-enabled automatically (`--think` to control). Long transcripts are compacted
-automatically — older turns are summarized by the model while the system
-message and recent turns are kept verbatim. Compaction triggers on real
-token usage: every request carries an explicit `num_ctx` (default 16384,
+for empty prompts and simple read-and-answer goals). During the run, the loop
+checkpoints plan progress near mid-budget and can replan remaining steps when
+struggle or stuck acceptance signals fire (at most twice per run). Follow-up
+turns with `--session` or resumed history get a short adjust-plan pass instead
+of a full first-turn plan. Disable mid-run/follow-up adjust with `--no-replan`;
+`--no-plan` turns all of this off. Plan/Goals/Acceptance/checkpoints stay
+internal by default; pass `--show-plan` to print them on stderr.
+Task-type heuristics (test-fix, debug, refactor, etc.) append focused
+constraints to the user message. Thinking-capable models get Ollama's native
+`think` mode enabled automatically (`--think` to control). Long transcripts
+are compacted automatically — older turns are summarized by the model while
+the system message and recent turns are kept verbatim. Compaction triggers on
+real token usage: every request carries an explicit `num_ctx` (default 16384,
 `--num-ctx` to change), and the loop watches the token counts Ollama reports
 to compact before the window overflows.
 
@@ -298,9 +306,17 @@ per-tier summary. Stops early if the tier average score falls below
 without pausing between tiers.
 
 When complete, prints an **assessment report** with overall score, per-tier
-breakdown, per-scenario scores, and ranked recommendations for improving
-halo-agent. Reports are also written to `bench-latest.json` and
-`bench-latest.md` (configurable).
+breakdown, per-scenario scores, ranked judge recommendations, and
+**architecture patterns** — telemetry-backed approach signals (acceptance,
+escalation, memory, critique) rather than tip-style fixes. Reports are also
+written to `bench-latest.json` and `bench-latest.md` (configurable).
+
+To re-analyze a report or the scoreboard history alone:
+
+```bash
+npm run bench:patterns -- --report bench-latest.json
+npm run bench:patterns -- --scoreboard evals/scoreboard-history.jsonl
+```
 
 | Flag | Meaning |
 | --- | --- |

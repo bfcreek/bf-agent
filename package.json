@@ -49,6 +49,7 @@
     "test": "node --test",
     "evals": "node evals/run.mjs",
     "bench": "node evals/dev-bench.mjs",
+    "bench:patterns": "node evals/analyze-patterns.mjs",
     "bench:menu": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench.ps1",
     "bench:local": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-local.ps1",
     "bench:recognized": "node evals/recognized/run.mjs",

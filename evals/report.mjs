@@ -3,12 +3,18 @@
  */
 
 import { formatGateSummary } from "./gates.mjs";
+import {
+  buildArchitectureInsights,
+  formatInsightsConsole,
+  formatInsightsMarkdown,
+} from "./patterns.mjs";
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
 /**
  * @param {Array<object>} results
  * @param {object} meta
+ * @param {object} [meta.insightOptions] Flags / history for architecture patterns.
  */
 export function buildAssessmentReport(results, meta = {}) {
   const judged = results.filter((r) => r.verdict);
@@ -50,7 +56,7 @@ export function buildAssessmentReport(results, meta = {}) {
   const recommendations = collectRecommendations(judged);
   const stoppedEarly = meta.stoppedAtTier != null;
 
-  return {
+  const report = {
     ranAt: meta.ranAt ?? new Date().toISOString(),
     models: meta.models ?? [],
     judgeModel: meta.judgeModel ?? "auto",
@@ -59,6 +65,7 @@ export function buildAssessmentReport(results, meta = {}) {
     stoppedAtTier: meta.stoppedAtTier ?? null,
     stopReason: meta.stopReason ?? null,
     gateEvaluation: meta.gateEvaluation ?? null,
+    flags: meta.flags ?? null,
     overall: {
       scenarios: results.length,
       judged: judged.length,
@@ -103,6 +110,14 @@ export function buildAssessmentReport(results, meta = {}) {
     })),
     recommendations,
   };
+
+  report.architectureInsights = buildArchitectureInsights(report, {
+    history: meta.history ?? [],
+    flags: meta.flags ?? {},
+    maxSteps: meta.maxSteps,
+  });
+
+  return report;
 }
 
 /**
@@ -206,6 +221,11 @@ export function formatReportConsole(report) {
     lines.push("");
   }
 
+  const insightBlock = formatInsightsConsole(report.architectureInsights ?? []);
+  if (insightBlock) {
+    lines.push(insightBlock);
+  }
+
   if (report.gateEvaluation) {
     lines.push(formatGateSummary(report.gateEvaluation));
     lines.push("");
@@ -258,27 +278,34 @@ export function formatReportMarkdown(report) {
   lines.push(
     "## Scenarios",
     "",
-    "| Score | Grade | Tier | Scenario | Precheck | Integrity | Steps |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Score | Grade | Tier | Scenario | Precheck | Integrity | Steps | Verified | Esc | Cloud |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   );
   for (const row of report.scenarios) {
     const pre = row.precheck === true ? "pass" : row.precheck === false ? "fail" : "—";
     const integ = row.integrity === true ? "pass" : row.integrity === false ? "fail" : "—";
+    const verified =
+      row.verificationPassed === true ? "yes" : row.verificationPassed === false ? "no" : "—";
+    const cloud = row.cloudUsed ? "yes" : "no";
     lines.push(
-      `| ${row.score ?? "—"} | ${row.grade ?? "—"} | ${row.tier} | ${row.name} | ${pre} | ${integ} | ${row.steps} |`,
+      `| ${row.score ?? "—"} | ${row.grade ?? "—"} | ${row.tier} | ${row.name} | ${pre} | ${integ} | ${row.steps} | ${verified} | ${row.escalationCount ?? 0} | ${cloud} |`,
     );
-    if (row.summary) lines.push(`| | | | *${row.summary.replaceAll("|", "\\|")}* | | |`);
+    if (row.summary) lines.push(`| | | | *${row.summary.replaceAll("|", "\\|")}* | | | | | |`);
   }
   lines.push("");
 
   if (report.recommendations.length > 0) {
     lines.push("## Recommendations", "");
+    lines.push("_Judge-authored concrete fixes (deduped across scenarios)._");
+    lines.push("");
     for (const rec of report.recommendations) {
       lines.push(`- **[${rec.priority}] ${rec.area}:** ${rec.suggestion}`);
       if (rec.count > 1) lines.push(`  - Seen ${rec.count}x in: ${rec.scenarios.join(", ")}`);
     }
     lines.push("");
   }
+
+  lines.push(formatInsightsMarkdown(report.architectureInsights ?? []));
 
   if (report.gateEvaluation) {
     lines.push("## Gates", "", "```");

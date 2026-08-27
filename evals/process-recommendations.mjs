@@ -109,6 +109,10 @@ export function buildProcessingPlan(report, meta = {}) {
     status: "pending",
   }));
 
+  const architectureInsights = Array.isArray(report?.architectureInsights)
+    ? report.architectureInsights
+    : [];
+
   return {
     version: 1,
     kind: "recommendations-plan",
@@ -120,8 +124,10 @@ export function buildProcessingPlan(report, meta = {}) {
     model: report.model ?? null,
     recommendationCount: items.length,
     items,
+    architectureInsights,
     guidance: [
-      "Implement each suggestion in the mapped target files (or the closest related module).",
+      "Judge recommendations below are concrete runtime fixes — implement those in the mapped target files.",
+      "Architecture insights are pattern-level approach signals (acceptance, escalation, memory, critique). Use them to decide *whether* to change strategy, not as a punch list of edits.",
       "Prefer prompt-enhancements.mjs for task-type hints; context-builder/agent-loop for system prompt.",
       "Keep changes minimal and focused — one recommendation per logical commit when possible.",
       "Run npm test after edits; add a focused test when the change is testable.",
@@ -144,30 +150,47 @@ export function formatProcessingMarkdown(plan) {
   if (plan.ranAt) lines.push(`Bench ran: ${plan.ranAt}`);
   if (plan.model) lines.push(`Model: ${plan.model}`);
   lines.push("", `**${plan.recommendationCount}** recommendation(s) to process.`, "");
-  if (plan.recommendationCount === 0) {
+  if (plan.recommendationCount === 0 && !plan.architectureInsights?.length) {
     lines.push("No agent improvements were recorded. Nothing to implement.");
     return lines.join("\n");
   }
 
   lines.push("## Guidance", "");
   for (const note of plan.guidance) lines.push(`- ${note}`);
-  lines.push("", "## Recommendations", "");
 
-  for (const item of plan.items) {
-    const seen =
-      item.sources.length > 0
-        ? ` (${item.count > 1 ? `${item.count}x: ` : ""}${item.sources.join(", ")})`
-        : "";
-    lines.push(`### ${item.id}. [${item.priority}] ${item.area}${seen}`, "");
-    lines.push(item.suggestion, "");
-    if (item.targetFiles.length > 0) {
-      lines.push("**Target files:**");
-      for (const file of item.targetFiles) lines.push(`- \`${file}\``);
-      lines.push("");
-    } else {
-      lines.push("**Target files:** (judge area `other` — pick the closest module)", "");
+  if (plan.recommendationCount > 0) {
+    lines.push("", "## Recommendations", "");
+
+    for (const item of plan.items) {
+      const seen =
+        item.sources.length > 0
+          ? ` (${item.count > 1 ? `${item.count}x: ` : ""}${item.sources.join(", ")})`
+          : "";
+      lines.push(`### ${item.id}. [${item.priority}] ${item.area}${seen}`, "");
+      lines.push(item.suggestion, "");
+      if (item.targetFiles.length > 0) {
+        lines.push("**Target files:**");
+        for (const file of item.targetFiles) lines.push(`- \`${file}\``);
+        lines.push("");
+      } else {
+        lines.push("**Target files:** (judge area `other` — pick the closest module)", "");
+      }
+      lines.push(`Status: ${item.status}`, "");
     }
-    lines.push(`Status: ${item.status}`, "");
+  }
+
+  if (plan.architectureInsights?.length) {
+    lines.push("## Architecture patterns", "");
+    lines.push(
+      "Evidence-backed approach signals from telemetry. These are not edit tickets — they suggest which lever to reconsider.",
+      "",
+    );
+    for (const insight of plan.architectureInsights) {
+      const where = insight.scenarios?.length ? ` _(seen in: ${insight.scenarios.join(", ")})_` : "";
+      lines.push(`- **[${insight.priority} · ${insight.source}]** ${insight.pattern}${where}`);
+      lines.push(`  - **Lever:** ${insight.lever}`);
+    }
+    lines.push("");
   }
 
   return lines.join("\n");

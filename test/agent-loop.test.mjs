@@ -50,6 +50,7 @@ const toolCall = (name, args) => ({ function: { name, arguments: args } });
 test("system prompt covers build pipelines, artifacts, and tool-call discipline", () => {
   assert.match(DEFAULT_SYSTEM_PROMPT, /Goals:/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /acceptance criteria/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /do not include them in your final answer/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Environment probes \(apt-get/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Exit 0 alone does not mean/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Keep reasoning in thinking/i);
@@ -1082,4 +1083,142 @@ test("thinking-only turns do not consume the step budget", async () => {
   assert.equal(result.stopReason, "completed");
   assert.equal(result.text, "hi");
   assert.ok(chatCalls >= 3, "thinking-only turns should not consume the 2-step budget");
+});
+
+test("follow-up turns run an adjust-plan pass when replan is enabled", async () => {
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: "1. write_file a.mjs\n\n## Acceptance\n- deliverable: a.mjs",
+    },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "Created a.mjs." },
+    {
+      role: "assistant",
+      content: "1. write_file b.mjs\n2. run_command node b.mjs\n\n## Acceptance\n- deliverable: b.mjs",
+    },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 2, b: 2 })] },
+    { role: "assistant", content: "Created b.mjs for the follow-up." },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    acceptance: false,
+    taskHints: false,
+  });
+
+  const first = await loop.run("create a.mjs for the feature");
+  assert.equal(first.steps[0].kind, "plan");
+
+  const second = await loop.run("now add b.mjs and run it to verify", { history: first.messages });
+  assert.equal(second.steps[0].kind, "plan");
+  assert.match(second.steps[0].content, /b\.mjs/);
+  const adjustCall = client.calls.find(
+    (c) =>
+      c.tools === undefined &&
+      c.messages.some((m) => m.role === "user" && /Adjust the plan/i.test(m.content)),
+  );
+  assert.ok(adjustCall, "adjust-plan call should have no tools");
+});
+
+test("replan:false skips follow-up adjust-plan", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "1. write_file a.mjs" },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "done first" },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 2, b: 2 })] },
+    { role: "assistant", content: "done second" },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    acceptance: false,
+    taskHints: false,
+    replan: false,
+  });
+
+  const first = await loop.run("create a.mjs for the feature");
+  await loop.run("now add b.mjs and run it to verify", { history: first.messages });
+
+  assert.ok(
+    !client.calls.some((c) =>
+      c.messages.some((m) => m.role === "user" && /Adjust the plan/i.test(m.content)),
+    ),
+  );
+});
+
+test("half-budget injects a plan checkpoint once", async () => {
+  const registry = makeRegistry();
+  registry.register({
+    name: "write_file",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+    },
+    execute: () => ({ status: "success" }),
+  });
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: "1. write_file out.py\n2. summarize\n\n## Acceptance\n- deliverable: out.py",
+    },
+    { role: "assistant", content: "", tool_calls: [toolCall("write_file", { path: "out.py", content: "x" })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "All done with out.py." },
+    { role: "assistant", content: "All done with out.py." },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry,
+    critique: false,
+    acceptance: false,
+    taskHints: false,
+    maxSteps: 4,
+  });
+
+  const result = await loop.run("create out.py then summarize the work for review");
+  const checkpoints = result.steps.filter((s) => s.kind === "checkpoint");
+  assert.equal(checkpoints.length, 1);
+  assert.match(checkpoints[0].content, /## Plan progress/);
+  assert.match(checkpoints[0].content, /\[x\] 1\. write_file out\.py/);
+});
+
+test("struggle replan is capped and refreshes the plan step", async () => {
+  const same = { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 9, b: 9 })] };
+  const client = new FakeClient([
+    { role: "assistant", content: "1. call add repeatedly\n2. finish" },
+    same,
+    same,
+    same,
+    {
+      role: "assistant",
+      content: "1. stop repeating\n2. answer\n\n## Acceptance\n- output: done",
+    },
+    { role: "assistant", content: "Stopped repeating; the feature outline is ready for review." },
+    { role: "assistant", content: "Stopped repeating; the feature outline is ready for review." },
+    { role: "assistant", content: "Stopped repeating; the feature outline is ready for review." },
+    { role: "assistant", content: "Stopped repeating; the feature outline is ready for review." },
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    acceptance: false,
+    taskHints: false,
+    maxSteps: 8,
+  });
+
+  const result = await loop.run("outline a new feature for review");
+  const plans = result.steps.filter((s) => s.kind === "plan");
+  assert.ok(plans.length >= 2, "initial plan plus at least one remaining-step replan");
+  assert.match(plans.at(-1).content, /stop repeating|answer/i);
+  const replanCalls = client.calls.filter(
+    (c) =>
+      c.tools === undefined &&
+      c.messages.some((m) => m.role === "user" && /remaining work|Progress against the plan/i.test(m.content)),
+  );
+  assert.ok(replanCalls.length >= 1 && replanCalls.length <= 2);
 });

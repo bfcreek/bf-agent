@@ -366,6 +366,7 @@ export const PLANNING_USER_MESSAGE = [
   "Do not call tools yet — reply with only the plan.",
   "After the plan, include a ## Acceptance section with bullet checks: deliverable: <path>, command: <exact shell command>, output: <final answer shape>.",
   "Name only checks you will actually run — the loop blocks completion until they pass.",
+  "Goals, the plan, and ## Acceptance are for this planning turn only — later final answers must omit them.",
 ].join(" ");
 
 /** Tools that ground answers or change workspace state. */

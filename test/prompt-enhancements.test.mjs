@@ -892,6 +892,7 @@ test("ambiguousEditRecoveryNudge fires after an ambiguous edit_file error", () =
   assert.match(PLANNING_USER_MESSAGE, /Goals section first|explicit outcomes/i);
   assert.match(PLANNING_USER_MESSAGE, /unique per-function edit|ping-pong/i);
   assert.match(PLANNING_USER_MESSAGE, /non-empty final answer/);
+  assert.match(PLANNING_USER_MESSAGE, /later final answers must omit them/i);
   assert.match(PLANNING_USER_MESSAGE, /CS0136|canonical fix/);
   assert.match(PLANNING_USER_MESSAGE, /build-from-source|apt-get --version/);
   assert.match(PLANNING_USER_MESSAGE, /Harbor \/ Terminal-Bench|named binaries/);

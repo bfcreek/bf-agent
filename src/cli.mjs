@@ -113,6 +113,9 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       case "--quiet":
         options.quiet = true;
         break;
+      case "--show-plan":
+        options.showPlan = true;
+        break;
       case "--cwd": {
         const raw = value(arg, ++i);
         if (raw !== undefined) options.cwd = path.resolve(raw);
@@ -173,6 +176,9 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       }
       case "--no-plan":
         options.noPlan = true;
+        break;
+      case "--no-replan":
+        options.noReplan = true;
         break;
       case "--no-hints":
         options.noHints = true;
@@ -297,6 +303,8 @@ Options:
   --think <mode>       Native model reasoning: auto (default), true, false/off,
                        or low|medium|high|max (for thinking models / gpt-oss)
   --no-plan            Skip the planning pre-pass on the first turn
+  --no-replan          Skip mid-run remaining-step replan and follow-up adjust
+  --show-plan          Print Goals/plan/Acceptance/checkpoints on stderr (hidden by default)
   --no-hints           Skip task-type constraint hints in the user message
   --no-memory          Skip episodic memory retrieval and writes
   --memory-readonly    Retrieve memory but do not update stats or write lessons
@@ -306,7 +314,7 @@ Options:
   --escalation-max <n> Max model escalations per run (default 2)
   --escalation-cloud   Allow escalation onto paid cloud models (default local only)
   --port <n>           Port for serve mode (default 11435)
-  --quiet              Only print the final answer
+  --quiet              Only print the final answer (overrides --show-plan)
   --json               JSON output (models command)
   --                   Treat everything after as the goal, even if it starts with -
   -v, --version        Print the version
@@ -478,6 +486,7 @@ async function runInteractiveSession({
             `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
           );
         }
+        maybeDescribeAcceptance(options, result);
         if (result.text) console.log(result.text);
       } catch (err) {
         if (err instanceof OllamaClientError) {
@@ -545,10 +554,19 @@ async function listOllamaModels(options) {
   }
 }
 
-function describeStep(step) {
+/**
+ * @param {object} step
+ * @param {{ showPlan?: boolean }} [opts]
+ */
+function describeStep(step, opts = {}) {
   if (step.kind === "plan") {
-    const preview = step.content.length > 240 ? `${step.content.slice(0, 240)}...` : step.content;
-    console.error(`[plan]\n${preview}`);
+    if (!opts.showPlan) return;
+    console.error(`[plan]\n${step.content}`);
+    return;
+  }
+  if (step.kind === "checkpoint") {
+    if (!opts.showPlan) return;
+    console.error(`[checkpoint]\n${step.content}`);
     return;
   }
   if (step.kind === "escalation") {
@@ -560,6 +578,32 @@ function describeStep(step) {
     const status = call.ok ? "ok" : `error: ${call.error}`;
     console.error(`[step ${step.index}] ${call.name}(${JSON.stringify(call.args)}) -> ${status}`);
   }
+}
+
+/**
+ * @param {{ passed?: boolean, checks?: Array<{kind: string, target: string, passed: boolean, detail?: string}>, missing?: string[] } | undefined} verification
+ */
+function describeAcceptance(verification) {
+  if (!verification?.checks?.length) return;
+  const status = verification.passed ? "passed" : "failed";
+  console.error(`[acceptance] ${status}`);
+  for (const check of verification.checks) {
+    const mark = check.passed ? "ok" : "fail";
+    const detail = check.detail ? ` (${check.detail})` : "";
+    console.error(`  ${mark} ${check.kind}: ${check.target}${detail}`);
+  }
+  if (!verification.passed && verification.missing?.length) {
+    console.error(`  still required: ${verification.missing.join("; ")}`);
+  }
+}
+
+/**
+ * @param {object} options
+ * @param {{ verification?: object }} result
+ */
+function maybeDescribeAcceptance(options, result) {
+  if (options.quiet || options.showPlan !== true) return;
+  describeAcceptance(result.verification);
 }
 
 async function runMemoryCommand(options, client) {
@@ -831,9 +875,12 @@ async function main() {
     registry,
     systemPrompt,
     maxSteps: options.maxSteps,
-    onStep: options.quiet ? undefined : describeStep,
+    onStep: options.quiet
+      ? undefined
+      : (step) => describeStep(step, { showPlan: options.showPlan === true }),
     compaction: {},
     planning: !options.noPlan,
+    replan: !options.noPlan && !options.noReplan,
     taskHints: !options.noHints,
     memory: !options.noMemory,
     memoryReadonly: options.memoryReadonly === true,
@@ -893,6 +940,7 @@ async function main() {
       console.error(
         `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
       );
+      maybeDescribeAcceptance(options, result);
       if (result.text) console.log(result.text);
       process.exitCode = 2;
       return;
@@ -900,10 +948,12 @@ async function main() {
     if (result.stopReason === "failed") {
       if (result.diagnostic) console.error(result.diagnostic);
       else console.error("Agent stopped: required work incomplete after empty model responses.");
+      maybeDescribeAcceptance(options, result);
       if (result.text) console.log(result.text);
       process.exitCode = 1;
       return;
     }
+    maybeDescribeAcceptance(options, result);
     console.log(result.text);
   } catch (err) {
     if (store && options.session) {

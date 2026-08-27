@@ -49,7 +49,7 @@ import {
 } from "./gates.mjs";
 import { captureIntegritySnapshot, checkScenarioIntegrity } from "./integrity.mjs";
 import { judgeRun } from "./judge.mjs";
-import { appendScoreboardEntry, computeRunMetrics } from "./scoreboard.mjs";
+import { appendScoreboardEntry, computeRunMetrics, loadScoreboardHistory } from "./scoreboard.mjs";
 import { mergePhaseResults, scenarioPhases } from "./phases.mjs";
 import { buildAssessmentReport, formatReportConsole, formatReportMarkdown } from "./report.mjs";
 import { SCENARIOS, agentAnswerText, filterAvailableScenarios, selectScenarios } from "./scenarios.mjs";
@@ -761,6 +761,18 @@ async function main() {
     preset: options.gatePreset,
   });
 
+  const flags = {
+    planning: options.planning === true,
+    memory: options.memory !== false,
+    memoryReadonly: options.memoryReadonly === true,
+    acceptance: options.noAcceptance !== true,
+    critique: options.noCritique !== true,
+    escalation: options.escalation !== false,
+    escalationCloud: options.escalationCloud === true,
+  };
+
+  const history = await loadScoreboardHistory().catch(() => []);
+
   const report = buildAssessmentReport(allResults, {
     ranAt: new Date().toISOString(),
     models: reportModels,
@@ -769,6 +781,9 @@ async function main() {
     stoppedAtTier,
     stopReason,
     gateEvaluation,
+    flags,
+    history,
+    maxSteps: options.maxSteps,
   });
 
   const meta = { resolvedModel, version: PACKAGE_VERSION };
@@ -779,13 +794,7 @@ async function main() {
   await appendScoreboardEntry({
     label: options.label ?? null,
     models: reportModels,
-    planning: options.planning === true,
-    memory: options.memory !== false,
-    memoryReadonly: options.memoryReadonly === true,
-    acceptance: options.noAcceptance !== true,
-    critique: options.noCritique !== true,
-    escalation: options.escalation !== false,
-    escalationCloud: options.escalationCloud === true,
+    ...flags,
     scenarios: allResults.length,
     ...metrics,
     avgScore: report.overall.avgScore,
