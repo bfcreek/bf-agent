@@ -64,6 +64,14 @@ export async function buildEnvironmentContext({
     `- Artifact tasks: creating an empty/stub file is not completion when the instruction defines behavioral output — run the named verification command and match stdout before stopping.`,
     `- Verification means commands explicitly named in the user instruction — not generic examples like test.mjs or test.py unless the instruction names them. If no such command exists after the artifact is written, re-read the output file and stop.`,
     `- Never declare a task complete without running every acceptance command named in the instruction and confirming exit 0 plus the expected output shape.`,
+    `- For 7z/archive extraction: exit 0 with 'No files to process' or 'Files: 0' is not success — confirm decrypted files exist before finishing.`,
+    `- For PyTorch/ML tasks: read /tests before implementing; token IDs stay torch.long; run pytest — py_compile alone is not verification. Avoid module-level print() on import.`,
+    `- For weights.json deliverables: write valid JSON (not cp of .pth/.pt), validate with json.load, then run ./cli_tool weights.json <image> before finishing.`,
+    `- Lookup-and-write: acquire data once, write_file the required output, verify — do not finish with a todo list.`,
+    `- Install-and-run tasks: successful install/compile alone is not done — run the named command and confirm exit 0.`,
+    `- Numbered deliverables: every output path listed in numbered steps must exist on disk before finishing.`,
+    `- Leaderboard/API URLs return JSON, not HTML — use curl -s and python -c json parsing when fetch_url fails.`,
+    `- For artifact-creation tasks: if the required output path is still missing after several tool steps, keep working — do not give a final answer.`,
     `- For system paths outside the workspace (/etc/apt, /usr/local/bin), use run_command — write_file cannot touch them.`,
     `- Internal thinking/reasoning never counts as progress — artifact-creation tasks require an early write_file or run_command tool call.`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
@@ -75,6 +83,11 @@ export async function buildEnvironmentContext({
     ...(names.some((n) => n === ".git" || n === ".git/")
       ? [
           "- This workspace is a git repository. After a merge CONFLICT, resolve <<<<<<< markers with edit_file, then git add/commit, then verify — do not stop after git show of both sides.",
+        ]
+      : []),
+    ...(names.some((n) => /lodepng|cjson/i.test(n))
+      ? [
+          "- Workspace includes lodepng/cJSON — when the task asks for a binary cli_tool, compile the native C path (gcc/make) instead of a Python wrapper.",
         ]
       : []),
     `- Node.js: ${process.version}`,

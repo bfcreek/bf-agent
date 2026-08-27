@@ -23,6 +23,28 @@ const CHUNK_OVERLAP = 200;
 const USER_AGENT = "halo-agent/0.1 (+https://github.com/aura-dev; local agent fetch_url)";
 
 /**
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function looksLikeJsonApiUrl(url) {
+  return /\/api\/|api\.|\.json(?:\?|$)|huggingface\.co\/api|leaderboard|mteb/i.test(String(url ?? ""));
+}
+
+/**
+ * @param {string} url
+ * @returns {string|null}
+ */
+export function jsonApiFetchFallbackHint(url) {
+  if (!looksLikeJsonApiUrl(url)) return null;
+  const safe = String(url ?? "").replace(/'/g, "'\\''");
+  return (
+    "Leaderboard/API URLs often return JSON, not HTML. Prefer: " +
+    `curl -s '${safe}' | python -c "import sys,json; d=json.load(sys.stdin); print(type(d), len(d) if hasattr(d,'__len__') else d)" ` +
+    "or curl -s -o data.json 'URL' then read_file/parse."
+  );
+}
+
+/**
  * Reject non-http(s) and obvious private/local targets (basic SSRF guard).
  * @param {string} raw
  * @returns {URL}
@@ -295,7 +317,11 @@ export async function fetchUrlContent({
     });
 
     if (!response.ok) {
-      return { ok: false, error: `Fetch returned HTTP ${response.status} for ${parsed}` };
+      const hint = jsonApiFetchFallbackHint(parsed.toString());
+      return {
+        ok: false,
+        error: `Fetch returned HTTP ${response.status} for ${parsed}${hint ? `. ${hint}` : ""}`,
+      };
     }
 
     finalUrlGuard(response, parsed);
@@ -322,7 +348,11 @@ export async function fetchUrlContent({
     const body = buf.toString("utf8");
     const { title, text } = bodyToText(body, contentType);
     if (!text) {
-      return { ok: false, error: `No readable text extracted from ${parsed}` };
+      const hint = jsonApiFetchFallbackHint(finalUrl);
+      return {
+        ok: false,
+        error: `No readable text extracted from ${parsed}${hint ? `. ${hint}` : ""}`,
+      };
     }
 
     const q = String(query ?? "").trim();

@@ -30,6 +30,7 @@ import {
   deliverableDriftNudge,
   emptyResponseRecoveryNudge,
   formatZeroTokenDiagnostic,
+  heredocRetryBlock,
   isEmptyAssistantResponse,
   isThinkingOnlyResponse,
   shouldFailOnEmptyResponses,
@@ -70,6 +71,9 @@ const TOOL_CALL_PARSE_NUDGE = [
   "Call tools using the native tool-calling format only — function name plus",
   "JSON arguments matching the schema. Put reasoning in thinking, not inside",
   "the tool call.",
+  "For write_file/edit_file, content and old_string/new_string must be valid JSON",
+  "strings — escape quotes as \\\" and newlines as \\n; never paste raw multiline",
+  "text outside JSON string quotes.",
   "For multi-line Python/shell, do not put a large heredoc in run_command:",
   "write_file a .py/.sh path, then run_command that path (e.g. python script.py).",
   "Retry with a short, valid tool call now.",
@@ -149,10 +153,17 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  --version, apt-cache policy, uname, which, diff, awk, head) are not task",
   "  completion. Finish only after a smoke test matching the instruction path",
   "  (e.g. /tmp/CompCert/ccomp --version).",
+  "- For 7z/archive commands: exit 0 with 'No files to process' or 'Files: 0'",
+  "  is not successful extraction — use -p'' to fail fast without a password, or",
+  "  supply -pPASSWORD; confirm extracted files exist before finishing.",
+  "  When grep finds *2john converters (7z2john.pl), run them before manual",
+  "  password guessing: converter → build john → john --wordlist=….",
   "- For artifact-creation (write X to file Y, or an output titled foo.fasta):",
   "  you must write_file that path before finishing. Exit 0 alone does not mean",
   "  the task is done unless the required output artifact exists. If no files",
   "  were changed, keep working or report failure — do not stop.",
+  "  If the named output is still missing after several steps, refuse to finish",
+  "  with an empty or success-only answer until write_file succeeds.",
   "  File paths are relative to the workspace root. If the root is /app, write",
   "  filter.py — not app/filter.py or /app/filter.py (those create /app/app/filter.py).",
   "  File-exists checks (test -f, ls) are not functional acceptance: an empty or",
@@ -164,6 +175,17 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  instruction's demo paths when available. Do not mark done if the file fails",
   "  to parse. After write/edit, re-read the deliverable so the final answer",
   "  matches on-disk contents.",
+  "- For PyTorch/ML tasks: read tests and callers before implementing. Keep token",
+  "  IDs and label indices as integer (torch.long); only activations/hidden",
+  "  states/gradients use the passed float dtype. py_compile is not enough — run",
+  "  pytest on /tests when present. Avoid module-level print() that runs on import.",
+  "  In Docker /app workspaces, uv/pytest may be available; try pytest first, or a",
+  "  minimal python -c import smoke with fake tensors when deps are heavy.",
+  "- For weights.json + cli_tool tasks: export real JSON weights (never cp a .pth to",
+  "  weights.json), validate with json.load, then run ./cli_tool weights.json",
+  "  <image.png> and confirm exit 0 with a single-digit stdout before finishing.",
+  "  When lodepng/cJSON sources are in the workspace and the task wants a binary",
+  "  cli_tool, compile the native C path (gcc/make) instead of delegating to Python.",
   "- Threshold / optimization tasks: measure against the stated metric and",
   "  iterate until the threshold passes or the step budget is gone. Helper or",
   "  baseline scripts are not completion — and they may overwrite output_data;",
@@ -209,7 +231,13 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  should print records — read stdout, do not stop on exit 0 alone.",
   "  run_command results start with a status field: FAILED or TIMED OUT means",
   "  the command did not succeed even though the tool call returned — read",
-  "  stderr, do not assume success.",
+  "  stderr, do not assume success. A non-zero exitCode is always failure.",
+  "- For lookup-and-write tasks (leaderboard/MTEB): fetch once, compute,",
+  "  write_file the required output path, verify — never finish describing",
+  "  remaining work. After one heredoc rejection, use write_file + script only.",
+  "- When the instruction lists numbered deliverable files, every one must exist on",
+  "  disk (write_file or confirmed test -f) before finishing — do not stop after",
+  "  creating only the first output.",
   "- Never launch a bare interpreter or shell (node, python, bash, ...) with",
   "  no script or inline code: commands run with no input, so a REPL hangs",
   "  until the timeout. A timed-out command is a failure — change the command",
@@ -630,8 +658,10 @@ export class AgentLoop {
         const pretestBlock = refuseRepeat
           ? null
           : mutationBlockedUntilPretest({ goal, toolName: name, steps });
+        const heredocBlock =
+          refuseRepeat || pretestBlock ? null : heredocRetryBlock({ toolName: name, args, steps });
         const verifyBlock =
-          refuseRepeat || pretestBlock
+          refuseRepeat || pretestBlock || heredocBlock
             ? null
             : redundantVerifyBlock({ goal, steps, toolName: name, args });
         let outcome;
@@ -643,6 +673,8 @@ export class AgentLoop {
           );
         } else if (pretestBlock) {
           outcome = { ok: false, error: pretestBlock };
+        } else if (heredocBlock) {
+          outcome = { ok: false, error: heredocBlock };
         } else if (verifyBlock) {
           outcome = isTerminalVerificationMessage(verifyBlock)
             ? verificationCompleteOutcome(verifyBlock)
@@ -852,8 +884,8 @@ function toolResultContent(outcome) {
       );
       if (compilerErrors) lines.push(`compilerErrors:\n${compilerErrors}`);
       if (failed) {
-        lines.push(`stdout:\n${String(result.stdout ?? "").length ? result.stdout : "(empty)"}`);
         lines.push(`stderr:\n${String(result.stderr ?? "").length ? result.stderr : "(empty)"}`);
+        lines.push(`stdout:\n${String(result.stdout ?? "").length ? result.stdout : "(empty)"}`);
       } else {
         if (result.stdout != null && String(result.stdout).length) {
           lines.push(`stdout:\n${result.stdout}`);

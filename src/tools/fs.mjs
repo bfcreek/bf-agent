@@ -258,9 +258,75 @@ export function truncateOutput(text, limit = MAX_TOOL_OUTPUT_CHARS) {
  * @returns {string|null}
  */
 export function structuredArtifactReadHint(filePath) {
+  if (/weights\.json$/i.test(String(filePath ?? ""))) {
+    return (
+      "weights.json must be valid JSON (not a copied binary checkpoint). " +
+      "Validate with python -c \"import json; json.load(open('weights.json'))\" then run ./cli_tool weights.json <image.png>."
+    );
+  }
   if (/\.(ics|json|yaml|yml|xml|csv|tsv)$/i.test(String(filePath ?? ""))) {
     const rel = String(filePath).replace(/\\/g, "/");
     return `Before finishing, read_file ${rel} to confirm the on-disk format.`;
+  }
+  return null;
+}
+
+/**
+ * Reject write_file calls that mistakenly pass run_command fields.
+ * @param {object} [args]
+ * @returns {string|null}
+ */
+export function writeFileSchemaIssue(args) {
+  const a = args ?? {};
+  if (a.command != null || a.cmd != null) {
+    return (
+      'write_file requires "path" and "content", not run_command fields. ' +
+      "Put shell commands in run_command."
+    );
+  }
+  return null;
+}
+
+/**
+ * Reject invalid JSON content for weights.json deliverables.
+ * @param {string} filePath
+ * @param {string} content
+ * @returns {string|null}
+ */
+export function weightsJsonContentIssue(filePath, content) {
+  if (!/weights\.json$/i.test(String(filePath ?? ""))) return null;
+  try {
+    JSON.parse(String(content ?? ""));
+  } catch {
+    return (
+      "weights.json content is not valid JSON. Export weights with json.dump or a converted state dict — " +
+      "do not write binary checkpoint bytes or cp a .pth/.pt file to weights.json."
+    );
+  }
+  return null;
+}
+
+/**
+ * Warn when Python deliverables use module-level print() that runs on import.
+ * @param {string} filePath
+ * @param {string} content
+ * @returns {string|null}
+ */
+export function moduleLevelPrintNote(filePath, content) {
+  if (!/\.py$/i.test(String(filePath ?? ""))) return null;
+  const lines = String(content ?? "").split(/\n/);
+  let inMainGuard = false;
+  for (const line of lines) {
+    if (/if\s+__name__\s*==\s*['"]__main__['"]/.test(line)) {
+      inMainGuard = true;
+      continue;
+    }
+    if (!inMainGuard && /^\s*print\s*\(/.test(line)) {
+      return (
+        "Warning: module-level print() runs on import and can pollute verifier stdout. " +
+        "Move debug prints under if __name__ == '__main__' unless the task asks for them."
+      );
+    }
   }
   return null;
 }
@@ -620,12 +686,16 @@ export function registerFileTools(registry, { workspaceRoot }) {
       },
       required: ["path", "content"],
     },
-    async execute({ path: filePath, content }) {
+    async execute({ path: filePath, content, ...rest }) {
+      const schemaIssue = writeFileSchemaIssue({ path: filePath, content, ...rest });
+      if (schemaIssue) throw new Error(schemaIssue);
       if (!filePath) throw new Error("path is required.");
       assertCleanupMutationAllowed(registry, filePath, "write_file");
       const text = String(content ?? "");
       const truncated = truncatedSourceIssue(filePath, text);
       if (truncated) throw new Error(truncated);
+      const weightsIssue = weightsJsonContentIssue(filePath, text);
+      if (weightsIssue) throw new Error(weightsIssue);
       const target = resolveWithinRoot(root, filePath);
       const exists = await pathExists(target);
       const blocked = missingEditTargetBlock(registry.runContext?.goal, filePath, exists);
@@ -639,7 +709,8 @@ export function registerFileTools(registry, { workspaceRoot }) {
       const result = { path: path.relative(root, target), bytesWritten: Buffer.byteLength(text) };
       const largeHint = largeInlineWriteHint(registry.runContext?.goal, text);
       const readHint = structuredArtifactReadHint(filePath);
-      const notes = [largeHint, readHint].filter(Boolean);
+      const printNote = moduleLevelPrintNote(filePath, text);
+      const notes = [largeHint, readHint, printNote].filter(Boolean);
       if (notes.length) result.note = notes.join(" ");
       return result;
     },

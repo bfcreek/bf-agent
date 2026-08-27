@@ -7,6 +7,8 @@ import {
   bodyToText,
   fetchUrlContent,
   htmlToText,
+  jsonApiFetchFallbackHint,
+  looksLikeJsonApiUrl,
   isPrivateOrLinkLocalIp,
   lexicalScore,
   microRagPage,
@@ -195,4 +197,23 @@ test("fetchUrlContent suggests curl for binary archive responses", async () => {
   assert.equal(result.ok, true);
   assert.match(result.content, /curl -L -o/);
   assert.match(result.content, /run_command/i);
+});
+
+test("jsonApiFetchFallbackHint suggests curl for API URLs", () => {
+  assert.equal(looksLikeJsonApiUrl("https://huggingface.co/api/models"), true);
+  assert.match(jsonApiFetchFallbackHint("https://huggingface.co/api/models") ?? "", /curl -s/i);
+});
+
+test("fetchUrlContent appends API hint on HTTP errors", async () => {
+  const result = await fetchUrlContent({
+    url: "https://huggingface.co/api/datasets/mteb",
+    fetchImpl: async () => ({
+      ok: false,
+      status: 404,
+      url: "https://huggingface.co/api/datasets/mteb",
+      headers: { get: () => "application/json" },
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /curl -s/i);
 });

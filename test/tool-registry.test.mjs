@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ToolRegistry } from "../src/tool-registry.mjs";
+import { ToolRegistry, suggestSimilarTools } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
 
 test("schemas render in OpenAI function shape", () => {
@@ -57,6 +57,15 @@ test("invalid JSON string arguments fail gracefully", async () => {
   const outcome = await registry.execute("one", "{not json");
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /not valid JSON/);
+});
+
+test("write_file invalid JSON hints at escaped content", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "write_file", execute: () => ({ ok: true }) });
+  const outcome = await registry.execute("write_file", '{"path":"a.txt","content": unclosed');
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error, /not valid JSON/);
+  assert.match(outcome.error, /path\/content|old_string\/new_string/i);
 });
 
 test("gated tool is blocked when the approval handler denies", async () => {
@@ -144,4 +153,13 @@ test("builtin tools register and run", async () => {
   const time = await registry.execute("get_time", {});
   assert.equal(time.ok, true);
   assert.match(time.result.iso, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("unknown tool error suggests similar names for common typos", async () => {
+  const registry = registerBuiltinTools(new ToolRegistry());
+  const outcome = await registry.execute("search_search", { pattern: "foo" });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error, /Unknown tool 'search_search'/);
+  assert.match(outcome.error, /grep_search|search_project|web_search/);
+  assert.ok(suggestSimilarTools("search_search", ["grep_search", "read_file"]).includes("grep_search"));
 });

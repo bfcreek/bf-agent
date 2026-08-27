@@ -40,6 +40,12 @@ const TASK_HINT_RULES = [
       "This is artifact-only: read the named input files, compute the result, write_file the output path. Do not hunt for test.mjs/test.py — the instruction did not name them. After write_file, read_file the output to confirm format, then finish.",
   },
   {
+    id: "password-crack",
+    test: /\b(crack|john|hashcat|7z|password|brute.?force|dictionary)\b/i,
+    constraint:
+      "If the workspace includes task-named tooling (john/, hashcat, bundled scripts), build from ./john/src instead of apt install john when sources are present. When grep finds *2john converters (7z2john.pl, zip2john), run the converter on the archive, build john if needed, then john --wordlist=… — confirm the wordlist path exists first (apt-get install -y wamerican or /usr/share/wordlists). Do not guess passwords by hand first. For 7z: exit 0 with 'No files to process' or 'Files: 0' is not successful extraction — confirm decrypted files exist on disk before finishing. After write_file of the deliverable, read_file it and validate contents before finishing.",
+  },
+  {
     id: "test-fix",
     test: /\b(failing tests?|tests?\s+fail|\bit fails?\b|fix.{0,60}\btests?\b|(?:test|spec|suite).{0,40}\b(fail|fails|broken|error)\b)\b/i,
     constraint:
@@ -178,6 +184,12 @@ const TASK_HINT_RULES = [
       "For HTML/JS sanitization, do not rely on regex-only stripping. Prefer a real parser (BeautifulSoup, lxml, html.parser) plus an attribute/URL allowlist. Enumerate common XSS bypasses before finishing: entity encoding, event handlers without a space (onclick=), data:/vbscript:/javascript: URLs, CSS expression(), SVG/embed/math, and `on\\w+` that must match attribute names not arbitrary 'on' substrings. Keep a clean-HTML regression fixture and re-run it after each change.",
   },
   {
+    id: "dna-primer",
+    test: /\b(sequences\.fasta|oligotm|primer|dna.?insert|insertion site|melting temperature|Tm)\b/i,
+    constraint:
+      "Read sequences.fasta first, identify the insertion/mutation region, design primers for that site, then validate Tm with oligotm using the exact flags named in the instruction before finishing. Do not guess primer sequences without reading the input FASTA.",
+  },
+  {
     id: "rpc-proto",
     test: /\b(grpc|protobuf|\.proto|rpc\b|protocol buffers?)\b/i,
     constraint:
@@ -197,9 +209,22 @@ const TASK_HINT_RULES = [
   },
   {
     id: "pinned-package",
-    test: /\b(must use|use the|revision|sentence.?transformers|mteb|huggingface)\b|\bpip install\s+[\w.-]+==/i,
+    test: /\b(must use|use the|revision|sentence.?transformers|mteb|huggingface|pystan|rstan|pymc)\b|\bpip install\s+[\w.-]+==/i,
     constraint:
-      "The instruction names a required package, version, or revision. Import that exact package first and print its version with run_command before using any alternate library. Do not substitute sentence_transformers (or similar) when MTEB/Hugging Face is named. Put the output at the instruction path.",
+      "The instruction names a required package, version, or revision. Before writing integration code, verify its API with web_search/fetch_url or run_command (import + help/dir) — do not guess method names from memory. Import that exact package first and print its version with run_command before substituting alternates. Put outputs at the instruction paths.",
+  },
+  {
+    id: "install-and-run",
+    test: /\b(install|pip install|apt[- ]?get install)\b[\s\S]{0,300}\b(run|execute|python3?\s+|node\s+)/i,
+    constraint:
+      "The instruction requires install then run. Both need successful run_command calls before finishing — install/compile alone is not completion. After install, run the named script or command and confirm exit 0 plus expected output.",
+  },
+  {
+    id: "lookup-and-write",
+    test:
+      /\b(mteb|leaderboard)\b|\blookup\b.{0,40}\bwrite\b|\b(write|save).{0,60}\b[\w./-]+\.(json|txt|csv)\b/i,
+    constraint:
+      "Lookup-and-write plan: (1) acquire data once (curl/API or web_search then fetch_url), (2) compute/filter the answer, (3) write_file the required output path, (4) read_file or test -f to verify. Do not declare done while describing remaining work. After 4 exploratory commands (pip show, import probes) without write_file, stop introspecting and write_file a short script + run_command it.",
   },
   {
     id: "reverse-engineer",
@@ -224,6 +249,19 @@ const TASK_HINT_RULES = [
     test: /\b(write|create|implement|fix)\b.{0,80}\b[\w./-]+\.py\b|\bpython3?\s+[\w./-]+\.py\b/i,
     constraint:
       "Before finishing a Python script deliverable: run python -m py_compile on the file, then at least one run with the instruction's demo paths when available. Refuse to mark done if the file fails to parse. After the last write/edit, read_file the deliverable and ensure your final answer matches on-disk contents.",
+  },
+  {
+    id: "pytorch-ml",
+    test:
+      /\b(torch|pytorch|pipeline.?parallel|distributed.?train|train_step\w*|tensor|nn\.Module)\b/i,
+    constraint:
+      "ML/PyTorch task: read_file tests under /tests (or test_*.py) and any caller before your first implementation. Token IDs and label indices stay integer (torch.long); only activations/hidden states/gradients use the passed float dtype. py_compile is syntax-only — run pytest on /tests (or python -m pytest tests) before finishing. Avoid module-level print() that runs on import. In Docker /app workspaces, uv/pytest may be available; if deps are heavy, try a minimal `python -c` import smoke with fake tensors, but still run pytest when /tests exists.",
+  },
+  {
+    id: "pytorch-model-cli",
+    test: (text) => /\bweights\.json\b/i.test(text) && /\bcli_tool\b/i.test(text),
+    constraint:
+      "Export weights as real JSON (json.dump / converted state dict), never cp/mv a binary checkpoint to weights.json. After write_file weights.json, validate with python -c \"import json; json.load(open('weights.json'))\". Before finishing, run_command ./cli_tool weights.json <image.png> (or the instruction's exact paths) and confirm exit 0 with a single-digit prediction on stdout. If python fails with ModuleNotFoundError: torch, pip install torch in the workspace first.",
   },
   {
     id: "sqlite-carve",
@@ -472,6 +510,18 @@ export const TOOL_NUDGE_SEARCH_LOOP = [
   "(e.g. python3 -c '…', touch then run, or a different script path).",
 ].join(" ");
 
+export const TOOL_NUDGE_INTROSPECTION_LOOP = [
+  "Too many exploratory commands without write_file.",
+  "For lookup-and-write tasks: fetch/compute once, write_file the required output path,",
+  "then verify — stop pip show / import probes and script the remaining steps.",
+].join(" ");
+
+export const TOOL_NUDGE_REMAINING_WORK = [
+  "Your answer describes work still to do.",
+  "write_file the required output path now, read_file to verify, then finish —",
+  "do not stop with a plan or todo list.",
+].join(" ");
+
 export const TOOL_NUDGE_SECRET_HIT = [
   "grep_search found secret-like literals (AKIA / ghp_ / hf_ / assigned tokens),",
   "but no successful write_file or edit_file has run yet.",
@@ -526,6 +576,17 @@ export function emptyResponseRecoveryNudge({ goal, steps, consecutiveEmpty }) {
   if (consecutiveEmpty < 1) return null;
   const bootstrap = firstTurnBootstrapNudge({ goal, steps });
   if (bootstrap) return bootstrap;
+  if (
+    (steps ?? []).length >= 6 &&
+    detectTaskHints(goal).some((h) => h.id === "password-crack")
+  ) {
+    return [
+      "Do not send another empty turn — you are deep into a crack/hash task.",
+      "Next: build john from ./john/src if present, verify wordlist exists",
+      "(wamerican or /usr/share/wordlists), run 7z2john.pl then john --wordlist=….",
+      "After write_file of the deliverable, read_file and validate before finishing.",
+    ].join(" ");
+  }
   if (!goalNeedsSubstantiveTools(goal)) return null;
   return TOOL_NUDGE_FIRST_TOOL_ACTION;
 }
@@ -1081,6 +1142,7 @@ export function isSuccessfulTestCall(call) {
  * @param {string} [goal]
  */
 export function looksVacuousCliStdout(stdout, command = "", goal = "") {
+  if (looksVacuousArchiveExtract(stdout, command)) return true;
   const out = String(stdout ?? "").trim();
   if (out === "[]") return true;
   const cmd = String(command ?? "");
@@ -1096,6 +1158,37 @@ export function looksVacuousCliStdout(stdout, command = "", goal = "") {
     if (!/[A-Z]{2,}[-_]?\d|[A-Za-z]{3,}/.test(stripped)) return true;
   }
   return false;
+}
+
+/**
+ * 7z and similar archivers can exit 0 without extracting anything.
+ * @param {string} stdout
+ * @param {string} [command]
+ * @returns {boolean}
+ */
+export function looksVacuousArchiveExtract(stdout, command = "") {
+  if (!/\b7z\b/i.test(String(command ?? ""))) return false;
+  const out = String(stdout ?? "").toLowerCase();
+  return /no files to process|files:\s*0|\b0 files\b/.test(out);
+}
+
+/**
+ * Prior stdout from the last successful run of the same command.
+ * @param {Array<object>} calls
+ * @param {string} cmd
+ * @returns {string|null}
+ */
+export function priorSuccessfulCommandStdout(calls, cmd) {
+  const needle = normalizeCommand(cmd);
+  if (!needle) return null;
+  for (let i = (calls ?? []).length - 1; i >= 0; i--) {
+    const c = calls[i];
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
+    if (normalizeCommand(runCommandText(c)) !== needle) continue;
+    const out = commandStdout(c.result).trim();
+    return out ? out.slice(0, 400) : "(empty stdout)";
+  }
+  return null;
 }
 
 function commandStdout(result) {
@@ -1130,6 +1223,108 @@ function hasFailedTestRun(calls) {
     const code = commandExitCode(c.result);
     return code != null && code !== 0;
   });
+}
+
+/**
+ * Any run_command that exited non-zero (tool ok:true still means shell failure).
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function hasFailedCommandRun(calls) {
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c)) return false;
+    const code = commandExitCode(c.result);
+    return code != null && code !== 0;
+  });
+}
+
+/**
+ * Failed run_command with no later successful run_command (post-fix recovery allowed).
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function hasFailedCommandWithoutRecovery(calls) {
+  let lastFailIdx = -1;
+  for (let i = 0; i < (calls ?? []).length; i++) {
+    const c = calls[i];
+    if (!isActualRun(c)) continue;
+    const code = commandExitCode(c.result);
+    if (code != null && code !== 0) lastFailIdx = i;
+  }
+  if (lastFailIdx < 0) return false;
+  for (let i = lastFailIdx + 1; i < calls.length; i++) {
+    const c = calls[i];
+    if (isActualRun(c) && commandExitCode(c.result) === 0) return false;
+  }
+  return true;
+}
+
+function looksLikeHeredocCommand(command) {
+  const text = String(command ?? "");
+  return /<<-?\s*['"]?\w+/.test(text) || /python3?\s+-\s*<</.test(text);
+}
+
+/**
+ * @param {Array<{toolCalls?: Array<object>}>} steps
+ * @returns {number}
+ */
+export function countHeredocRejections(steps) {
+  let count = 0;
+  for (const step of steps ?? []) {
+    for (const c of step.toolCalls ?? []) {
+      if (c.name !== "run_command" || c.ok) continue;
+      if (/heredoc|<<\s*/i.test(String(c.error ?? ""))) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Block a second heredoc attempt after one rejection.
+ * @param {object} input
+ * @returns {string|null}
+ */
+export function heredocRetryBlock({ toolName, args, steps }) {
+  if (toolName !== "run_command") return null;
+  const cmd = String(args?.command ?? args?.cmd ?? "");
+  if (!looksLikeHeredocCommand(cmd)) return null;
+  if (countHeredocRejections(steps) >= 1) {
+    return (
+      "Blocked: heredoc was already rejected. write_file a .py script, then " +
+      "run_command python script.py — do not retry python - <<."
+    );
+  }
+  return null;
+}
+
+/**
+ * @param {string} answerText
+ * @returns {boolean}
+ */
+export function finalAnswerDescribesRemainingWork(answerText) {
+  return /\b(still need|next step|need to write|should write|will write|remaining|not yet written|have not written|todo)\b/i.test(
+    String(answerText ?? ""),
+  );
+}
+
+/**
+ * @param {object} input
+ * @returns {string|null}
+ */
+export function introspectionLoopNudge({ goal, steps, nudgeCount }) {
+  if (nudgeCount >= 2) return null;
+  if (!detectTaskHints(goal).some((h) => h.id === "lookup-and-write")) return null;
+  const calls = flattenToolCalls(steps);
+  const wrote = calls.some((c) => MUTATING_TOOL_NAMES.has(c.name) && c.ok);
+  if (wrote) return null;
+  let exploratory = 0;
+  for (const c of calls) {
+    if (c.name !== "run_command" || !c.ok) continue;
+    const cmd = runCommandText(c);
+    if (/\b(pip show|python -c|import |dir\(|help\(|--version|which )\b/i.test(cmd)) exploratory++;
+  }
+  if (exploratory >= 4) return TOOL_NUDGE_INTROSPECTION_LOOP;
+  return null;
 }
 
 /**
@@ -1400,6 +1595,10 @@ export function isTaskNamedVerificationCommand(cmd, goal = "") {
  * @param {string} goal
  * @returns {string[]}
  */
+/** @type {RegExp} */
+const NUMBERED_DELIVERABLE_RE =
+  /^\s*\d+[.)]\s+[^\n]*?([\w./-]+\.[A-Za-z0-9]+)/gim;
+
 export function extractNamedDeliverables(goal) {
   const text = String(goal ?? "");
   const found = [];
@@ -1430,6 +1629,25 @@ export function extractNamedDeliverables(goal) {
   for (const m of text.matchAll(/(\/(?:tmp|app|opt|usr)\/[\w.-]+\/[\w./-]+)/g)) {
     push(m[1]);
   }
+  for (const m of text.matchAll(NUMBERED_DELIVERABLE_RE)) {
+    push(m[1]);
+  }
+  return found;
+}
+
+/**
+ * File paths mentioned in numbered instruction steps (1. … file.py).
+ * @param {string} goal
+ * @returns {string[]}
+ */
+export function extractNumberedDeliverablePaths(goal) {
+  const text = String(goal ?? "");
+  const found = [];
+  for (const m of text.matchAll(NUMBERED_DELIVERABLE_RE)) {
+    const value = String(m[1] ?? "").replace(/[.,;:]+$/, "");
+    if (!value || found.includes(value)) continue;
+    found.push(value);
+  }
   return found;
 }
 
@@ -1439,6 +1657,74 @@ export function isCreatedFileDeliverable(filePath) {
 
 export function isHarborStyleGoal(goal) {
   return /\/tmp\/|\/app\/|\/hidden_tests\b/i.test(String(goal ?? ""));
+}
+
+/**
+ * @param {string} goal
+ * @returns {boolean}
+ */
+export function isMlPyTorchGoal(goal) {
+  const text = String(goal ?? "");
+  return (
+    /\b(torch|pytorch|pipeline.?parallel|distributed|train_step\w*|tensor|nn\.Module)\b/i.test(text) ||
+    /\b\/tests\b/.test(text) ||
+    isPytorchModelCliGoal(text) ||
+    detectTaskHints(text).some((h) => h.id === "pytorch-ml" || h.id === "pytorch-model-cli")
+  );
+}
+
+/**
+ * @param {string} goal
+ * @returns {boolean}
+ */
+export function isPytorchModelCliGoal(goal) {
+  const text = String(goal ?? "");
+  return /\bweights\.json\b/i.test(text) && /\bcli_tool\b/i.test(text);
+}
+
+/**
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function ranPytorchCliSmoke(calls) {
+  return (calls ?? []).some((c) => {
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) return false;
+    const cmd = runCommandText(c);
+    return /\bcli_tool\b/.test(cmd) && /\bweights\.json\b/.test(cmd) && /\.(?:png|jpe?g|bmp)\b/i.test(cmd);
+  });
+}
+
+/**
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function wrotePythonDeliverable(calls) {
+  return (calls ?? []).some((c) => {
+    if (!c.ok || !MUTATING_TOOL_NAMES.has(c.name)) return false;
+    return /\.py$/i.test(String(c.result?.path ?? c.args?.path ?? ""));
+  });
+}
+
+/**
+ * py_compile passed but no pytest/functional test run.
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function hasPyCompileOnlyWithoutFunctionalTest(calls) {
+  const list = calls ?? [];
+  const compiled = list.some(
+    (c) =>
+      isActualRun(c) &&
+      commandExitCode(c.result) === 0 &&
+      /\bpy_compile\b/.test(runCommandText(c)),
+  );
+  const functional = list.some(
+    (c) =>
+      isActualRun(c) &&
+      commandExitCode(c.result) === 0 &&
+      (/\bpytest\b/.test(runCommandText(c)) || isSuccessfulTestCall(c)),
+  );
+  return compiled && !functional;
 }
 
 function wroteNamedDeliverable(calls, name) {
@@ -1603,6 +1889,32 @@ function hasGitCommit(calls) {
 }
 
 /**
+ * Install succeeded and a non-install run_command succeeded afterward.
+ * @param {Array<object>} calls
+ * @returns {boolean}
+ */
+export function hasInstallAndRunSuccess(calls) {
+  let installIdx = -1;
+  for (let i = 0; i < (calls ?? []).length; i++) {
+    const c = calls[i];
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
+    const cmd = runCommandText(c);
+    if (/\b(pip install|apt(-get)? install|npm install|uv pip install)\b/i.test(cmd)) {
+      installIdx = i;
+    }
+  }
+  if (installIdx < 0) return false;
+  for (let i = installIdx + 1; i < calls.length; i++) {
+    const c = calls[i];
+    if (!isActualRun(c) || commandExitCode(c.result) !== 0) continue;
+    const cmd = runCommandText(c);
+    if (/\b(pip install|apt(-get)? install|npm install)\b/i.test(cmd)) continue;
+    if (/\b(python3?|node|\.\/|bash\s+\S+\.(?:py|sh))\b/i.test(cmd)) return true;
+  }
+  return false;
+}
+
+/**
  * Required verification that has not yet been recorded.
  * @param {string} goal
  * @param {Array<object>} calls
@@ -1650,6 +1962,17 @@ export function missingRequiredVerification(goal, calls) {
     if (verifyFiles.some((v) => v.toLowerCase() === String(file).toLowerCase())) continue;
     if (!wroteNamedDeliverable(calls, file)) missing.push(`create ${file}`);
   }
+  for (const file of extractNumberedDeliverablePaths(goal)) {
+    if (wroteNamedDeliverable(calls, file)) continue;
+    if (missing.some((m) => m === `create ${file}`)) continue;
+    missing.push(`create ${file}`);
+  }
+  if (
+    detectTaskHints(goal).some((h) => h.id === "install-and-run") &&
+    !hasInstallAndRunSuccess(calls)
+  ) {
+    missing.push("install dependencies and run the named script (both must exit 0)");
+  }
   if (
     createdDeliverables.some((file) => wroteNamedDeliverable(calls, file)) &&
     goalRequiresBehavioralVerification(goal) &&
@@ -1666,6 +1989,16 @@ export function missingRequiredVerification(goal, calls) {
   }
   for (const file of verifyFiles) {
     if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
+  }
+  if (
+    isMlPyTorchGoal(goal) &&
+    wrotePythonDeliverable(calls) &&
+    hasPyCompileOnlyWithoutFunctionalTest(calls)
+  ) {
+    missing.push("run pytest on /tests (py_compile alone is not functional verification)");
+  }
+  if (isPytorchModelCliGoal(goal) && !ranPytorchCliSmoke(calls)) {
+    missing.push("./cli_tool weights.json <image.png> must exit 0 with single-digit stdout");
   }
   return missing;
 }
@@ -1699,11 +2032,14 @@ export function redundantVerifyBlock({ goal, steps, toolName, args }) {
   }
 
   if (commandAlreadySucceeded(calls, cmd)) {
+    const priorOut = priorSuccessfulCommandStdout(calls, cmd);
+    const stdoutHint = priorOut ? ` Prior stdout: ${priorOut}` : "";
     if (missing.length > 0) {
       return [
         "status: blocked",
         `command: ${cmd}`,
         "That exact command already exited 0 — do not re-run it.",
+        stdoutHint,
         `Still required: ${missing.slice(0, 5).join("; ")}.`,
       ].join(" ");
     }
@@ -1714,6 +2050,7 @@ export function redundantVerifyBlock({ goal, steps, toolName, args }) {
       "status: blocked",
       `command: ${cmd}`,
       "That exact command already exited 0 — do not re-run it.",
+      stdoutHint,
       "If a later command overwrote outputs, say so and the next distinct command may re-run after a write or different successful shell step.",
     ].join(" ");
   }
@@ -1864,6 +2201,30 @@ export function diagnosticProbeFinalNudge({ answerText, nudgeCount }) {
 }
 
 /**
+ * Block asking the user for signatures/details when the deliverable is already on disk.
+ * @param {object} input
+ * @returns {string|null}
+ */
+export function deliverableSignatureAskNudge({ answerText, steps, nudgeCount }) {
+  const MAX_TOOL_NUDGES = 2;
+  if (nudgeCount >= MAX_TOOL_NUDGES) return null;
+  const answer = String(answerText ?? "");
+  if (!answer.trim()) return null;
+  if (
+    !/\b(signature|clarif|please provide|what should (?:the|my|a)|could you (?:provide|specify)|do you want)\b/i.test(
+      answer,
+    )
+  ) {
+    return null;
+  }
+  if (!wrotePythonDeliverable(flattenToolCalls(steps))) return null;
+  return (
+    "You already wrote the Python deliverable — read_file it and finish with what is on disk. " +
+    "Do not ask the user for a signature or parameters you should infer from tests/callers."
+  );
+}
+
+/**
  * Block completion when the model tries to finish with an empty message.
  * @param {object} input
  * @param {string} input.goal
@@ -1948,6 +2309,23 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
   }
 
   if (
+    isMlPyTorchGoal(goal) &&
+    wrotePythonDeliverable(calls) &&
+    hasPyCompileOnlyWithoutFunctionalTest(calls) &&
+    (claimsSuccess || substantiveToolsUsed(steps).size > 0 || !String(answerText ?? "").trim())
+  ) {
+    return "Do not finish yet — run pytest on /tests (or the instruction's test command). py_compile only checks syntax, not behavior.";
+  }
+
+  if (
+    isPytorchModelCliGoal(goal) &&
+    !ranPytorchCliSmoke(calls) &&
+    (claimsSuccess || substantiveToolsUsed(steps).size > 0 || !String(answerText ?? "").trim())
+  ) {
+    return "Do not finish yet — run ./cli_tool weights.json <image.png> and confirm exit 0 with a single-digit prediction on stdout.";
+  }
+
+  if (
     claimsSuccess &&
     /\b(fix|edit|repair|bug|broken|sanitiz\w*|secrets?|credential)\b/i.test(String(goal ?? "")) &&
     !hasSuccessfulMutation(calls) &&
@@ -1975,6 +2353,12 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
     (item) => item !== "run the test command until it exits 0",
   );
   const emptyAnswer = !String(answerText ?? "").trim();
+  if (
+    finalAnswerDescribesRemainingWork(answerText) &&
+    missing.some((item) => String(item).startsWith("create "))
+  ) {
+    return TOOL_NUDGE_REMAINING_WORK;
+  }
   if (missing.length > 0 && (claimsSuccess || emptyAnswer || substantiveToolsUsed(steps).size > 0)) {
     if (missing.includes("implement the newly requested commands (edit existing files)")) {
       return TOOL_NUDGE_FOLLOW_UP;
@@ -1989,6 +2373,28 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
       return TOOL_NUDGE_DELIVERABLE_VERIFY;
     }
     return `Do not finish yet — still need: ${missing.slice(0, 5).join("; ")}.`;
+  }
+  if (
+    (steps ?? []).length >= 4 &&
+    extractNamedDeliverables(goal).filter(isCreatedFileDeliverable).length > 0 &&
+    !hasSuccessfulMutation(calls) &&
+    (claimsSuccess || emptyAnswer)
+  ) {
+    const remaining = missing.length
+      ? missing.slice(0, 5).join("; ")
+      : extractNamedDeliverables(goal)
+          .filter(isCreatedFileDeliverable)
+          .map((f) => `create ${f}`)
+          .join("; ");
+    return `Do not finish yet — required output still missing after ${steps.length} steps. Still need: ${remaining}.`;
+  }
+
+  if (
+    missing.length === 0 &&
+    (claimsSuccess || /\b(done|complete|finished|success)\b/i.test(String(answerText ?? ""))) &&
+    hasFailedCommandWithoutRecovery(calls)
+  ) {
+    return "Do not claim success — a run_command exited non-zero (tool ok:true still means the shell failed). Read stderr, fix, and re-run.";
   }
 
   return null;
@@ -2009,7 +2415,14 @@ export function finalAnswerNudge(input) {
   ) {
     return null;
   }
-  return prematureFinalNudge(input) ?? completionVerifyNudge(input) ?? diagnosticProbeFinalNudge(input) ?? emptyFinalAnswerNudge(input);
+  return (
+    prematureFinalNudge(input) ??
+    introspectionLoopNudge(input) ??
+    completionVerifyNudge(input) ??
+    deliverableSignatureAskNudge(input) ??
+    diagnosticProbeFinalNudge(input) ??
+    emptyFinalAnswerNudge(input)
+  );
 }
 
 /**

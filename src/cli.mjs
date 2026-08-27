@@ -751,6 +751,17 @@ async function main() {
     }
     console.log(result.text);
   } catch (err) {
+    if (store && options.session) {
+      const failed = {
+        text: "",
+        stopReason: "error",
+        steps: [],
+        messages: priorSession?.messages ?? [],
+        error: err instanceof OllamaClientError ? err.message : String(err?.message ?? err),
+      };
+      const saved = store.merge(options.session, priorSession, failed);
+      await store.save(options.session, saved);
+    }
     if (err instanceof OllamaClientError) {
       console.error(err.message);
       process.exitCode = 3;

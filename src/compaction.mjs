@@ -5,7 +5,7 @@
  * summarization call fails, the transcript is left untouched.
  */
 
-import { extractCompilerDiagnostics, isArtifactOnlyGoal, missingRequiredVerification } from "./prompt-enhancements.mjs";
+import { extractCompilerDiagnostics, isArtifactOnlyGoal, isMlPyTorchGoal, looksVacuousArchiveExtract, missingRequiredVerification } from "./prompt-enhancements.mjs";
 
 export const DEFAULT_MAX_CHARS = 24_000;
 export const DEFAULT_KEEP_RECENT = 6;
@@ -35,7 +35,9 @@ const SUMMARIZER_PROMPT = [
   "implemented. Reduce incidental failed tool experiments to at most a",
   "one-line note. If a compile error was diagnosed with a known fix that was",
   "not applied, state that fix prominently so the next turn can apply it",
-  "instead of exploring. Reply with only the summary.",
+  "instead of exploring. For john/*2john encrypted archives, preserve the workflow:",
+  "7z2john.pl → build john if needed → john --wordlist=… — do not replace it with doc grep noise.",
+  "Reply with only the summary.",
 ].join(" ");
 
 /** Rough size proxy — characters, since we have no tokenizer. */
@@ -351,6 +353,7 @@ export function formatVerificationRecap(messages) {
   const commandLines = [];
   const commandOutputs = [];
   const assertionLines = [];
+  const passwordAttempts = [];
   const files = new Map();
   let pending = [];
 
@@ -379,11 +382,18 @@ export function formatVerificationRecap(messages) {
     }
 
     const { code, status, stdout, stderr } = parseCommandFields(content);
+    if (name === "run_command") {
+      const cmdText = String(call.args?.command ?? call.args?.cmd ?? "");
+      const passMatch = cmdText.match(/\b-p(\S+)/);
+      if (passMatch) passwordAttempts.push(passMatch[1].slice(0, 24));
+    }
     if (code == null && !status) continue;
     const ok = Number(code) === 0 || /^success$/i.test(String(status ?? ""));
     const blocked = /^blocked$/i.test(String(status ?? ""));
+    const cmdText = String(call.args?.command ?? call.args?.cmd ?? "");
+    const vacuousArchive = ok && looksVacuousArchiveExtract(stdout, cmdText);
     commandLines.push(
-      `- ${name}: ${blocked ? "blocked" : ok ? "success" : "FAILED"} (exit ${code ?? "?"})`,
+      `- ${name}: ${blocked ? "blocked" : vacuousArchive ? "exit 0 but no files extracted" : ok ? "success" : "FAILED"} (exit ${code ?? "?"})`,
     );
     commandOutputs.push({
       name,
@@ -414,7 +424,17 @@ export function formatVerificationRecap(messages) {
 
   const uniqueAssertions = [...new Set(assertionLines)].slice(-8);
   const fileLines = [...files.entries()].map(([p, s]) => `- ${p}: ${s}`);
+  const failedOutputs = commandOutputs.filter((o) => o.status === "FAILED");
   const parts = [];
+  if (failedOutputs.length) {
+    parts.push(
+      "Recent command failures (tool ok:true still means shell failed — read stderr before retrying):",
+      ...failedOutputs.slice(-4).map((o) => {
+        const err = String(o.stderr ?? o.stdout ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+        return `- exit ${o.code ?? "?"}: ${err || "(no output captured)"}`;
+      }),
+    );
+  }
   if (commandLines.length) {
     const original = extractOriginalInstruction(messages);
     const wroteArtifact =
@@ -444,11 +464,24 @@ export function formatVerificationRecap(messages) {
       ...uniqueAssertions,
     );
   }
+  if (passwordAttempts.length) {
+    parts.push(
+      "Passwords already tried (7z -p…):",
+      ...passwordAttempts.slice(-8).map((p) => `- ${p}`),
+    );
+  }
   if (fileLines.length) {
     parts.push(
       "Last known file state (re-read before editing if unsure). An existing output file is not verification-complete until values pass domain/plausibility checks:",
       ...fileLines,
     );
+    const wrotePy = fileLines.some((line) => /\.py:/i.test(line));
+    const goal = extractOriginalInstruction(messages);
+    if (wrotePy && isMlPyTorchGoal(goal)) {
+      parts.push(
+        "PyTorch deliverable on disk — read_file it before finishing. Do not ask the user for a signature already implemented in the file; run pytest on /tests if not run yet.",
+      );
+    }
   }
 
   let emptySearchStreak = 0;

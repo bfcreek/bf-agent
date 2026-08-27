@@ -70,6 +70,8 @@ export class SessionStore {
       messages: runResult.messages,
       steps,
       changedFiles: [...changed].sort((a, b) => a.localeCompare(b)),
+      stopReason: runResult.stopReason ?? existing?.stopReason,
+      error: runResult.error ?? existing?.error,
     };
   }
 

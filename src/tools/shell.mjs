@@ -11,9 +11,30 @@
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 
-import { looksVacuousCliStdout } from "../prompt-enhancements.mjs";
+import { looksVacuousArchiveExtract, looksVacuousCliStdout } from "../prompt-enhancements.mjs";
 import { conflictMarkerNote, goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
 import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
+
+/**
+ * Reject run_command calls that mistakenly pass write_file/edit_file fields.
+ * @param {object} [args]
+ * @returns {string|null}
+ */
+export function runCommandSchemaIssue(args) {
+  const a = args ?? {};
+  const command = a.command ?? a.cmd;
+  if (command && String(command).trim()) return null;
+  const foreign = [];
+  if (a.content != null) foreign.push("content");
+  if (a.path != null) foreign.push("path");
+  if (a.old_string != null) foreign.push("old_string");
+  if (a.new_string != null) foreign.push("new_string");
+  if (!foreign.length) return null;
+  return (
+    `run_command requires a "command" string, not write_file/edit_file fields (${foreign.join(", ")}). ` +
+    "Use write_file for file content, then run_command with the shell command."
+  );
+}
 
 function positiveIntEnv(name, fallback) {
   const raw = process.env[name];
@@ -114,9 +135,89 @@ export function findHeredocCommand(command) {
 }
 
 /**
- * CLIs that should print to stdout. Exit 0 with empty stdout usually means a
- * broken Windows entry-point guard (URL.pathname / new URL(process.argv[1])).
- *
+ * 7z extract/test without a password flag may hang on an interactive prompt.
+ * @param {string} command
+ * @returns {string|null} Error message when the command should be rewritten.
+ */
+export function sevenZipMissingPasswordFlag(command) {
+  const text = String(command ?? "");
+  if (!/\b7z\b/i.test(text)) return null;
+  if (/(?:^|\s)-p(?:\S|\s)/.test(text)) return null;
+  if (!/\b[xtb]\b/i.test(text)) return null;
+  return (
+    "7z extract/test without -p may hang waiting for a password prompt (no TTY input). " +
+    "Use -p'' to fail fast without a password, or -pYOURPASSWORD when you have one."
+  );
+}
+
+/**
+ * Stdout/stderr that shows an interactive password prompt — command likely hung until timeout.
+ * @param {string} stdout
+ * @param {string} [stderr]
+ * @returns {string|null}
+ */
+export function interactivePasswordPromptNote(stdout, stderr = "") {
+  const combined = `${stdout ?? ""}\n${stderr ?? ""}`;
+  if (!/enter password|password:\s*$/im.test(combined)) return null;
+  return (
+    "Output shows an interactive password prompt (no TTY input). " +
+    "Re-run with -pPASSWORD or -p'' on 7z/unzip, or use john/hashcat instead of typing at a prompt."
+  );
+}
+
+/**
+ * Exit 0 with error-like stderr — often masks script failures (missing wordlist, etc.).
+ * @param {number|null} exitCode
+ * @param {string} [stderr]
+ * @returns {string|null}
+ */
+export function exitZeroWithStderrNote(exitCode, stderr = "") {
+  if (exitCode !== 0) return null;
+  const err = String(stderr ?? "").trim();
+  if (!err) return null;
+  if (/no such file|not found|fatal|error:|cannot open|wordlist/i.test(err)) {
+    return `Exited 0 but stderr reports a problem — treat as failure, not success: ${err.slice(0, 240)}`;
+  }
+  return null;
+}
+
+/**
+ * Surface stderr prominently on non-zero exits (import errors, etc.).
+ * @param {number|null} exitCode
+ * @param {string} [stderr]
+ * @returns {string|null}
+ */
+export function nonZeroExitStderrNote(exitCode, stderr = "") {
+  if (exitCode === 0) return null;
+  const err = String(stderr ?? "").trim();
+  if (!err) return null;
+  if (/ModuleNotFoundError|No module named|ImportError/i.test(err)) {
+    const torchHint = /\btorch\b/i.test(err) ? " pip install torch in the workspace, then retry." : "";
+    return `Command failed — read stderr:${torchHint} ${err.slice(0, 320)}`;
+  }
+  return `Command failed — stderr: ${err.slice(0, 320)}`;
+}
+
+/**
+ * Block copying binary checkpoints to JSON weight paths.
+ * @param {string} command
+ * @returns {string|null}
+ */
+export function binaryCheckpointCopyToJsonIssue(command) {
+  const text = String(command ?? "");
+  if (!/\b(?:cp|mv)\b/.test(text)) return null;
+  if (!/\b[\w./-]+\.json\b/i.test(text)) return null;
+  if (/\b[\w./-]+\.(?:pth|pt|ckpt|bin|safetensors)\b/i.test(text)) {
+    return (
+      "Do not cp/mv binary checkpoints (.pth/.pt) to a .json path. " +
+      "Export weights as JSON and validate with python -c \"import json; json.load(open('weights.json'))\"."
+    );
+  }
+  return null;
+}
+
+/**
+ * CLIs that should print to stdout.
  * @param {string} command
  * @param {number|null} exitCode
  * @param {string} stdout
@@ -125,6 +226,12 @@ export function findHeredocCommand(command) {
 export function cliEmptyStdoutNote(command, exitCode, stdout) {
   if (exitCode !== 0) return null;
   const text = String(command ?? "");
+  if (looksVacuousArchiveExtract(stdout, text)) {
+    return (
+      "Exited 0 but 7z reported no files extracted (No files to process / Files: 0). " +
+      "Wrong password or missing -p flag — try -p'' to fail fast or supply the cracked password."
+    );
+  }
   if (/\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+test|pytest)\b/i.test(text)) {
     return null;
   }
@@ -348,7 +455,9 @@ export function registerShellTools(registry, { workspaceRoot }) {
       },
       required: ["command"],
     },
-    async execute({ command, cwd, timeout_seconds }) {
+    async execute({ command, cwd, timeout_seconds, ...rest }) {
+      const schemaIssue = runCommandSchemaIssue({ command, cwd, timeout_seconds, ...rest });
+      if (schemaIssue) throw new Error(schemaIssue);
       if (!command || !command.trim()) throw new Error("command must not be empty.");
       // A REPL can never succeed here (no TTY input), so this gate applies
       // even when a human approved the call — it saves a guaranteed timeout.
@@ -368,6 +477,10 @@ export function registerShellTools(registry, { workspaceRoot }) {
             "Do not retry the same heredoc.",
         );
       }
+      const sevenZip = sevenZipMissingPasswordFlag(command);
+      if (sevenZip) throw new Error(sevenZip);
+      const binaryJson = binaryCheckpointCopyToJsonIssue(command);
+      if (binaryJson) throw new Error(binaryJson);
       const posixShell = windowsBashCommandIssue(command, registry.runContext?.goal);
       if (posixShell) throw new Error(posixShell);
       // Deletion gate for unattended runs (in ask mode, reaching execute
@@ -462,9 +575,13 @@ function runCommand(command, { cwd, timeoutMs }) {
           : `FAILED with exit code ${code}`;
       const notes = timedOut
         ? []
-        : [cliEmptyStdoutNote(command, code, stdout), conflictMarkerNote(`${stdout}\n${stderr}`)].filter(
-            Boolean,
-          );
+        : [
+            cliEmptyStdoutNote(command, code, stdout),
+            interactivePasswordPromptNote(stdout, stderr),
+            exitZeroWithStderrNote(code, stderr),
+            nonZeroExitStderrNote(code, stderr),
+            conflictMarkerNote(`${stdout}\n${stderr}`),
+          ].filter(Boolean);
       const note = notes.length > 0 ? notes.join(" ") : null;
       const outLimit = 12_000;
       const errLimit = 8_000;

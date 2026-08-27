@@ -112,6 +112,31 @@ export async function readInstruction(trialDir, task) {
 }
 
 /**
+ * Infer stop reason when Harbor session.json omits it after a crash.
+ * @param {object|null|undefined} session
+ * @param {{ stdout?: string }} [options]
+ * @returns {string}
+ */
+export function inferAgentStopReason(session, { stdout = "" } = {}) {
+  if (!session) {
+    return /NonZeroAgentExitCode|error parsing tool call|exit code 3/i.test(stdout) ? "error" : "completed";
+  }
+  const steps = session.steps ?? [];
+  const explicit = session.stopReason;
+  if (explicit && explicit !== "completed") return explicit;
+  const blob = `${stdout}\n${session.error ?? ""}`;
+  if (
+    steps.length === 0 &&
+    (/NonZeroAgentExitCode|error parsing tool call|exit code 3/i.test(blob) ||
+      session.error ||
+      !session.messages?.length)
+  ) {
+    return "error";
+  }
+  return explicit ?? "completed";
+}
+
+/**
  * @param {string} trialDir
  */
 export async function agentResultFromTrial(trialDir) {
@@ -119,6 +144,7 @@ export async function agentResultFromTrial(trialDir) {
     "agent/session.json",
     "agent/halo-agent/session.json",
   ]);
+  const stdout = await readFirstExisting(trialDir, ["agent/stdout.txt", "logs/agent/stdout.txt"]);
   if (sessionRaw) {
     try {
       const session = JSON.parse(sessionRaw);
@@ -126,7 +152,7 @@ export async function agentResultFromTrial(trialDir) {
       const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
       return {
         text: typeof lastAssistant?.content === "string" ? lastAssistant.content : session.text ?? "",
-        stopReason: session.stopReason ?? "completed",
+        stopReason: inferAgentStopReason(session, { stdout: stdout ?? "" }),
         steps: session.steps ?? [],
         messages,
       };
@@ -134,10 +160,9 @@ export async function agentResultFromTrial(trialDir) {
       // fall through
     }
   }
-  const stdout = await readFirstExisting(trialDir, ["agent/stdout.txt", "logs/agent/stdout.txt"]);
   return {
     text: stdout ?? "",
-    stopReason: "completed",
+    stopReason: inferAgentStopReason(null, { stdout: stdout ?? "" }),
     steps: [],
     messages: [],
   };

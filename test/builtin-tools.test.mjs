@@ -7,7 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import { AgentLoop } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { MAX_TOOL_OUTPUT_CHARS, resolveWithinRoot, containsConflictMarkers, conflictMarkerNote } from "../src/tools/fs.mjs";
+import { MAX_TOOL_OUTPUT_CHARS, moduleLevelPrintNote, resolveWithinRoot, containsConflictMarkers, conflictMarkerNote, writeFileSchemaIssue, weightsJsonContentIssue } from "../src/tools/fs.mjs";
 import {
   classifyCleanupFileMutation,
 } from "../src/tools/mutation-safety.mjs";
@@ -18,6 +18,12 @@ import {
   findDeleteCommand,
   findHeredocCommand,
   findInteractiveCommand,
+  sevenZipMissingPasswordFlag,
+  binaryCheckpointCopyToJsonIssue,
+  nonZeroExitStderrNote,
+  runCommandSchemaIssue,
+  interactivePasswordPromptNote,
+  exitZeroWithStderrNote,
   windowsBashCommandIssue,
 } from "../src/tools/shell.mjs";
 
@@ -324,12 +330,49 @@ test("findHeredocCommand flags python/shell heredocs", () => {
   assert.equal(findHeredocCommand("python script.py"), null);
 });
 
+test("sevenZipMissingPasswordFlag blocks extract without -p", () => {
+  assert.match(sevenZipMissingPasswordFlag("7z x secret.7z") ?? "", /-p''/);
+  assert.equal(sevenZipMissingPasswordFlag("7z x secret.7z -ppass"), null);
+  assert.equal(sevenZipMissingPasswordFlag("7z l secret.7z"), null);
+});
+
+test("cliEmptyStdoutNote warns on vacuous 7z extraction", () => {
+  assert.match(
+    cliEmptyStdoutNote("7z x secret.7z -ppass", 0, "No files to process"),
+    /no files extracted/i,
+  );
+});
+
+test("interactivePasswordPromptNote flags Enter password in output", () => {
+  assert.match(
+    interactivePasswordPromptNote("", "Enter password (will not be echoed):") ?? "",
+    /-pPASSWORD|-p''/,
+  );
+  assert.equal(interactivePasswordPromptNote("ok", ""), null);
+});
+
+test("exitZeroWithStderrNote flags success with error stderr", () => {
+  assert.match(
+    exitZeroWithStderrNote(0, "./brute.sh: line 14: wordlist: No such file") ?? "",
+    /treat as failure/i,
+  );
+  assert.equal(exitZeroWithStderrNote(0, ""), null);
+});
+
 test("run_command refuses heredocs", async () => {
   const run = await registry.execute("run_command", {
     command: "python - <<'EOF'\nprint(1)\nEOF",
   });
   assert.equal(run.ok, false);
   assert.match(run.error, /heredoc|script file/i);
+});
+
+test("run_command refuses 7z extract without password flag", async () => {
+  const run = await registry.execute("run_command", {
+    command: "7z x secret.7z",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /-p''|password/i);
 });
 
 test("windowsBashCommandIssue blocks bash on Windows unless the user asked for it", () => {
@@ -674,4 +717,67 @@ test("agent loop hands the goal to tools via run context", async () => {
   const loop = new AgentLoop({ client, registry: fakeRegistry, planning: false, taskHints: false });
   await loop.run("delete junk.txt");
   assert.deepEqual(captured, [{ goal: "delete junk.txt" }]);
+});
+
+test("runCommandSchemaIssue rejects conflated write_file fields", () => {
+  assert.match(
+    runCommandSchemaIssue({ path: "train.py", content: "print(1)" }) ?? "",
+    /write_file/i,
+  );
+  assert.equal(runCommandSchemaIssue({ command: "python train.py" }), null);
+});
+
+test("writeFileSchemaIssue rejects conflated run_command fields", () => {
+  assert.match(writeFileSchemaIssue({ path: "x.py", command: "echo hi" }) ?? "", /run_command/i);
+});
+
+test("moduleLevelPrintNote warns on import-time print", () => {
+  assert.match(
+    moduleLevelPrintNote("train.py", "print('debug')\ndef train():\n  pass") ?? "",
+    /module-level print/i,
+  );
+  assert.equal(
+    moduleLevelPrintNote(
+      "train.py",
+      "def train():\n  pass\nif __name__ == '__main__':\n  print('ok')",
+    ),
+    null,
+  );
+});
+
+test("write_file surfaces module-level print warning", async () => {
+  const write = await registry.execute("write_file", {
+    path: "train.py",
+    content: "print('boot')\ndef train():\n  return 1",
+  });
+  assert.equal(write.ok, true);
+  assert.match(write.result.note ?? "", /module-level print/i);
+});
+
+test("binaryCheckpointCopyToJsonIssue blocks cp of pth to json", () => {
+  assert.match(
+    binaryCheckpointCopyToJsonIssue("cp model.pth weights.json") ?? "",
+    /binary checkpoints/i,
+  );
+});
+
+test("nonZeroExitStderrNote surfaces ModuleNotFoundError", () => {
+  assert.match(
+    nonZeroExitStderrNote(1, "ModuleNotFoundError: No module named 'torch'") ?? "",
+    /torch/i,
+  );
+});
+
+test("weightsJsonContentIssue rejects invalid JSON", () => {
+  assert.match(weightsJsonContentIssue("weights.json", "not-json{") ?? "", /valid JSON/i);
+  assert.equal(weightsJsonContentIssue("weights.json", '{"w":1}'), null);
+});
+
+test("write_file rejects invalid weights.json content", async () => {
+  const write = await registry.execute("write_file", {
+    path: "weights.json",
+    content: "binary-bytes-not-json",
+  });
+  assert.equal(write.ok, false);
+  assert.match(write.error ?? "", /valid JSON/i);
 });

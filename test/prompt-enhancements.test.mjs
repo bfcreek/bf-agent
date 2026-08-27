@@ -6,7 +6,13 @@ import {
   ambiguousEditRecoveryNudge,
   commandExitCode,
   completionVerifyNudge,
+  countHeredocRejections,
+  deliverableSignatureAskNudge,
   detectTaskHints,
+  finalAnswerDescribesRemainingWork,
+  hasFailedCommandRun,
+  hasFailedCommandWithoutRecovery,
+  heredocRetryBlock,
   emptyFinalAnswerNudge,
   emptyResponseRecoveryNudge,
   firstTurnBootstrapNudge,
@@ -16,6 +22,8 @@ import {
   shouldFailOnEmptyResponses,
   extractCompilerDiagnostics,
   extractNamedDeliverables,
+  extractNumberedDeliverablePaths,
+  hasInstallAndRunSuccess,
   extractNamedNodeCommands,
   extractSmokeSubcommands,
   finalAnswerNudge,
@@ -24,13 +32,20 @@ import {
   hasSuccessfulTestRun,
   isDiagnosticCommand,
   isFollowUpGoal,
+  hasPyCompileOnlyWithoutFunctionalTest,
   isHarborStyleGoal,
+  isMlPyTorchGoal,
+  isPytorchModelCliGoal,
+  ranPytorchCliSmoke,
+  wrotePythonDeliverable,
   isSuccessfulTestCall,
   looksVacuousCliStdout,
   missingRequiredVerification,
   PLANNING_USER_MESSAGE,
   buildDepsInstallRerunNudge,
   looksLikeAptSourcesConfigChange,
+  looksVacuousArchiveExtract,
+  priorSuccessfulCommandStdout,
   redundantVerifyBlock,
   isComplexGoal,
   shouldPlanGoal,
@@ -897,6 +912,8 @@ test("detectTaskHints matches sanitization, proto, and numeric-artifact goals", 
   assert.ok(re.some((h) => h.id === "reverse-engineer"));
   const sql = detectTaskHints("Recover rows from a truncated sqlite database into recover.json");
   assert.ok(sql.some((h) => h.id === "sqlite-carve"));
+  const dna = detectTaskHints("Design primers for dna-insert using sequences.fasta and oligotm Tm");
+  assert.ok(dna.some((h) => h.id === "dna-primer"));
 });
 
 test("repeatedEditMissNudge fires after two old_string misses on the same file", () => {
@@ -1489,3 +1506,238 @@ test("buildDepsInstallRerunNudge fires after build-essential install", () => {
   assert.match(nudge ?? "", /Re-run the last failed compile/i);
 });
 
+test("looksVacuousArchiveExtract flags 7z no-files output", () => {
+  assert.equal(
+    looksVacuousArchiveExtract("No files to process\nFiles: 0", "7z x secret.7z"),
+    true,
+  );
+  assert.equal(looksVacuousArchiveExtract("Everything is Ok", "7z x secret.7z"), false);
+});
+
+test("redundantVerifyBlock includes prior stdout when blocking duplicate", () => {
+  const block = redundantVerifyBlock({
+    goal: "Extract secret.7z",
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "7z x secret.7z" },
+            result: { exitCode: 0, stdout: "No files to process" },
+          },
+        ],
+      },
+    ],
+    toolName: "run_command",
+    args: { command: "7z x secret.7z" },
+  });
+  assert.match(block ?? "", /Prior stdout:.*No files to process/i);
+});
+
+test("isMlPyTorchGoal detects torch pipeline tasks", () => {
+  assert.equal(isMlPyTorchGoal("Implement train_step_pipeline_afab in /app"), true);
+  assert.equal(detectTaskHints("PyTorch pipeline parallelism").some((h) => h.id === "pytorch-ml"), true);
+});
+
+test("hasPyCompileOnlyWithoutFunctionalTest requires pytest after py_compile", () => {
+  const calls = [
+    { name: "write_file", ok: true, args: { path: "train.py" }, result: { path: "train.py" } },
+    {
+      name: "run_command",
+      ok: true,
+      args: { command: "python -m py_compile train.py" },
+      result: { exitCode: 0 },
+    },
+  ];
+  assert.equal(wrotePythonDeliverable(calls), true);
+  assert.equal(hasPyCompileOnlyWithoutFunctionalTest(calls), true);
+  assert.ok(
+    missingRequiredVerification("PyTorch train_step in /app", calls).some((m) => /pytest/i.test(m)),
+  );
+});
+
+test("completionVerifyNudge blocks py_compile-only finish on ML goals", () => {
+  const nudge = completionVerifyNudge({
+    goal: "Implement pipeline parallelism with PyTorch in /app",
+    answerText: "Done.",
+    steps: [
+      {
+        toolCalls: [
+          { name: "write_file", ok: true, args: { path: "train.py" }, result: { path: "train.py" } },
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "python -m py_compile train.py" },
+            result: { exitCode: 0 },
+          },
+        ],
+      },
+    ],
+    nudgeCount: 0,
+  });
+  assert.match(nudge ?? "", /pytest/i);
+});
+
+test("deliverableSignatureAskNudge blocks asking user after writing deliverable", () => {
+  const nudge = deliverableSignatureAskNudge({
+    answerText: "What should the function signature be?",
+    steps: [
+      {
+        toolCalls: [
+          { name: "write_file", ok: true, args: { path: "train.py" }, result: { path: "train.py" } },
+        ],
+      },
+    ],
+    nudgeCount: 0,
+  });
+  assert.match(nudge ?? "", /read_file/i);
+});
+
+test("isPytorchModelCliGoal and ranPytorchCliSmoke gate completion", () => {
+  const goal = "Build cli_tool and weights.json, then run ./cli_tool weights.json digit.png";
+  assert.equal(isPytorchModelCliGoal(goal), true);
+  const calls = [
+    {
+      name: "run_command",
+      ok: true,
+      args: { command: "./cli_tool weights.json digit.png" },
+      result: { exitCode: 0, stdout: "7" },
+    },
+  ];
+  assert.equal(ranPytorchCliSmoke(calls), true);
+  assert.match(
+    completionVerifyNudge({
+      goal,
+      answerText: "Done.",
+      steps: [{ toolCalls: [{ name: "write_file", ok: true, args: { path: "weights.json" } }] }],
+      nudgeCount: 0,
+    }) ?? "",
+    /cli_tool weights\.json/i,
+  );
+});
+
+test("hasFailedCommandRun blocks success claims after shell failure", () => {
+  const calls = [
+    {
+      name: "run_command",
+      ok: true,
+      args: { command: "git clone https://example.com/x" },
+      result: { exitCode: 128, stderr: "fatal: repository not found" },
+    },
+  ];
+  assert.equal(hasFailedCommandRun(calls), true);
+  assert.equal(hasFailedCommandWithoutRecovery(calls), true);
+  assert.match(
+    completionVerifyNudge({
+      goal: "Run git clone https://example.com/repo and confirm it succeeds",
+      answerText: "Done — task complete.",
+      steps: [{ toolCalls: calls }],
+      nudgeCount: 0,
+    }) ?? "",
+    /non-zero/i,
+  );
+});
+
+test("finalAnswerDescribesRemainingWork blocks todo-style finish", () => {
+  assert.equal(finalAnswerDescribesRemainingWork("Next step: write leaderboard.json"), true);
+  assert.match(
+    completionVerifyNudge({
+      goal: "Write the output file titled leaderboard.json from MTEB lookup",
+      answerText: "Still need to write leaderboard.json",
+      steps: [{ toolCalls: [] }],
+      nudgeCount: 0,
+    }) ?? "",
+    /write_file/i,
+  );
+});
+
+test("heredocRetryBlock rejects second heredoc attempt", () => {
+  const steps = [
+    {
+      toolCalls: [
+        { name: "run_command", ok: false, error: "This command uses a shell heredoc" },
+      ],
+    },
+  ];
+  assert.equal(countHeredocRejections(steps), 1);
+  assert.match(
+    heredocRetryBlock({
+      toolName: "run_command",
+      args: { command: "python - <<'EOF'\nprint(1)\nEOF" },
+      steps,
+    }) ?? "",
+    /write_file/i,
+  );
+});
+
+test("detectTaskHints matches lookup-and-write MTEB goals", () => {
+  assert.ok(
+    detectTaskHints("Find the MTEB leaderboard entry and write leaderboard.json").some(
+      (h) => h.id === "lookup-and-write",
+    ),
+  );
+});
+
+test("extractNumberedDeliverablePaths finds files in numbered steps", () => {
+  const goal = [
+    "1. Write pystan_model.py from model.R",
+    "2. Save results to results.json",
+    "3. Run python3 fit.py",
+  ].join("\n");
+  assert.deepEqual(extractNumberedDeliverablePaths(goal), ["pystan_model.py", "results.json", "fit.py"]);
+  const missing = missingRequiredVerification(goal, []);
+  assert.ok(missing.some((m) => /create pystan_model\.py/i.test(m)));
+  assert.ok(missing.some((m) => /create results\.json/i.test(m)));
+});
+
+test("hasInstallAndRunSuccess requires run after install", () => {
+  const goal = "pip install pystan then run python3 fit.py";
+  assert.equal(
+    hasInstallAndRunSuccess([
+      {
+        name: "run_command",
+        ok: true,
+        args: { command: "pip install pystan" },
+        result: { exitCode: 0 },
+      },
+    ]),
+    false,
+  );
+  assert.equal(
+    hasInstallAndRunSuccess([
+      {
+        name: "run_command",
+        ok: true,
+        args: { command: "pip install pystan" },
+        result: { exitCode: 0 },
+      },
+      {
+        name: "run_command",
+        ok: true,
+        args: { command: "python3 fit.py" },
+        result: { exitCode: 0 },
+      },
+    ]),
+    true,
+  );
+  assert.ok(
+    missingRequiredVerification(goal, [
+      {
+        name: "run_command",
+        ok: true,
+        args: { command: "pip install pystan" },
+        result: { exitCode: 0 },
+      },
+    ]).some((m) => /install dependencies and run/i.test(m)),
+  );
+});
+
+test("detectTaskHints matches install-and-run and pinned pystan goals", () => {
+  assert.ok(
+    detectTaskHints("pip install pystan==3.10 then run python3 fit.py").some(
+      (h) => h.id === "install-and-run",
+    ),
+  );
+  assert.ok(detectTaskHints("Convert rstan to pystan integration").some((h) => h.id === "pinned-package"));
+});

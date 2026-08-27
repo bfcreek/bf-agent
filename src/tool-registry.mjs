@@ -13,6 +13,37 @@
  *   handler when one is set (writes, shell — anything that mutates state).
  */
 
+const TOOL_TYPO_HINTS = {
+  search_search: ["grep_search", "search_project", "web_search"],
+  grep: ["grep_search"],
+  search: ["grep_search", "search_project", "web_search"],
+  read: ["read_file"],
+  write: ["write_file"],
+  edit: ["edit_file"],
+  shell: ["run_command"],
+  exec: ["run_command"],
+  run: ["run_command"],
+  list: ["list_dir"],
+};
+
+/**
+ * @param {string} name
+ * @param {string[]} validNames
+ * @returns {string[]}
+ */
+export function suggestSimilarTools(name, validNames) {
+  const key = String(name ?? "").toLowerCase();
+  const hinted = TOOL_TYPO_HINTS[key];
+  if (hinted) {
+    const matched = hinted.filter((h) => validNames.includes(h));
+    if (matched.length) return matched;
+  }
+  const stem = key.replace(/_(?:search|file|command)$/, "");
+  return validNames
+    .filter((n) => n.includes(stem) || stem.includes(n.split("_")[0] ?? ""))
+    .slice(0, 4);
+}
+
 export class ToolRegistry {
   constructor() {
     /** @type {Map<string, ToolDefinition>} */
@@ -85,9 +116,12 @@ export class ToolRegistry {
   async execute(name, args) {
     const tool = this.tools.get(name);
     if (!tool) {
+      const valid = [...this.tools.keys()];
+      const similar = suggestSimilarTools(name, valid);
+      const hint = similar.length ? ` Did you mean: ${similar.join(", ")}?` : "";
       return {
         ok: false,
-        error: `Unknown tool '${name}'. Available tools: ${[...this.tools.keys()].join(", ") || "(none)"}`,
+        error: `Unknown tool '${name}'. Available tools: ${valid.join(", ") || "(none)"}.${hint}`,
       };
     }
 
@@ -96,7 +130,11 @@ export class ToolRegistry {
       try {
         parsedArgs = args.trim() ? JSON.parse(args) : {};
       } catch {
-        return { ok: false, error: `Arguments for '${name}' were not valid JSON.` };
+        const hint =
+          name === "write_file" || name === "edit_file"
+            ? " Ensure path/content (or old_string/new_string) are a valid JSON object with escaped quotes and \\n in strings."
+            : "";
+        return { ok: false, error: `Arguments for '${name}' were not valid JSON.${hint}` };
       }
     }
 

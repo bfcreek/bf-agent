@@ -98,6 +98,19 @@ test("failed write calls do not count as changed files", () => {
   assert.deepEqual(files, []);
 });
 
+test("merge persists stopReason and error from failed runs", () => {
+  const store = new SessionStore({ workspaceRoot: root });
+  const failed = {
+    messages: [{ role: "user", content: "go" }],
+    steps: [],
+    stopReason: "error",
+    error: "error parsing tool call",
+  };
+  const merged = store.merge("crash", null, failed);
+  assert.equal(merged.stopReason, "error");
+  assert.equal(merged.error, "error parsing tool call");
+});
+
 test("list returns saved session names", async () => {
   const store = new SessionStore({ dir: path.join(root, "list-test") });
   assert.deepEqual(await store.list(), []);
