@@ -6,17 +6,35 @@ import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /** Client that replays scripted assistant messages and records requests. */
 class FakeClient {
-  constructor(script, { models } = {}) {
+  constructor(script, { models, streamPieces } = {}) {
     this.script = [...script];
     this.calls = [];
     this.models = models;
+    /** When true, chatStream splits content into small onDelta pieces. */
+    this.streamPieces = streamPieces === true;
   }
 
   async chat(request) {
-    this.calls.push(structuredClone(request));
+    const { onDelta: _onDelta, ...rest } = request;
+    this.calls.push(structuredClone(rest));
     const message = this.script.shift();
     if (!message) throw new Error("FakeClient script exhausted.");
     return { message, raw: { message } };
+  }
+
+  async chatStream(request) {
+    const result = await this.chat(request);
+    const content = typeof result.message?.content === "string" ? result.message.content : "";
+    if (content && request.onDelta) {
+      if (this.streamPieces) {
+        for (const piece of content.match(/.{1,5}/gs) ?? []) {
+          request.onDelta(piece);
+        }
+      } else {
+        request.onDelta(content);
+      }
+    }
+    return result;
   }
 
   async listModels() {
@@ -172,9 +190,82 @@ test("stream:true replays the answer as SSE chunks ending with [DONE]", async ()
     .map((line) => JSON.parse(line.slice("data: ".length)));
 
   assert.equal(chunks[0].choices[0].delta.role, "assistant");
-  assert.equal(chunks[1].choices[0].delta.content, "streamed answer");
+  const content = chunks
+    .slice(1, -1)
+    .map((c) => c.choices[0].delta.content ?? "")
+    .join("");
+  assert.equal(content, "streamed answer");
   assert.equal(chunks.at(-1).choices[0].finish_reason, "stop");
   assert.ok(text.trimEnd().endsWith("data: [DONE]"));
+});
+
+test("stream:true forwards live token pieces from chatStream", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "hello world" }], {
+    streamPieces: true,
+  });
+  await startServer(client);
+
+  const response = await postChat({ stream: true, messages: [{ role: "user", content: "hi" }] });
+  const text = await response.text();
+  const chunks = text
+    .split("\n\n")
+    .filter((line) => line.startsWith("data: ") && !line.includes("[DONE]"))
+    .map((line) => JSON.parse(line.slice("data: ".length)));
+
+  const contentChunks = chunks.filter((c) => c.choices[0].delta.content);
+  assert.ok(contentChunks.length > 1, "expected multiple live content chunks");
+  assert.equal(
+    contentChunks.map((c) => c.choices[0].delta.content).join(""),
+    "hello world",
+  );
+});
+
+test("stream:true still streams the final answer after tool calls", async () => {
+  const client = new FakeClient(
+    [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ function: { name: "add", arguments: { a: 2, b: 3 } } }],
+      },
+      { role: "assistant", content: "The sum is 5." },
+    ],
+    { streamPieces: true },
+  );
+  await startServer(client);
+
+  const response = await postChat({ stream: true, messages: [{ role: "user", content: "2+3?" }] });
+  const text = await response.text();
+  const content = text
+    .split("\n\n")
+    .filter((line) => line.startsWith("data: ") && !line.includes("[DONE]"))
+    .map((line) => JSON.parse(line.slice("data: ".length)))
+    .map((c) => c.choices[0].delta.content ?? "")
+    .join("");
+  assert.equal(content, "The sum is 5.");
+});
+
+test("stream:true falls back to replaying when the client has no chatStream", async () => {
+  const client = {
+    calls: [],
+    script: [{ role: "assistant", content: "replayed" }],
+    async chat(request) {
+      this.calls.push(request);
+      const message = this.script.shift();
+      return { message, raw: { message } };
+    },
+  };
+  await startServer(client);
+
+  const response = await postChat({ stream: true, messages: [{ role: "user", content: "hi" }] });
+  const text = await response.text();
+  const content = text
+    .split("\n\n")
+    .filter((line) => line.startsWith("data: ") && !line.includes("[DONE]"))
+    .map((line) => JSON.parse(line.slice("data: ".length)))
+    .map((c) => c.choices[0].delta.content ?? "")
+    .join("");
+  assert.equal(content, "replayed");
 });
 
 test("array-of-parts content is flattened to text", async () => {

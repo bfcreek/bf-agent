@@ -1,7 +1,7 @@
 /**
  * Thin client for Ollama's native chat API (`/api/chat`).
- * Non-streaming for v1; the agent loop needs complete messages anyway
- * to detect tool calls before deciding the next step.
+ * `chat()` is a single JSON round-trip; `chatStream()` reads NDJSON token
+ * deltas (and still returns a complete message for the agent loop).
  */
 
 import { resolveThinkSetting } from "./prompt-enhancements.mjs";
@@ -65,26 +65,16 @@ export class OllamaClient {
   }
 
   /**
-   * One chat completion round-trip.
-   *
+   * Build the `/api/chat` JSON body (shared by chat and chatStream).
    * @param {object} request
-   * @param {Array<object>} request.messages Full conversation so far.
-   * @param {Array<object>} [request.tools] Tool schemas (OpenAI function shape).
-   * @param {string} [request.model] Override the client default model.
-   * @param {object} [request.options] Ollama options for this call, merged
-   *   over the client defaults (num_ctx, modelOptions).
-   * @param {boolean|string} [request.think] Per-call think override.
-   * @param {AbortSignal} [request.signal]
-   * @returns {Promise<{message: object, raw: object}>} Assistant message
-   *   (`{role, content, tool_calls?}`) plus the raw Ollama response — `raw`
-   *   carries `prompt_eval_count`/`eval_count` for token accounting.
+   * @param {boolean} stream
    */
-  async chat({ messages, tools, model, options, think, signal }) {
+  buildChatBody({ messages, tools, model, options, think }, stream) {
     const resolvedModel = model || this.model;
     const body = {
       model: resolvedModel,
       messages,
-      stream: false,
+      stream,
     };
     const resolvedThink = resolveThinkSetting({
       think: think ?? this.think,
@@ -106,6 +96,27 @@ export class OllamaClient {
     if (Object.keys(modelOptions).length > 0) {
       body.options = modelOptions;
     }
+    return body;
+  }
+
+  /**
+   * One chat completion round-trip (non-streaming).
+   *
+   * @param {object} request
+   * @param {Array<object>} request.messages Full conversation so far.
+   * @param {Array<object>} [request.tools] Tool schemas (OpenAI function shape).
+   * @param {string} [request.model] Override the client default model.
+   * @param {object} [request.options] Ollama options for this call, merged
+   *   over the client defaults (num_ctx, modelOptions).
+   * @param {boolean|string} [request.think] Per-call think override.
+   * @param {AbortSignal} [request.signal]
+   * @returns {Promise<{message: object, raw: object}>} Assistant message
+   *   (`{role, content, tool_calls?}`) plus the raw Ollama response — `raw`
+   *   carries `prompt_eval_count`/`eval_count` for token accounting.
+   */
+  async chat(request) {
+    const { signal } = request;
+    const body = this.buildChatBody(request, false);
 
     let response;
     try {
@@ -137,6 +148,89 @@ export class OllamaClient {
       throw new OllamaClientError("Ollama response had no message object.");
     }
     return { message, raw };
+  }
+
+  /**
+   * Streaming chat: Ollama NDJSON deltas in, complete assistant message out.
+   * Content token pieces are forwarded via `onDelta` as they arrive. The
+   * returned `message` is the full accumulated assistant turn (including
+   * `tool_calls` when present) so the agent loop can branch as usual.
+   *
+   * @param {object} request
+   * @param {Array<object>} request.messages
+   * @param {Array<object>} [request.tools]
+   * @param {string} [request.model]
+   * @param {object} [request.options]
+   * @param {boolean|string} [request.think]
+   * @param {AbortSignal} [request.signal]
+   * @param {(delta: string) => void} [request.onDelta] Content token callback.
+   * @returns {Promise<{message: object, raw: object}>}
+   */
+  async chatStream(request) {
+    const { signal, onDelta } = request;
+    const body = this.buildChatBody(request, true);
+
+    let response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/api/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      if (err?.name === "AbortError") throw err;
+      throw new OllamaClientError(
+        `Cannot reach Ollama at ${this.baseUrl}. Is 'ollama serve' running?`,
+        { cause: err },
+      );
+    }
+
+    if (!response.ok) {
+      const detail = await safeReadText(response);
+      throw new OllamaClientError(
+        `Ollama /api/chat returned ${response.status}${detail ? `: ${detail}` : ""}`,
+        { status: response.status },
+      );
+    }
+
+    if (!response.body || typeof response.body.getReader !== "function") {
+      // Some test stubs only implement json(); fall back to a one-shot read.
+      const raw = await response.json();
+      const message = raw?.message;
+      if (!message || typeof message !== "object") {
+        throw new OllamaClientError("Ollama response had no message object.");
+      }
+      const content = typeof message.content === "string" ? message.content : "";
+      if (content && onDelta) onDelta(content);
+      return { message, raw };
+    }
+
+    const accumulated = { role: "assistant", content: "" };
+    /** @type {object} */
+    let raw = {};
+    let sawMessage = false;
+
+    for await (const chunk of readNdjson(response.body, signal)) {
+      if (chunk?.message && typeof chunk.message === "object") {
+        sawMessage = true;
+        mergeStreamMessage(accumulated, chunk.message, onDelta);
+      }
+      if (chunk?.done) {
+        raw = chunk;
+      } else if (chunk && typeof chunk === "object") {
+        // Keep latest non-done meta (model, created_at) until done arrives.
+        raw = { ...raw, ...chunk };
+      }
+    }
+
+    if (!sawMessage) {
+      throw new OllamaClientError("Ollama stream had no message object.");
+    }
+
+    // Prefer the done frame as raw (token counts live there); keep message.
+    const finalRaw = { ...raw, message: accumulated };
+    return { message: accumulated, raw: finalRaw };
   }
 
   /** @returns {Promise<string[]>} Installed model names. */
@@ -266,5 +360,102 @@ async function safeReadText(response) {
     return (await response.text()).slice(0, 500);
   } catch {
     return "";
+  }
+}
+
+/**
+ * Merge one Ollama stream message fragment into the accumulated assistant
+ * message. Content pieces are appended; tool_calls are merged by index.
+ *
+ * @param {object} accumulated
+ * @param {object} fragment
+ * @param {(delta: string) => void} [onDelta]
+ */
+function mergeStreamMessage(accumulated, fragment, onDelta) {
+  if (typeof fragment.role === "string") {
+    accumulated.role = fragment.role;
+  }
+  if (typeof fragment.content === "string" && fragment.content) {
+    accumulated.content = (accumulated.content ?? "") + fragment.content;
+    onDelta?.(fragment.content);
+  }
+  if (fragment.thinking != null) {
+    accumulated.thinking = (accumulated.thinking ?? "") + String(fragment.thinking);
+  }
+  if (Array.isArray(fragment.tool_calls) && fragment.tool_calls.length > 0) {
+    if (!Array.isArray(accumulated.tool_calls)) accumulated.tool_calls = [];
+    for (const call of fragment.tool_calls) {
+      const index = typeof call?.index === "number" ? call.index : accumulated.tool_calls.length;
+      const existing = accumulated.tool_calls[index];
+      if (!existing) {
+        accumulated.tool_calls[index] = structuredClone(call);
+        continue;
+      }
+      // Merge partial tool-call fragments (name / argument pieces).
+      if (call?.function) {
+        existing.function = existing.function ?? {};
+        if (call.function.name) existing.function.name = call.function.name;
+        if (call.function.arguments != null) {
+          const prev = existing.function.arguments;
+          const next = call.function.arguments;
+          if (typeof prev === "string" && typeof next === "string") {
+            existing.function.arguments = prev + next;
+          } else {
+            existing.function.arguments = next;
+          }
+        }
+      }
+      if (call?.id) existing.id = call.id;
+      if (call?.type) existing.type = call.type;
+    }
+  }
+}
+
+/**
+ * Yield parsed JSON objects from an Ollama NDJSON response body.
+ * @param {ReadableStream} body
+ * @param {AbortSignal} [signal]
+ */
+async function* readNdjson(body, signal) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        try {
+          yield JSON.parse(line);
+        } catch {
+          throw new OllamaClientError(`Ollama stream returned invalid JSON: ${line.slice(0, 120)}`);
+        }
+      }
+    }
+    buffer += decoder.decode();
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        yield JSON.parse(tail);
+      } catch {
+        throw new OllamaClientError(`Ollama stream returned invalid JSON: ${tail.slice(0, 120)}`);
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
   }
 }

@@ -3,8 +3,11 @@
  * agent loop (with tools) underneath, chat.completion out. This is the door
  * Aura Wire routes IDE traffic through — clients need no halo-agent awareness.
  *
- * The loop itself is non-streaming; `stream: true` is honored by replaying
- * the finished answer as SSE chunks so streaming-only clients still work.
+ * With `stream: true`, SSE headers go out immediately and content tokens are
+ * forwarded live from Ollama via the loop's `onDelta` (when the client
+ * supports `chatStream`). If the backend only supports non-streaming chat,
+ * the finished answer is replayed as SSE chunks so streaming-only clients
+ * still work.
  */
 
 import { randomUUID } from "node:crypto";
@@ -17,7 +20,7 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 /**
  * @param {object} options
- * @param {{chat: Function, listModels?: Function}} options.client
+ * @param {{chat: Function, chatStream?: Function, listModels?: Function}} options.client
  * @param {import("./tool-registry.mjs").ToolRegistry} options.registry
  * @param {string} options.systemPrompt Used when the request has no system message.
  * @param {number} [options.maxSteps]
@@ -105,42 +108,111 @@ async function handleChatCompletions(options, req, res) {
       return sendError(res, 400, err.message, "invalid_request_error");
     }
   }
-  const runClient = model
-    ? { chat: (request) => options.client.chat({ ...request, model }) }
-    : options.client;
+  const runClient = wrapClientForModel(options.client, model);
 
-  const loop = new AgentLoop({
-    client: runClient,
-    registry: options.registry,
-    systemPrompt: options.systemPrompt,
-    maxSteps: options.maxSteps,
-    compaction: {},
-    projectBootstrap: options.projectBootstrap,
-    planning: false,
-  });
-  const result = await loop.run(goal, { history });
+  const wantStream = body.stream === true;
+  const abort = new AbortController();
+  const onClientGone = () => abort.abort();
+  req.on("close", onClientGone);
 
   const reportedModel = model ?? options.defaultModel;
-  const finishReason = result.stopReason === "completed" ? "stop" : "length";
+  let streamState = null;
 
-  if (body.stream === true) {
-    return streamCompletion(res, { text: result.text, model: reportedModel, finishReason });
+  try {
+    if (wantStream) {
+      streamState = beginCompletionStream(res, reportedModel);
+    }
+
+    const loop = new AgentLoop({
+      client: runClient,
+      registry: options.registry,
+      systemPrompt: options.systemPrompt,
+      maxSteps: options.maxSteps,
+      compaction: {},
+      projectBootstrap: options.projectBootstrap,
+      planning: false,
+      onDelta: streamState
+        ? (delta) => {
+            streamState.streamed += delta;
+            streamState.writeContent(delta);
+          }
+        : undefined,
+    });
+    const result = await loop.run(goal, { history, signal: abort.signal });
+
+    const finishReason = result.stopReason === "completed" ? "stop" : "length";
+
+    if (streamState) {
+      // Cover synthesized finals (or non-streaming backends) that never
+      // fired onDelta.
+      const text = result.text ?? "";
+      if (!streamState.streamed && text) {
+        streamState.writeContent(text);
+        streamState.streamed = text;
+      } else if (text.startsWith(streamState.streamed) && text.length > streamState.streamed.length) {
+        const rest = text.slice(streamState.streamed.length);
+        streamState.writeContent(rest);
+        streamState.streamed = text;
+      }
+      streamState.finish(finishReason);
+      return;
+    }
+
+    sendJson(res, 200, {
+      id: `chatcmpl-${randomUUID()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: reportedModel,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: result.text },
+          finish_reason: finishReason,
+        },
+      ],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    });
+  } catch (err) {
+    if (abort.signal.aborted) {
+      if (streamState && !res.writableEnded) res.end();
+      return;
+    }
+    if (streamState) {
+      // Headers already sent — best-effort close without a JSON error body.
+      if (!res.writableEnded) {
+        try {
+          streamState.finish("stop");
+        } catch {
+          res.end();
+        }
+      }
+      return;
+    }
+    throw err;
+  } finally {
+    req.off("close", onClientGone);
   }
+}
 
-  sendJson(res, 200, {
-    id: `chatcmpl-${randomUUID()}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: reportedModel,
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content: result.text },
-        finish_reason: finishReason,
-      },
-    ],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-  });
+/**
+ * @param {{chat: Function, chatStream?: Function}} client
+ * @param {string|undefined} model
+ */
+function wrapClientForModel(client, model) {
+  if (!model) return client;
+  const wrapped = {
+    chat: (request) => client.chat({ ...request, model }),
+  };
+  if (typeof client.chatStream === "function") {
+    wrapped.chatStream = (request) => client.chatStream({ ...request, model });
+  }
+  if (typeof client.listModels === "function") {
+    wrapped.listModels = (...args) => client.listModels(...args);
+  }
+  if ("model" in client) wrapped.model = model;
+  if ("baseUrl" in client) wrapped.baseUrl = client.baseUrl;
+  if ("numCtx" in client) wrapped.numCtx = client.numCtx;
+  return wrapped;
 }
 
 /**
@@ -182,7 +254,12 @@ function contentText(content) {
   return "";
 }
 
-function streamCompletion(res, { text, model, finishReason }) {
+/**
+ * Open an SSE completion stream and return helpers to write deltas.
+ * @param {http.ServerResponse} res
+ * @param {string} model
+ */
+function beginCompletionStream(res, model) {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
@@ -200,10 +277,20 @@ function streamCompletion(res, { text, model, finishReason }) {
     })}\n\n`;
 
   res.write(chunk({ role: "assistant" }));
-  if (text) res.write(chunk({ content: text }));
-  res.write(chunk({}, finishReason));
-  res.write("data: [DONE]\n\n");
-  res.end();
+
+  return {
+    streamed: "",
+    writeContent(text) {
+      if (!text || res.writableEnded) return;
+      res.write(chunk({ content: text }));
+    },
+    finish(finishReason) {
+      if (res.writableEnded) return;
+      res.write(chunk({}, finishReason));
+      res.write("data: [DONE]\n\n");
+      res.end();
+    },
+  };
 }
 
 function readBody(req) {

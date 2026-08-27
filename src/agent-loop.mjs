@@ -381,6 +381,9 @@ export class AgentLoop {
    * @param {string} [options.systemPrompt]
    * @param {number} [options.maxSteps] Max model round-trips per run.
    * @param {(step: AgentStep) => void} [options.onStep] Observer for tracing.
+   * @param {(delta: string) => void} [options.onDelta] Live content tokens from
+   *   the model (main loop only; planning/critique are silent). Fired as Ollama
+   *   streams when the client supports `chatStream`.
    * @param {{maxChars?: number, maxTokens?: number, keepRecent?: number}|false} [options.compaction]
    *   Summarize old turns when the transcript exceeds the budget. Off by
    *   default. When the client exposes `numCtx` (OllamaClient does), the
@@ -410,6 +413,7 @@ export class AgentLoop {
     systemPrompt,
     maxSteps = 10,
     onStep,
+    onDelta,
     compaction = false,
     projectBootstrap = false,
     onBootstrap,
@@ -431,6 +435,7 @@ export class AgentLoop {
     this.systemPrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     this.maxSteps = maxSteps;
     this.onStep = onStep;
+    this.onDelta = onDelta;
     this.compaction = compaction;
     this.projectBootstrap = projectBootstrap;
     this.onBootstrap = onBootstrap;
@@ -879,6 +884,7 @@ export class AgentLoop {
           messages,
           tools,
           signal,
+          onDelta: this.onDelta,
         },
         {
           onParseError: ({ recovery, error }) => {
@@ -1177,10 +1183,16 @@ function isUsablePlanText(text) {
 const TRANSIENT_RETRY_DELAYS_MS = [500, 1500, 4000, 8000];
 
 async function chatWithRetry(client, request) {
+  // Prefer streaming when the client supports it so onDelta receives live
+  // tokens; FakeClient-style stubs without chatStream keep using chat().
+  const invoke =
+    typeof client.chatStream === "function"
+      ? (req) => client.chatStream(req)
+      : (req) => client.chat(req);
   let lastErr;
   for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
     try {
-      return await client.chat(request);
+      return await invoke(request);
     } catch (err) {
       lastErr = err;
       if (err?.name === "AbortError" || request.signal?.aborted) throw err;
@@ -1205,14 +1217,15 @@ async function chatWithRetry(client, request) {
  * @param {Array<object>} request.messages Mutated in place when recovering.
  * @param {Array<object>} [request.tools]
  * @param {AbortSignal} [request.signal]
+ * @param {(delta: string) => void} [request.onDelta]
  * @param {{ onParseError?: (info: { recovery: number, error: Error }) => void }} [hooks]
  */
 async function chatWithParseRecovery(client, request, hooks = {}) {
-  const { messages, tools, signal } = request;
+  const { messages, tools, signal, onDelta } = request;
   let recoveries = 0;
   while (true) {
     try {
-      return await chatWithRetry(client, { messages, tools, signal });
+      return await chatWithRetry(client, { messages, tools, signal, onDelta });
     } catch (err) {
       if (signal?.aborted || err?.name === "AbortError") throw err;
       if (!isToolCallParseError(err) || recoveries >= MAX_TOOL_CALL_PARSE_RECOVERIES) {

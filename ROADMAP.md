@@ -13,7 +13,7 @@ halo-agent extensions: editors point at Wire's `/v1` door and Wire routes here.
 | # | Area | Status | Notes |
 |---|------|--------|-------|
 | 1 | **Agent loop** | done (v1) | ReAct loop: model -> tool calls -> execute -> repeat until done |
-| 2 | **Ollama client** | done (v1) | `/api/chat` with tools; streaming deferred |
+| 2 | **Ollama client** | done (v1) | `/api/chat` with tools; `chatStream` NDJSON + loop/`serve` live SSE |
 | 3 | **Builtin tools** | done (v1) | `read_file`, `write_file`, `edit_file`, `list_dir`, `run_command` + diagnostics; workspace-scoped paths, output caps, command timeouts. Approvals land with item 8 |
 | 4 | **Tool registry** | done (v1) | Schema + executor dispatch; MCP later |
 | 5 | **CLI** | done (v1) | `halo-agent "prompt"` against local Ollama |
@@ -21,7 +21,7 @@ halo-agent extensions: editors point at Wire's `/v1` door and Wire routes here.
 | 7 | **Compaction** | done (v1) | Char-budget trigger; old turns summarized by the model, system + recent turns kept verbatim |
 | 8 | **Safety / approvals** | done (v1) | Ask vs agent mode; write/shell tools gated behind y/N prompt in a TTY; sandbox still future work |
 | 9 | **Session persistence** | done (v1) | `--session <name>`: transcript, step log, changed-files summary under `.halo-agent/sessions/` |
-| 10 | **OpenAI-compatible server** | done (v1) | `halo-agent serve`: `/v1/chat/completions` (+SSE replay, `/v1/models`) facade over the loop; the door Wire routes IDE traffic through |
+| 10 | **OpenAI-compatible server** | done (v1) | `halo-agent serve`: `/v1/chat/completions` (+live SSE via `onDelta`, `/v1/models`) facade over the loop; the door Wire routes IDE traffic through |
 | 11 | **SDK** | done (v1) | `src/index.mjs` public surface + `createAgent()` one-call setup; package `exports` wired |
 | 12 | **Model routing** | done (v1) | Tool-capable family detection; requested model resolved against installed list with fallback + warnings at startup |
 | 13 | **RAG / memory** | resolved (no build) | Not halo-agent's job: internal state is covered by compaction (7) + sessions (9); corpus RAG is Terran's domain via Aura Wire / MCP. Web facts use builtin `web_search` (DuckDuckGo). Local project index remains for workspace retrieval |

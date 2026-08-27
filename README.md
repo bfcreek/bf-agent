@@ -114,8 +114,9 @@ Exposes the agent loop behind the standard OpenAI API so any existing client
 (or Aura Wire routing rule) can use it with no halo-agent awareness:
 
 - `POST /v1/chat/completions` — messages in, agent loop (with tools) runs,
-  `chat.completion` out. `stream: true` is honored by replaying the finished
-  answer as SSE chunks. A `model` in the request overrides the default.
+  `chat.completion` out. `stream: true` forwards content tokens live from
+  Ollama as SSE chunks (falls back to replaying the finished answer when the
+  backend has no `chatStream`). A `model` in the request overrides the default.
 - `GET /v1/models` — installed Ollama models.
 
 Serve mode always runs unattended (`agent` mode): there is no terminal to

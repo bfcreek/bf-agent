@@ -131,3 +131,101 @@ test("chat uses gpt-oss think levels in auto mode for small models", async () =>
 
   assert.equal(requests[0].body.think, "high");
 });
+
+/** NDJSON body stream for chatStream tests. */
+function ndjsonBody(chunks) {
+  const text = chunks.map((c) => JSON.stringify(c)).join("\n") + "\n";
+  return {
+    getReader() {
+      let sent = false;
+      return {
+        read: async () => {
+          if (sent) return { done: true, value: undefined };
+          sent = true;
+          return { done: false, value: new TextEncoder().encode(text) };
+        },
+        releaseLock() {},
+      };
+    },
+  };
+}
+
+function makeStreamFetch(chunkSets) {
+  const script = [...chunkSets];
+  const requests = [];
+  const fetchImpl = async (url, init) => {
+    requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+    const chunks = script.shift();
+    if (!chunks) throw new Error("fetch script exhausted");
+    return {
+      ok: true,
+      status: 200,
+      body: ndjsonBody(chunks),
+      json: async () => {
+        throw new Error("json() should not be used for streams");
+      },
+      text: async () => chunks.map((c) => JSON.stringify(c)).join("\n"),
+    };
+  };
+  return { fetchImpl, requests };
+}
+
+test("chatStream sends stream:true and accumulates content deltas", async () => {
+  const { fetchImpl, requests } = makeStreamFetch([
+    [
+      { message: { role: "assistant", content: "Hel" }, done: false },
+      { message: { role: "assistant", content: "lo!" }, done: false },
+      {
+        message: { role: "assistant", content: "" },
+        done: true,
+        prompt_eval_count: 10,
+        eval_count: 2,
+      },
+    ],
+  ]);
+  const client = new OllamaClient({ fetchImpl });
+  const deltas = [];
+
+  const { message, raw } = await client.chatStream({
+    messages: [{ role: "user", content: "hi" }],
+    onDelta: (d) => deltas.push(d),
+  });
+
+  assert.equal(requests[0].body.stream, true);
+  assert.deepEqual(deltas, ["Hel", "lo!"]);
+  assert.equal(message.content, "Hello!");
+  assert.equal(raw.prompt_eval_count, 10);
+  assert.equal(raw.eval_count, 2);
+});
+
+test("chatStream merges streamed tool_calls", async () => {
+  const { fetchImpl } = makeStreamFetch([
+    [
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ index: 0, function: { name: "add", arguments: '{"a":' } }],
+        },
+        done: false,
+      },
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ index: 0, function: { arguments: "1}" } }],
+        },
+        done: false,
+      },
+      { message: { role: "assistant", content: "" }, done: true, eval_count: 1 },
+    ],
+  ]);
+  const client = new OllamaClient({ fetchImpl });
+
+  const { message } = await client.chatStream({
+    messages: [{ role: "user", content: "1+1" }],
+  });
+
+  assert.equal(message.tool_calls[0].function.name, "add");
+  assert.equal(message.tool_calls[0].function.arguments, '{"a":1}');
+});

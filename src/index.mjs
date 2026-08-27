@@ -220,6 +220,7 @@ export {
  * @param {number} [options.maxSteps]
  * @param {object|false} [options.compaction] Loop compaction settings; on by default.
  * @param {(step: object) => void} [options.onStep]
+ * @param {(delta: string) => void} [options.onDelta] Live content tokens from the model.
  * @param {(request: {name: string, args: object}) => Promise<boolean>|boolean} [options.approvalHandler]
  *   Gate write/shell tools. Without one, gated tools run unattended.
  * @param {Array<import("./tool-registry.mjs").ToolDefinition>} [options.tools]
@@ -252,6 +253,7 @@ export async function createAgent({
   maxSteps = 10,
   compaction = {},
   onStep,
+  onDelta,
   approvalHandler,
   tools,
   builtinTools = true,
@@ -344,6 +346,7 @@ export async function createAgent({
     systemPrompt: prompt,
     maxSteps,
     onStep,
+    onDelta,
     compaction,
     planning,
     replan: planning !== false && replan !== false,
