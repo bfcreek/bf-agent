@@ -16,9 +16,16 @@ From the **halo-agent** repo root (PowerShell):
 .\scripts\commands\ah-train.ps1
 ```
 
+For an unattended **bench+plan-only** loop (no assimilate/test between iterations):
+
+```powershell
+.\scripts\commands\ah-train.ps1 -Iterations 100
+.\scripts\commands\ah-train.ps1 -Iterations 89 -StartFrom 12
+```
+
 Each call picks a **new random seed** and prints it (`seed N`). To replay one draw: `.\scripts\commands\ah-train.ps1 -Seed N`.
 
-Optional (single iteration only):
+Optional:
 
 ```powershell
 .\scripts\commands\ah-train.ps1 -DryRun
@@ -29,7 +36,9 @@ Optional (single iteration only):
 
 | Flag | Meaning |
 | --- | --- |
-| `-Seed <n>` | Reproducible 1-task draw (omit for random seed) |
+| `-Iterations <n>` | Run **n** bench+plan cycles in one script (default **1**) |
+| `-StartFrom <n>` | First iteration index when `-Iterations` > 1 (default **1**) |
+| `-Seed <n>` | Reproducible 1-task draw (single-iteration mode only) |
 | `-DryRun` | Print Harbor command only |
 | `-SkipJudge` | Harbor tests only |
 | `-Compose` | Start Compose Ollama before the run |
@@ -81,6 +90,17 @@ iteration N/TOTAL | seed S | recs R | assimilated: brief note | tests: pass|fail
 
 Then start iteration **N+1**. Do **not** stop early unless a step is unrecoverable (see below).
 
+**On any failure, go to the next iteration — do not stop the loop.** That includes:
+
+- Harbor reward 0 / task not resolved
+- Harbor or trial **errors** (not just a low score)
+- Judge failure (invalid JSON, timeout, `judgeError`, no grade)
+- **Zero** recommendations
+- `npm test` failure after assimilate (log and continue)
+- `ah-train.ps1` / bench non-zero exit (script still exits **0** so the loop continues)
+
+Only **hard-stop** when prerequisites are missing and the bench cannot run at all (Docker, Harbor, Ollama, `agent` CLI when judging is required).
+
 ## Parameters
 
 | User says | Meaning |
@@ -93,9 +113,11 @@ Then start iteration **N+1**. Do **not** stop early unless a step is unrecoverab
 
 - **Do not ask for confirmation** between iterations — keep going until TOTAL is reached or a hard stop applies.
 - **Do not commit** unless the user explicitly asks.
-- On bench non-zero exit: still assimilate from the partial plan, then continue.
+- **Any iteration failure → next iteration.** Never stop the loop for a failed task, judge, empty plan, or test failure (see list above).
+- On bench non-zero exit: still build/assimilate from the partial plan when possible, then continue.
 - On `npm test` failure: fix if obvious and quick; otherwise log the failure, skip remaining assimilations for that iteration, and **continue** the loop.
 - On missing Docker/Harbor/Ollama/agent CLI: **stop** and report — do not spin through empty iterations.
+- `ah-train.ps1` always exits **0** after a run (except `-DryRun` and missing launcher files) so agents and `-Iterations` loops keep going.
 - Prefer small, incremental improvements over large refactors.
 
 ## Prerequisites

@@ -5,11 +5,18 @@ Last updated: August 26, 2026
 
 Copyright (c) 2026 Halo Softworks LLC. All rights reserved.
 
+halo-agent is part of the Halo Softworks Software covered by the End User
+License Agreement (EULA) at https://halosoftworks.com/eula. halo-agent is
+offered free under the EULA Free edition rules: personal, non-commercial use
+only; no paid tier.
+
+This file summarizes product-specific acceptance. If this file and the EULA
+conflict, the EULA controls.
+
 1. GRANT
-Halo Softworks LLC grants you a limited, non-exclusive, non-transferable,
-revocable license to install and use halo-agent for personal, non-commercial
-purposes, subject to this license and the Halo Softworks End User License
-Agreement (EULA) at https://halosoftworks.com/eula.
+Subject to the EULA, Halo Softworks LLC grants you a limited, non-exclusive,
+non-transferable, revocable license to install and use halo-agent on devices
+you control for personal, non-commercial purposes.
 
 2. RESTRICTIONS
 You may not use halo-agent for commercial purposes, sublicense, sell, lease,
@@ -35,9 +42,9 @@ NOT LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR LOST-PROFIT
 DAMAGES.
 
 6. TERMINATION
-This license ends if you breach these terms. On termination you must stop
-using halo-agent and destroy copies in your possession, except as required
-by law.
+This license ends if you breach these terms or the EULA. On termination you
+must stop using halo-agent and destroy copies in your possession, except as
+required by law.
 
 7. CONTACT
 Halo Softworks LLC — contact@halosoftworks.com — https://halosoftworks.com/contact

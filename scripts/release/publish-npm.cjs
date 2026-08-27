@@ -18,6 +18,9 @@ const { execFileSync } = require("child_process");
 const path = require("path");
 const { DEFAULT_PACKAGE_NAME, verifyReadyForNpmPublish } = require("./publish-npm-logic.cjs");
 
+const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+const npmAuthEnvKey = "NPM_CONFIG_//registry.npmjs.org/:_authToken";
+
 const repoRoot = path.join(__dirname, "..", "..");
 const pkg = require(path.join(repoRoot, "package.json"));
 const dryRun = process.argv.includes("--dry-run");
@@ -28,6 +31,30 @@ function requiredEnv(name) {
         throw new Error(`Missing ${name}. Add an npm Automation token to scripts/release/.env.release.`);
     }
     return value;
+}
+
+/**
+ * @param {string | undefined} token
+ */
+function npmPublishEnv(token) {
+    const env = { ...process.env };
+    if (token) {
+        env.NPM_TOKEN = token;
+        env[npmAuthEnvKey] = token;
+    }
+    return env;
+}
+
+/**
+ * @param {string[]} publishArgs
+ * @param {Record<string, string | undefined>} env
+ */
+function runNpmPublish(publishArgs, env) {
+    execFileSync(process.execPath, [npmCli, ...publishArgs], {
+        cwd: repoRoot,
+        stdio: "inherit",
+        env,
+    });
 }
 
 async function main() {
@@ -56,26 +83,12 @@ async function main() {
 
     console.log(`npm ${publishArgs.join(" ")}`);
     if (dryRun) {
-        execFileSync("npm", publishArgs, {
-            cwd: repoRoot,
-            stdio: "inherit",
-            env: {
-                ...process.env,
-                NPM_TOKEN: process.env.NPM_TOKEN || "dry-run",
-            },
-        });
+        runNpmPublish(publishArgs, npmPublishEnv(process.env.NPM_TOKEN || "dry-run"));
         return;
     }
 
     const token = requiredEnv("NPM_TOKEN");
-    execFileSync("npm", publishArgs, {
-        cwd: repoRoot,
-        stdio: "inherit",
-        env: {
-            ...process.env,
-            NPM_TOKEN: token,
-        },
-    });
+    runNpmPublish(publishArgs, npmPublishEnv(token));
 
     console.log(`Published ${packageName}@${packageVersion} to npm.`);
     console.log(`Install: npm install -g ${packageName}`);
