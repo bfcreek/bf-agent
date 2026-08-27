@@ -5,7 +5,20 @@
  */
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
+import {
+  acceptanceFailureNudge,
+  buildAcceptanceContract,
+  CRITIQUE_USER_MESSAGE,
+  formatAcceptanceContract,
+  verifyAcceptanceContract,
+} from "./acceptance.mjs";
 import { listWorkspaceTopLevel } from "./context-builder.mjs";
+import { computeStruggleScore, EscalationController } from "./escalation.mjs";
+import {
+  maybeWriteLesson,
+  recordLessonOutcomes,
+  retrieveMemoryHints,
+} from "./memory-store.mjs";
 import { gatherFirstTurnProjectContext } from "./project-index.mjs";
 import {
   alreadyVerifiedFinishNudge,
@@ -57,6 +70,15 @@ const WRAP_UP_PROMPT = [
 
 /** Consecutive identical tool-call steps allowed before execution is refused. */
 const MAX_REPEATED_STEPS = 2;
+
+/**
+ * Blocks the acceptance gate may spend, as a share of the step budget. Each
+ * block costs a step, so the loop always terminates; this only stops a contract
+ * the model cannot satisfy from consuming the entire budget. Too small a budget
+ * lets a model that keeps claiming done finish with work outstanding.
+ */
+const ACCEPTANCE_NUDGE_BUDGET_RATIO = 1 / 3;
+const MIN_ACCEPTANCE_NUDGES = 2;
 
 /**
  * How many times to recover when Ollama rejects a malformed tool call
@@ -315,7 +337,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
 /**
  * @typedef {object} AgentStep
  * @property {number} index 1-based model round-trip number.
- * @property {"tool-calls"|"final"|"plan"} kind What the model did this step.
+ * @property {"tool-calls"|"final"|"plan"|"escalation"|"tool-parse-error"|"failed"} kind What the model did this step.
  * @property {string} content Assistant text for this step (may be empty).
  * @property {Array<{name: string, args: object, ok: boolean, result?: unknown, error?: string}>} toolCalls
  */
@@ -326,6 +348,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
  * @property {"completed"|"max-steps"|"aborted"|"failed"} stopReason
  * @property {AgentStep[]} steps
  * @property {Array<object>} messages Full transcript, replayable into another run.
+ * @property {{passed: boolean, checks: Array<object>, missing: string[]}} [verification]
+ * @property {number} [escalationCount]
+ * @property {boolean} [cloudUsed]
+ * @property {string[]} [memoryLessonIds]
  */
 
 export class AgentLoop {
@@ -350,6 +376,12 @@ export class AgentLoop {
    * @param {boolean} [options.planning] Pre-pass plan on first turns (default true).
    *   Skips only empty goals and simple read-and-answer prompts.
    * @param {boolean} [options.taskHints] Append task-type constraints to the user message (default true).
+   * @param {boolean} [options.memory] Retrieve episodic memory hints (default true when embed client available).
+   * @param {boolean} [options.memoryReadonly] Do not write or update memory stats.
+   * @param {string} [options.embeddingModel] Embedding model for memory retrieval.
+   * @param {boolean} [options.acceptance] Verify acceptance contract before completion (default true).
+   * @param {boolean} [options.critique] Self-critique pass after planning (default true).
+   * @param {import("./escalation.mjs").EscalationController|false} [options.escalation]
    * @param {(info: {plan: string, hints: Array<{id: string, constraint: string}>}) => void} [options.onPlan]
    */
   constructor({
@@ -363,6 +395,12 @@ export class AgentLoop {
     onBootstrap,
     planning = true,
     taskHints = true,
+    memory = true,
+    memoryReadonly = false,
+    embeddingModel,
+    acceptance = true,
+    critique = true,
+    escalation = false,
     onPlan,
   } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
@@ -377,6 +415,12 @@ export class AgentLoop {
     this.onBootstrap = onBootstrap;
     this.planning = planning;
     this.taskHints = taskHints;
+    this.memory = memory;
+    this.memoryReadonly = memoryReadonly;
+    this.embeddingModel = embeddingModel;
+    this.acceptance = acceptance;
+    this.critique = critique;
+    this.escalation = escalation instanceof EscalationController ? escalation : false;
     this.onPlan = onPlan;
   }
 
@@ -416,7 +460,24 @@ export class AgentLoop {
     }
     const hints = this.taskHints ? detectTaskHints(goal, { workspaceEntries }) : [];
     const taskFocus = this.taskHints ? formatTaskConstraints(hints) : "";
-    if (taskFocus) userContent = `${taskFocus}\n\n${userContent}`;
+    let memoryLessonIds = [];
+    let memoryFocus = "";
+    if (this.memory && this.client?.embed && freshTurn) {
+      try {
+        const mem = await retrieveMemoryHints({
+          goal,
+          client: this.client,
+          embeddingModel: this.embeddingModel,
+          readonly: this.memoryReadonly,
+        });
+        memoryFocus = mem.text;
+        memoryLessonIds = mem.lessonIds;
+      } catch {
+        // Memory is best-effort.
+      }
+    }
+    const focusBlocks = [memoryFocus, taskFocus].filter(Boolean).join("\n\n");
+    if (focusBlocks) userContent = `${focusBlocks}\n\n${userContent}`;
 
     messages.push({ role: "user", content: userContent });
 
@@ -436,6 +497,8 @@ export class AgentLoop {
     messages[messages.length - 1].content = userContent;
 
     const steps = [];
+    let acceptanceContract = buildAcceptanceContract(goal);
+    let planText = "";
 
     if (this.planning && freshTurn && shouldPlanGoal(goal) && !signal?.aborted) {
       try {
@@ -447,14 +510,51 @@ export class AgentLoop {
           messages: planMessages,
           signal,
         });
-        const plan = textOf(message.content).trim();
-        if (plan) {
+        planText = textOf(message.content).trim();
+        if (planText) {
           messages.push({ role: "user", content: PLANNING_USER_MESSAGE });
-          messages.push({ role: "assistant", content: plan });
-          const planStep = { index: 0, kind: "plan", content: plan, toolCalls: [] };
+          messages.push({ role: "assistant", content: planText });
+          const planStep = { index: 0, kind: "plan", content: planText, toolCalls: [] };
           steps.push(planStep);
           this.onStep?.(planStep);
-          this.onPlan?.({ plan, hints });
+          this.onPlan?.({ plan: planText, hints });
+          acceptanceContract = buildAcceptanceContract(goal, planText);
+          const contractBlock = formatAcceptanceContract(acceptanceContract);
+          if (contractBlock) {
+            userContent = `${userContent}\n\n${contractBlock}`;
+            const userMsg = messages.find((m) => m.role === "user");
+            if (userMsg) userMsg.content = userContent;
+          }
+
+          if (this.critique && !signal?.aborted) {
+            try {
+              const critiqueMessages = [
+                ...messages,
+                { role: "user", content: CRITIQUE_USER_MESSAGE },
+              ];
+              const { message: critiqueMsg } = await chatWithRetry(this.client, {
+                messages: critiqueMessages,
+                signal,
+              });
+              const critiqueText = textOf(critiqueMsg.content).trim();
+              if (critiqueText) {
+                messages.push({ role: "user", content: CRITIQUE_USER_MESSAGE });
+                messages.push({ role: "assistant", content: critiqueText });
+                const critiqueStep = {
+                  index: 0,
+                  kind: "plan",
+                  content: critiqueText,
+                  toolCalls: [],
+                };
+                steps.push(critiqueStep);
+                this.onStep?.(critiqueStep);
+                planText = critiqueText;
+                acceptanceContract = buildAcceptanceContract(goal, critiqueText);
+              }
+            } catch {
+              // Critique is best-effort.
+            }
+          }
         }
       } catch {
         // Planning is best-effort — proceed without it.
@@ -473,13 +573,110 @@ export class AgentLoop {
     let nearLimitNudged = false;
     let consecutiveEmpty = 0;
     let totalEvalCount = 0;
+    let parseRecoveries = 0;
     const runStarted = Date.now();
+
+    let budgetPressure = 0;
+    let workOutstanding = false;
+    let escalationBlockReported = false;
+    let acceptanceNudgeCount = 0;
+    const maxAcceptanceNudges = Math.max(
+      MIN_ACCEPTANCE_NUDGES,
+      Math.floor(this.maxSteps * ACCEPTANCE_NUDGE_BUDGET_RATIO),
+    );
+
+    const struggleState = () => ({
+      repeatedCount,
+      consecutiveEmpty,
+      toolNudgeCount,
+      parseRecoveries,
+      editMissLoop: Boolean(ambiguousEditRecoveryNudge({ steps })),
+      searchLoop: Boolean(repeatedSearchLoopNudge({ steps })),
+      budgetPressure,
+      workOutstanding,
+    });
+
+    const finalizeRun = async (result) => {
+      const struggleScore = computeStruggleScore(struggleState());
+      let verification = result.verification;
+      if (this.acceptance && !verification) {
+        verification = await verifyAcceptanceContract({
+          contract: acceptanceContract,
+          steps: result.steps,
+          goal,
+          workspaceRoot,
+        });
+      }
+      const passed =
+        result.stopReason === "completed" &&
+        (verification?.passed !== false || !this.acceptance);
+      if (memoryLessonIds.length && !this.memoryReadonly) {
+        await recordLessonOutcomes(memoryLessonIds, passed);
+      }
+      if (this.memory && this.client?.embed && !this.memoryReadonly) {
+        await maybeWriteLesson({
+          client: this.client,
+          goal,
+          steps: result.steps,
+          verificationPassed: verification?.passed ?? passed,
+          struggleScore,
+          stopReason: result.stopReason,
+          embeddingModel: this.embeddingModel,
+          readonly: this.memoryReadonly,
+        });
+      }
+      return {
+        ...result,
+        verification,
+        escalationCount: this.escalation?.escalationCount ?? 0,
+        cloudUsed: this.escalation?.cloudUsed ?? false,
+        memoryLessonIds,
+      };
+    };
 
     let paidSteps = 0;
     while (paidSteps < this.maxSteps) {
       const index = paidSteps + 1;
       if (signal?.aborted) {
-        return { text: "", stopReason: "aborted", steps, messages };
+        return finalizeRun({ text: "", stopReason: "aborted", steps, messages });
+      }
+
+      if (this.escalation) {
+        budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
+        // Only probed once the budget is half gone, so early steps pay nothing.
+        if (this.acceptance && acceptanceContract?.checks?.length && budgetPressure >= 0.5) {
+          const progress = await verifyAcceptanceContract({
+            contract: acceptanceContract,
+            steps,
+            goal,
+            workspaceRoot,
+          });
+          workOutstanding = !progress.passed;
+        }
+        const escalated = await this.escalation.maybeEscalate(struggleState());
+        if (escalated?.escalated) {
+          const escStep = {
+            index,
+            kind: "escalation",
+            content:
+              escalated.kind === "intensify"
+                ? `Escalated effort on ${escalated.to} (${escalated.reason})`
+                : `Escalated model ${escalated.from} → ${escalated.to} (${escalated.reason})`,
+            toolCalls: [],
+          };
+          steps.push(escStep);
+          this.onStep?.(escStep);
+        } else if (this.escalation.lastBlockedReason && !escalationBlockReported) {
+          escalationBlockReported = true;
+          const blockStep = {
+            index,
+            kind: "escalation",
+            content: `Escalation held: ${this.escalation.lastBlockedReason}`,
+            toolCalls: [],
+          };
+          steps.push(blockStep);
+          this.onStep?.(blockStep);
+        }
       }
 
       if (this.compaction) {
@@ -508,6 +705,7 @@ export class AgentLoop {
         },
         {
           onParseError: ({ recovery, error }) => {
+            parseRecoveries += 1;
             const parseStep = {
               index,
               kind: "tool-parse-error",
@@ -556,13 +754,13 @@ export class AgentLoop {
             };
             steps.push(failStep);
             this.onStep?.(failStep);
-            return {
+            return finalizeRun({
               text,
               stopReason: "failed",
               steps,
               messages,
               diagnostic,
-            };
+            });
           }
           const recovery = emptyResponseRecoveryNudge({ goal, steps, consecutiveEmpty });
           if (recovery) {
@@ -616,15 +814,33 @@ export class AgentLoop {
           };
           steps.push(failStep);
           this.onStep?.(failStep);
-          return {
+          return finalizeRun({
             text,
             stopReason: "failed",
             steps,
             messages,
             diagnostic,
-          };
+          });
         }
         const text = String(answerText ?? "").trim() || synthesizeFinalAnswer({ goal, steps });
+        // Verification gate. Bounded by its own budget so an unsatisfiable
+        // contract degrades into a reported failure rather than burning every
+        // remaining step.
+        if (this.acceptance && acceptanceNudgeCount < maxAcceptanceNudges) {
+          const verification = await verifyAcceptanceContract({
+            contract: acceptanceContract,
+            steps,
+            goal,
+            workspaceRoot,
+          });
+          const acceptNudge = acceptanceFailureNudge(verification);
+          if (acceptNudge) {
+            acceptanceNudgeCount += 1;
+            messages.push({ role: "user", content: acceptNudge });
+            if (!thinkingOnly) paidSteps += 1;
+            continue;
+          }
+        }
         const finalStep = {
           index,
           kind: "final",
@@ -633,12 +849,12 @@ export class AgentLoop {
         };
         steps.push(finalStep);
         this.onStep?.(finalStep);
-        return {
+        return finalizeRun({
           text,
           stopReason: "completed",
           steps,
           messages,
-        };
+        });
       }
 
       consecutiveEmpty = 0;
@@ -748,7 +964,7 @@ export class AgentLoop {
       baseUrl: this.client?.baseUrl,
     });
     if (diagnostic) text = `${text}\n\n${diagnostic}`;
-    return { text: text ?? "", stopReason: "max-steps", steps, messages, diagnostic };
+    return finalizeRun({ text: text ?? "", stopReason: "max-steps", steps, messages, diagnostic });
   }
 }
 

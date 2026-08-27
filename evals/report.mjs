@@ -69,6 +69,15 @@ export function buildAssessmentReport(results, meta = {}) {
       integrityPassed: results.filter((r) => r.integrity?.pass === true).length,
       integrityChecked: results.filter((r) => r.integrity?.pass != null).length,
       errors: results.filter((r) => r.error).length,
+      avgSteps: results.length
+        ? results.reduce((sum, r) => sum + (r.agent?.steps ?? 0), 0) / results.length
+        : null,
+      cloudRate: results.length
+        ? results.filter((r) => r.agent?.cloudUsed).length / results.length
+        : null,
+      avgEscalations: results.length
+        ? results.reduce((sum, r) => sum + (r.agent?.escalationCount ?? 0), 0) / results.length
+        : null,
     },
     tierSummaries,
     scenarios: results.map((row) => ({
@@ -83,6 +92,10 @@ export function buildAssessmentReport(results, meta = {}) {
       integrityDetail: row.integrity?.detail,
       steps: row.agent?.steps ?? 0,
       stopReason: row.agent?.stopReason,
+      escalationCount: row.agent?.escalationCount ?? 0,
+      cloudUsed: row.agent?.cloudUsed ?? false,
+      verificationPassed: row.agent?.verificationPassed ?? null,
+      memoryEnabled: row.agent?.memoryEnabled ?? null,
       seconds: row.seconds,
       summary: row.verdict?.summary ?? null,
       error: row.error ?? null,

@@ -419,6 +419,24 @@ const IS_WINDOWS = process.platform === "win32";
 const SHELL_NAME = IS_WINDOWS ? "PowerShell" : "/bin/sh";
 
 /**
+ * Adapt bash-style && chains to PowerShell ; separators on Windows.
+ * @param {string} command
+ * @param {{ platform?: string }} [options]
+ * @returns {{command: string, adapted: boolean, note?: string}}
+ */
+export function adaptPowerShellCommand(command, { platform = process.platform } = {}) {
+  const text = String(command ?? "");
+  if (platform !== "win32") return { command: text, adapted: false };
+  if (!/\s&&\s/.test(text)) return { command: text, adapted: false };
+  const adapted = text.replace(/\s&&\s/g, "; ");
+  return {
+    command: adapted,
+    adapted: true,
+    note: "Adapted && to ; for PowerShell.",
+  };
+}
+
+/**
  * @param {import("../tool-registry.mjs").ToolRegistry} registry
  * @param {object} options
  * @param {string} options.workspaceRoot Directory commands run in.
@@ -483,6 +501,7 @@ export function registerShellTools(registry, { workspaceRoot }) {
       if (binaryJson) throw new Error(binaryJson);
       const posixShell = windowsBashCommandIssue(command, registry.runContext?.goal);
       if (posixShell) throw new Error(posixShell);
+      const { command: shellCommand, adapted, note: adaptNote } = adaptPowerShellCommand(command);
       // Deletion gate for unattended runs (in ask mode, reaching execute
       // means the human already approved this exact call). Deletes the user
       // explicitly asked for go ahead; contradictions and ambiguity are
@@ -520,14 +539,14 @@ export function registerShellTools(registry, { workspaceRoot }) {
       const timeoutMs =
         Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) *
         1000;
-      return runCommand(command, { cwd: dir, timeoutMs });
+      return runCommand(shellCommand, { cwd: dir, timeoutMs, adaptNote: adapted ? adaptNote : null });
     },
   });
 
   return registry;
 }
 
-function runCommand(command, { cwd, timeoutMs }) {
+function runCommand(command, { cwd, timeoutMs, adaptNote = null }) {
   return new Promise((resolve, reject) => {
     const child = IS_WINDOWS
       ? // `exit $LASTEXITCODE` propagates the native command's exit code,
@@ -596,7 +615,7 @@ function runCommand(command, { cwd, timeoutMs }) {
         exitCode: code,
         timedOut,
         ...io,
-        ...(note ? { note } : {}),
+        ...(note || adaptNote ? { note: [adaptNote, note].filter(Boolean).join(" ") } : {}),
       });
     };
 

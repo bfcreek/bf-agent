@@ -9,6 +9,8 @@
  */
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
+import { EscalationController, resolveModelWithEscalation } from "./escalation.mjs";
+import { formatCanonicalPrinciples } from "./memory-store.mjs";
 import { buildProjectContext } from "./project-index.mjs";
 import { ModelRoutingError, resolveModelAuto, assertToolCapable } from "./model-routing.mjs";
 import { OllamaClient } from "./ollama-client.mjs";
@@ -17,6 +19,52 @@ import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 
 export { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+
+export {
+  acceptanceFailureNudge,
+  buildAcceptanceContract,
+  buildHeuristicContract,
+  CRITIQUE_USER_MESSAGE,
+  formatAcceptanceContract,
+  parseAcceptanceBlock,
+  verifyAcceptanceContract,
+} from "./acceptance.mjs";
+
+export {
+  buildModelLadder,
+  computeStruggleScore,
+  DEFAULT_ESCALATION_THRESHOLD,
+  EscalationController,
+  resolveModelWithEscalation,
+  suggestWeakestLocalModel,
+} from "./escalation.mjs";
+
+export {
+  AUTO_CONSOLIDATE_EVERY,
+  clearMemory,
+  consolidateMemory,
+  formatCanonicalPrinciples,
+  formatMemoryHints,
+  lessonRankScore,
+  lessonWinRate,
+  loadMemoryStore,
+  maybeWriteLesson,
+  memoryStats,
+  memoryStorePath,
+  rankLessons,
+  recordLessonOutcomes,
+  retrieveMemoryHints,
+  seedMemoryFromRules,
+  shouldWriteLesson,
+} from "./memory-store.mjs";
+
+export {
+  describeFitBudget,
+  detectVramBytes,
+  resetHardwareProbe,
+  resolveModelFitBudget,
+  VRAM_FIT_FRACTION,
+} from "./hardware.mjs";
 
 export { buildEnvironmentContext, buildSystemPrompt } from "./context-builder.mjs";
 
@@ -80,6 +128,7 @@ export {
   configureClientModel,
   detectTaskHints,
   finalAnswerNudge,
+  exportTaskHintSeedRules,
   formatExplicitGoals,
   formatTaskConstraints,
   isComplexGoal,
@@ -118,7 +167,7 @@ export {
 
 export { globToRegExp, registerSearchTools } from "./tools/search.mjs";
 
-export { registerShellTools } from "./tools/shell.mjs";
+export { registerShellTools, adaptPowerShellCommand } from "./tools/shell.mjs";
 
 export {
   assertFetchableUrl,
@@ -168,6 +217,14 @@ export {
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
  * @param {boolean} [options.planning] Planning pre-pass on first turns (default true).
  * @param {boolean} [options.taskHints] Task-type constraint hints (default true).
+ * @param {boolean} [options.memory] Episodic memory retrieval (default true when embed available).
+ * @param {boolean} [options.memoryReadonly] Read-only memory mode for evals.
+ * @param {string} [options.embeddingModel]
+ * @param {boolean} [options.acceptance] Acceptance contract gate (default true).
+ * @param {boolean} [options.critique] Self-critique after planning (default true).
+ * @param {import("./escalation.mjs").EscalationController|false} [options.escalation]
+ * @param {boolean} [options.escalationCloud] Allow escalation onto paid cloud
+ *   rungs. Off by default so escalation stays within installed local models.
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).
  */
@@ -189,10 +246,17 @@ export async function createAgent({
   systemPrompt,
   planning = true,
   taskHints = true,
+  memory = true,
+  memoryReadonly = false,
+  acceptance = true,
+  critique = true,
+  escalation = false,
+  escalationCloud = false,
   think,
   client,
 } = {}) {
   let resolvedModel = model;
+  let modelLadder = [];
   const resolvedClient =
     client ??
     new OllamaClient({
@@ -203,11 +267,13 @@ export async function createAgent({
     });
   if (!client) {
     try {
-      const routed = await resolveModelAuto({
+      const routed = await resolveModelWithEscalation({
         requested: resolvedModel,
         client: resolvedClient,
+        escalationEnabled: escalation !== false && resolvedModel === "auto",
       });
       resolvedModel = routed.model;
+      modelLadder = routed.ladder ?? [];
       await configureClientModel(resolvedClient, routed.model);
     } catch (err) {
       if (err instanceof ModelRoutingError) throw err;
@@ -231,18 +297,31 @@ export async function createAgent({
   }
   for (const tool of tools ?? []) registry.register(tool);
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
+  const canonical = memory && resolvedClient.embed ? await formatCanonicalPrinciples() : "";
+  const basePrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   const prompt =
-    systemPrompt ??
-    (await buildSystemPrompt({
-      basePrompt: DEFAULT_SYSTEM_PROMPT,
-      workspaceRoot,
-      projectContext: await buildProjectContext({
-        workspaceRoot,
-        client: projectIndex ? resolvedClient : undefined,
-        embeddingModel,
-        index: projectIndex,
-      }),
-    }));
+    systemPrompt != null
+      ? systemPrompt
+      : await buildSystemPrompt({
+          basePrompt: canonical ? `${basePrompt}\n\n${canonical}` : basePrompt,
+          workspaceRoot,
+          projectContext: await buildProjectContext({
+            workspaceRoot,
+            client: projectIndex ? resolvedClient : undefined,
+            embeddingModel,
+            index: projectIndex,
+          }),
+        });
+  const escalationController =
+    escalation instanceof EscalationController
+      ? escalation
+      : escalation !== false && modelLadder.length > 1
+        ? new EscalationController({
+            client: resolvedClient,
+            ladder: modelLadder,
+            allowCloud: escalationCloud === true,
+          })
+        : false;
   const loop = new AgentLoop({
     client: resolvedClient,
     registry,
@@ -252,6 +331,12 @@ export async function createAgent({
     compaction,
     planning,
     taskHints,
+    memory: memory && Boolean(resolvedClient.embed),
+    memoryReadonly,
+    embeddingModel,
+    acceptance,
+    critique,
+    escalation: escalationController,
     projectBootstrap: projectBootstrap
       ? {
           workspaceRoot,

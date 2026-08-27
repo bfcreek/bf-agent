@@ -13,6 +13,15 @@ import readline from "node:readline/promises";
 
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
+import { EscalationController, resolveModelWithEscalation } from "./escalation.mjs";
+import {
+  clearMemory,
+  consolidateMemory,
+  formatCanonicalPrinciples,
+  loadMemoryStore,
+  memoryStats,
+  seedMemoryFromRules,
+} from "./memory-store.mjs";
 import { buildProjectContext } from "./project-index.mjs";
 import { McpClient, registerMcpTools } from "./mcp-client.mjs";
 import {
@@ -23,7 +32,7 @@ import {
   suggestModel,
 } from "./model-routing.mjs";
 import { DEFAULT_NUM_CTX, DEFAULT_THINK, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
-import { configureClientModel } from "./prompt-enhancements.mjs";
+import { configureClientModel, exportTaskHintSeedRules as getTaskHintRules } from "./prompt-enhancements.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
@@ -168,6 +177,31 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       case "--no-hints":
         options.noHints = true;
         break;
+      case "--no-memory":
+        options.noMemory = true;
+        break;
+      case "--memory-readonly":
+        options.memoryReadonly = true;
+        break;
+      case "--no-critique":
+        options.noCritique = true;
+        break;
+      case "--no-acceptance":
+        options.noAcceptance = true;
+        break;
+      case "--no-escalation":
+        options.escalation = false;
+        break;
+      case "--escalation-cloud":
+        options.escalationCloud = true;
+        break;
+      case "--escalation-max": {
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(raw ?? "", 10);
+        if (Number.isFinite(n) && n >= 0 && n <= 10) options.escalationMax = n;
+        else if (raw !== undefined) options.errors.push(`--escalation-max needs 0–10, got '${raw}'.`);
+        break;
+      }
       case "--help":
       case "-h":
         options.help = true;
@@ -192,6 +226,10 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
   if (positional[0] === "serve") {
     options.serve = true;
     positional.shift();
+  }
+  if (positional[0] === "memory") {
+    positional.shift();
+    options.memoryCommand = positional.shift() ?? "stats";
   }
   if (positional[0] === "models") {
     positional.shift();
@@ -233,6 +271,7 @@ Usage:
   halo-agent models [options]       List installed Ollama models and tool compliance
   halo-agent models config edit       Create or open the model-routing config (models.yaml)
   halo-agent config edit              Create or open the general user config (config.yaml)
+  halo-agent memory list|stats|consolidate|clear|seed  Episodic memory store
 
 Config:
   General defaults: ${getConfigPath()} (YAML)
@@ -259,6 +298,13 @@ Options:
                        or low|medium|high|max (for thinking models / gpt-oss)
   --no-plan            Skip the planning pre-pass on the first turn
   --no-hints           Skip task-type constraint hints in the user message
+  --no-memory          Skip episodic memory retrieval and writes
+  --memory-readonly    Retrieve memory but do not update stats or write lessons
+  --no-critique        Skip self-critique pass after planning
+  --no-acceptance      Skip acceptance-contract verification gate
+  --no-escalation      Disable mid-run model escalation (use strongest model up front)
+  --escalation-max <n> Max model escalations per run (default 2)
+  --escalation-cloud   Allow escalation onto paid cloud models (default local only)
   --port <n>           Port for serve mode (default 11435)
   --quiet              Only print the final answer
   --json               JSON output (models command)
@@ -505,10 +551,59 @@ function describeStep(step) {
     console.error(`[plan]\n${preview}`);
     return;
   }
+  if (step.kind === "escalation") {
+    console.error(`[escalation] ${step.content}`);
+    return;
+  }
   if (step.kind === "final") return;
   for (const call of step.toolCalls) {
     const status = call.ok ? "ok" : `error: ${call.error}`;
     console.error(`[step ${step.index}] ${call.name}(${JSON.stringify(call.args)}) -> ${status}`);
+  }
+}
+
+async function runMemoryCommand(options, client) {
+  const cmd = options.memoryCommand ?? "stats";
+  switch (cmd) {
+    case "list": {
+      const store = await loadMemoryStore();
+      for (const lesson of store.lessons.filter((l) => l.status !== "retired")) {
+        console.log(`${lesson.id}\t${lesson.status}\t${lesson.source}\t${lesson.lesson.slice(0, 120)}`);
+      }
+      return;
+    }
+    case "stats": {
+      const stats = await memoryStats();
+      console.log(JSON.stringify(stats, null, 2));
+      return;
+    }
+    case "consolidate": {
+      const result = await consolidateMemory({ embeddingModel: options.embedModel });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case "clear": {
+      await clearMemory();
+      console.log("Memory cleared.");
+      return;
+    }
+    case "seed": {
+      if (!client?.embed) {
+        console.error("Embedding client required for seed (Ollama with embed model).");
+        process.exitCode = 1;
+        return;
+      }
+      const count = await seedMemoryFromRules({
+        rules: getTaskHintRules(),
+        client,
+        embeddingModel: options.embedModel,
+      });
+      console.log(`Seeded ${count} lesson(s) from task hint rules.`);
+      return;
+    }
+    default:
+      console.error(`Unknown memory subcommand '${cmd}'. Use: list, stats, consolidate, clear, seed`);
+      process.exitCode = 1;
   }
 }
 
@@ -558,7 +653,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (!options.goal && !options.serve && !options.listModels) {
+  if (!options.goal && !options.serve && !options.listModels && !options.memoryCommand) {
     const forceInteractive = process.env.HALO_AGENT_FORCE_INTERACTIVE === "1";
     if ((process.stdin.isTTY && process.stdout.isTTY) || forceInteractive) {
       options.interactive = true;
@@ -582,13 +677,40 @@ async function main() {
     think: options.think,
   });
 
+  if (options.memoryCommand) {
+    await runMemoryCommand(options, client);
+    return;
+  }
+
+  let modelLadder = [];
+
   // Route to an installed, suitable model up front; skip silently when Ollama is
   // unreachable — the run itself will surface that error clearly.
   try {
-    const routed = await resolveCliModel(options, client, modelsConfigValues, modelsConfigExists);
-    for (const warning of routed.warnings) console.error(warning);
-    options.model = routed.model;
-    await configureClientModel(client, routed.model);
+    if (options.escalation !== false && options.model === "auto" && !modelsConfigExists) {
+      const routed = await resolveModelWithEscalation({
+        requested: options.model,
+        client,
+        escalationEnabled: true,
+      });
+      modelLadder = routed.ladder ?? [];
+      for (const warning of routed.warnings) console.error(warning);
+      options.model = routed.model;
+      await configureClientModel(client, routed.model);
+    } else {
+      const routed = await resolveCliModel(options, client, modelsConfigValues, modelsConfigExists);
+      for (const warning of routed.warnings) console.error(warning);
+      options.model = routed.model;
+      await configureClientModel(client, routed.model);
+      if (options.escalation !== false) {
+        const esc = await resolveModelWithEscalation({
+          requested: "auto",
+          client,
+          escalationEnabled: false,
+        });
+        modelLadder = esc.ladder ?? [];
+      }
+    }
   } catch (err) {
     if (err instanceof ModelRoutingError) {
       console.error(err.message);
@@ -642,11 +764,38 @@ async function main() {
     onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
   });
 
+  const canonical = !options.noMemory ? await formatCanonicalPrinciples() : "";
   const systemPrompt = await buildSystemPrompt({
-    basePrompt: DEFAULT_SYSTEM_PROMPT,
+    basePrompt: canonical ? `${DEFAULT_SYSTEM_PROMPT}\n\n${canonical}` : DEFAULT_SYSTEM_PROMPT,
     workspaceRoot: options.cwd,
     projectContext,
   });
+
+  const escalationController =
+    options.escalation !== false && modelLadder.length > 1
+      ? new EscalationController({
+          client,
+          ladder: modelLadder,
+          maxEscalations: options.escalationMax ?? 2,
+          allowCloud: options.escalationCloud === true,
+        })
+      : false;
+
+  if (!options.noMemory && client.embed) {
+    const store = await loadMemoryStore();
+    if (!store.lessons.length) {
+      try {
+        const seeded = await seedMemoryFromRules({
+          rules: getTaskHintRules(),
+          client,
+          embeddingModel: options.embedModel,
+        });
+        if (seeded && !options.quiet) console.error(`[memory] seeded ${seeded} lesson(s) from task hints`);
+      } catch {
+        // Seed is best-effort.
+      }
+    }
+  }
 
   if (options.serve) {
     const server = createOpenAIServer({
@@ -686,6 +835,12 @@ async function main() {
     compaction: {},
     planning: !options.noPlan,
     taskHints: !options.noHints,
+    memory: !options.noMemory,
+    memoryReadonly: options.memoryReadonly === true,
+    embeddingModel: options.embedModel,
+    acceptance: !options.noAcceptance,
+    critique: !options.noCritique,
+    escalation: escalationController,
     projectBootstrap: makeProjectBootstrap(options, client),
     onBootstrap: options.quiet
       ? undefined

@@ -38,6 +38,12 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @property {boolean} verbose
  * @property {boolean} planning
  * @property {boolean} taskHints
+ * @property {boolean} memory
+ * @property {boolean} memoryReadonly
+ * @property {boolean} noCritique
+ * @property {boolean} noAcceptance
+ * @property {boolean} escalation
+ * @property {boolean} escalationCloud
  * @property {number} judgeRetries
  * @property {string|null} [scenario]
  * @property {string[]|null} [scenarios]
@@ -99,6 +105,12 @@ export function defaultConfig() {
     verbose: false,
     planning: false,
     taskHints: true,
+    memory: true,
+    memoryReadonly: true,
+    noCritique: false,
+    noAcceptance: false,
+    escalation: true,
+    escalationCloud: false,
     judgeRetries: 2,
     scenario: null,
     scenarios: null,
@@ -182,7 +194,15 @@ export async function loadBenchOptions(argv, cwd = process.cwd()) {
     baseUrl: options.baseUrl,
   });
 
-  if (options.tierModels?.length && options.models.length === 1 && options.models[0] === "auto") {
+  // Escalation-first routing needs "auto" to survive: it starts on the weakest
+  // capable local model and climbs only on struggle. Substituting a tier model
+  // here would pin the run to a fixed rung and bypass the ladder entirely.
+  if (
+    options.escalation !== true &&
+    options.tierModels?.length &&
+    options.models.length === 1 &&
+    options.models[0] === "auto"
+  ) {
     options.models = [options.tierModels[0].model];
   }
 
@@ -235,6 +255,13 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeRetries: null,
     planning: null,
     taskHints: null,
+    label: null,
+    memory: null,
+    memoryReadonly: null,
+    noCritique: null,
+    noAcceptance: null,
+    escalation: null,
+    escalationCloud: null,
     enforceGates: null,
     gatePreset: null,
     tierPreset: null,
@@ -293,6 +320,19 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     else if (arg === "--planning") cli.planning = true;
     else if (arg === "--no-planning") cli.planning = false;
     else if (arg === "--no-hints") cli.taskHints = false;
+    else if (arg === "--label") cli.label = argv[++i];
+    else if (arg === "--memory") cli.memory = true;
+    else if (arg === "--no-memory") cli.memory = false;
+    else if (arg === "--memory-write") cli.memoryReadonly = false;
+    else if (arg === "--memory-readonly") cli.memoryReadonly = true;
+    else if (arg === "--critique") cli.noCritique = false;
+    else if (arg === "--no-critique") cli.noCritique = true;
+    else if (arg === "--acceptance") cli.noAcceptance = false;
+    else if (arg === "--no-acceptance") cli.noAcceptance = true;
+    else if (arg === "--escalation") cli.escalation = true;
+    else if (arg === "--no-escalation") cli.escalation = false;
+    else if (arg === "--escalation-cloud") cli.escalationCloud = true;
+    else if (arg === "--no-escalation-cloud") cli.escalationCloud = false;
     else if (arg === "--enforce-gates") cli.enforceGates = true;
     else if (arg === "--gate") {
       const preset = argv[++i];
@@ -351,6 +391,13 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeRetries: cli.judgeRetries ?? fileConfig.judgeRetries,
     planning: cli.planning ?? fileConfig.planning,
     taskHints: cli.taskHints ?? fileConfig.taskHints,
+    label: cli.label ?? null,
+    memory: cli.memory ?? fileConfig.memory,
+    memoryReadonly: cli.memoryReadonly ?? fileConfig.memoryReadonly,
+    noCritique: cli.noCritique ?? fileConfig.noCritique,
+    noAcceptance: cli.noAcceptance ?? fileConfig.noAcceptance,
+    escalation: cli.escalation ?? fileConfig.escalation,
+    escalationCloud: cli.escalationCloud ?? fileConfig.escalationCloud,
     gates: fileConfig.gates,
     enforceGates: cli.enforceGates ?? fileConfig.enforceGates,
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,

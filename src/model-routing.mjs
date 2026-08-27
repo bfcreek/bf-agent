@@ -192,10 +192,12 @@ export async function detectToolCapable(client, name) {
  * @param {Array<{name: string, sizeBytes?: number, parameterSize?: string}>} options.models
  *   Installed models (from listModelsDetailed, or bare {name} objects).
  * @param {number} [options.totalMemBytes] Defaults to this machine's RAM.
+ * @param {number} [options.vramBytes] Pass 0 to ignore the GPU, omit to probe.
  * @returns {Promise<{model: string, paramsB: number, cloud: boolean, reason: string}|null>}
  */
-export async function suggestModel({ client, models, totalMemBytes = os.totalmem() }) {
-  const memoryBudget = totalMemBytes * MEMORY_FIT_FRACTION;
+export async function suggestModel({ client, models, totalMemBytes = os.totalmem(), vramBytes }) {
+  const { resolveModelFitBudget } = await import("./hardware.mjs");
+  const { budgetBytes: memoryBudget } = await resolveModelFitBudget({ totalMemBytes, vramBytes });
   const locals = [];
   const clouds = [];
 
@@ -282,6 +284,18 @@ export async function resolveModelAuto({ requested, client, totalMemBytes, signa
       } else if (thinking === false) {
         warnings.push(
           `Model '${match}' does not support thinking; thinking models tend to be more reliable agents.`,
+        );
+      }
+      const { resolveModelFitBudget } = await import("./hardware.mjs");
+      const budget = await resolveModelFitBudget({ totalMemBytes });
+      if (
+        budget.basis === "vram" &&
+        !isCloudModel(match) &&
+        entry?.sizeBytes > budget.budgetBytes
+      ) {
+        const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+        warnings.push(
+          `Model '${match}' (${gb(entry.sizeBytes)}) exceeds the ${gb(budget.budgetBytes)} that fits on a ${gb(budget.vramBytes)} GPU; Ollama will run part of it on the CPU, which is much slower.`,
         );
       }
       return { model: match, warnings };

@@ -31,6 +31,13 @@ const CONFIG_TEMPLATE = `# halo-agent user configuration
 # no-index: false
 # no-plan: false
 # no-hints: false
+# no-memory: false
+# memory-readonly: false
+# no-critique: false
+# no-acceptance: false
+# escalation: true
+# escalation-max: 2
+# escalation-cloud: false
 # json: false
 #
 # mcp:
@@ -226,9 +233,21 @@ export function normalizeConfigValues(raw) {
       case "json":
       case "no-plan":
       case "no-hints":
+      case "no-memory":
+      case "memory-readonly":
+      case "no-critique":
+      case "no-acceptance":
+      case "escalation":
+      case "escalation-cloud":
         if (typeof value === "boolean") values[configKeyToOption(key)] = value;
         else errors.push(`config '${key}' must be true or false.`);
         break;
+      case "escalation-max": {
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0 && n <= 10) values.escalationMax = n;
+        else errors.push(`config 'escalation-max' needs an integer from 0 to 10, got '${value}'.`);
+        break;
+      }
       case "mcp":
         if (!Array.isArray(value)) {
           errors.push(`config 'mcp' must be a list of command strings.`);
@@ -283,6 +302,18 @@ function configKeyToOption(key) {
       return "noPlan";
     case "no-hints":
       return "noHints";
+    case "no-memory":
+      return "noMemory";
+    case "memory-readonly":
+      return "memoryReadonly";
+    case "no-critique":
+      return "noCritique";
+    case "no-acceptance":
+      return "noAcceptance";
+    case "escalation-max":
+      return "escalationMax";
+    case "escalation-cloud":
+      return "escalationCloud";
     default:
       return key;
   }
@@ -379,6 +410,13 @@ export function getBuiltinDefaults() {
     think: DEFAULT_THINK,
     noPlan: false,
     noHints: false,
+    noMemory: false,
+    memoryReadonly: false,
+    noCritique: false,
+    noAcceptance: false,
+    escalation: true,
+    escalationMax: 2,
+    escalationCloud: false,
     tierPreset: null,
     taskTier: null,
     goal: "",

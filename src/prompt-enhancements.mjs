@@ -324,6 +324,14 @@ const TASK_HINT_RULES = [
   },
 ];
 
+/**
+ * Export task hint rules for memory seeding.
+ * @returns {Array<{id: string, constraint: string}>}
+ */
+export function exportTaskHintSeedRules() {
+  return TASK_HINT_RULES.map((r) => ({ id: r.id, constraint: r.constraint }));
+}
+
 export const PLANNING_USER_MESSAGE = [
   "Before using any tools, write a short Goals section first: 2–5 bullet outcomes",
   "that define done (named deliverables, exit-0 commands, final-answer shape).",
@@ -356,6 +364,8 @@ export const PLANNING_USER_MESSAGE = [
   "After tool results return, synthesize findings into a non-empty final answer — never end on an empty message. For path questions, reply with only the defining file's relative path.",
   "If a compile fails, classify the CS error (CS0136 args shadowing vs CS0165 definite assignment vs CS0542) and apply the canonical fix once; cap retries at 2 per distinct error code.",
   "Do not call tools yet — reply with only the plan.",
+  "After the plan, include a ## Acceptance section with bullet checks: deliverable: <path>, command: <exact shell command>, output: <final answer shape>.",
+  "Name only checks you will actually run — the loop blocks completion until they pass.",
 ].join(" ");
 
 /** Tools that ground answers or change workspace state. */
@@ -896,7 +906,7 @@ export function flattenToolCalls(steps) {
  * @param {object} call
  * @returns {string}
  */
-function runCommandText(call) {
+export function runCommandText(call) {
   if (call?.name !== "run_command") return "";
   const args = call.args ?? {};
   return String(args.command ?? args.cmd ?? "");
@@ -1531,7 +1541,7 @@ function ranSubcommand(calls, sub) {
   });
 }
 
-function ranNamedCommand(calls, named) {
+export function ranNamedCommand(calls, named) {
   const needle = String(named ?? "")
     .toLowerCase()
     .replace(/^(node|python3?|py)\s+/, "");

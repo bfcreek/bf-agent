@@ -1,0 +1,77 @@
+﻿node : config: C:\Users\joe\source\repos\halo\halo-agent\evals\bench.config.json
+At C:\Users\joe\AppData\Local\Temp\ps-script-c623cd10-1310-4306-a0e4-6d20b4d7d700.ps1:116 char:233
++ ...  Out-Null ; node evals/dev-bench.mjs --scenarios todo-cli,json-filter ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (config: C:\User...nch.config.json:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+== tier-routed models ==
+  tier 0ΓÇô1: qwen3-coder:14b
+  tier 2ΓÇô3: qwen3-coder:30b
+  tier 4+: kimi-k2.7-code:cloud
+  resolved Ollama model: gpt-oss:20b
+  resolved Ollama model: qwen3-coder:30b
+  resolved Ollama model: kimi-k2.7-code:cloud
+  running: todo-cli...
+  workspace: C:\Users\joe\source\repos\halo\halo-agent-benchmark\js\t3\todo-cli
+  judging with cursor agent (auto)...
+  0 (F)  todo-cli  precheck fail  ΓÇö  3 steps  51.7s
+  running: json-filter-cli...
+  workspace: C:\Users\joe\source\repos\halo\halo-agent-benchmark\js\t3\json-filter-cli
+  judging with cursor agent (auto)...
+  96 (A)  json-filter-cli  precheck ok  ΓÇö  8 steps  38.8s
+  running: word-count...
+  workspace: C:\Users\joe\source\repos\halo\halo-agent-benchmark\js\t3\word-count
+  judging with cursor agent (auto)...
+  88 (A-)  word-count  precheck ok  ΓÇö  15 steps  54.2s
+
+ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+  halo-agent dev bench ΓÇö assessment report
+ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+  Ran: 2026-08-27T20:12:17.567Z
+  Agent model(s): qwen3-coder:14b, qwen3-coder:30b, kimi-k2.7-code:cloud  |  Judge: auto
+
+  Overall: 61.3/100 (D) ΓÇö 3/3 graded
+  Precheck pass: 2/3  |  Integrity: 0/0  |  Duration: 2m 25s
+
+  Scores by scenario
+  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    0 F    tier 3  todo-cli                pre FAIL  integ ΓÇö
+         The agent produced no deliverables: the workspace contains only .halo-bench artifacts, with neither ΓÇª
+   96 A    tier 3  json-filter-cli         pre ok  integ ΓÇö
+         The agent fully met the task: it inspected data/users.json, implemented filter.mjs that reads the fiΓÇª
+   88 A-   tier 3  word-count              pre ok  integ ΓÇö
+         The agent fully met the task: count.mjs correctly counts whitespace-separated words and prints exactΓÇª
+
+  Recommendations for halo-agent
+  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  [HIGH]   tools: Reject or recover when the model emits tool XML/JSON in the assistant message without a real tool call; force a proper write_file/run_command turn before allowing final.
+  [HIGH]   system prompt: Require that coding tasks cannot stop as completed until listed deliverables exist on disk and acceptance commands have been run; ban finishing on unexecuted tool-call prose.
+  [HIGH]   compaction: Investigate lost/skipped steps (jump 0ΓåÆ9, duplicate index 0, no tool turns) so planned write/verify actions are not dropped before final.
+  [HIGH]   tools: After write_file/edit_file to .mjs, nudge or soft-validate ESM vs CJS (no require in ESM) and that referenced identifiers are imported, before run_command.
+  [HIGH]   other: When writing tests with expected numeric outputs, prompt the model to derive the expectation from the fixture string itself (or run count once) rather than guessing.
+  [MEDIUM] planning: Anchor language/runtime from the task text (node/mjs) so the agent does not invent unrelated stacks (.NET/C#) and replan without acting.
+  [MEDIUM] planning: Collapse revise-plan into a short delta (acceptance/failure modes only) instead of re-emitting a full second Goals/Plan block with the same step index.
+  [MEDIUM] planning: Emit a single plan step and skip re-planning unless the task or failures change; suppress duplicate identical plans.
+  [LOW]    system prompt: Remind the model to drop unused imports and keep deliverables minimal when writing new files.
+  [LOW]    other: Optionally encourage writing filter.mjs and test.mjs in one step when the task is this small to cut latency without losing the read-first habit.
+  [LOW]    compaction: Discourage reflexive read_file immediately after a successful write/edit of the same path unless the next edit needs the file contents.
+
+  Gate evaluation
+  ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  safety   n/a
+           - no scenarios run
+  tier1    n/a
+           - no scenarios run
+  tier2    n/a
+           - no scenarios run
+  tier3    FAIL (advisory) (not enforced)
+           - avg score 61.3 < 65
+           - scenario floor: todo-cli=0 < 50
+  Overall: FAIL
+
+ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+JSON report: C:\Users\joe\source\repos\halo\halo-agent\bench-H1.json
+Markdown report: C:\Users\joe\source\repos\halo\halo-agent\bench-H1.md
+Capability profile: C:\Users\joe\source\repos\halo\halo-agent\bench-capability.json
+Public benchmark: C:\Users\joe\source\repos\halo\halo-agent\bench-public.json

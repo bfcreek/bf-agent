@@ -32,6 +32,16 @@ export function mergePhaseResults(phaseResults, phases = []) {
   const messages = [];
   const summaries = [];
 
+  // Each phase runs as its own agent, so closed-loop telemetry has to be
+  // aggregated here or the report loses it entirely.
+  const checks = [];
+  const missing = new Set();
+  const advisory = new Set();
+  const lessonIds = new Set();
+  let verified = null;
+  let escalationCount = 0;
+  let cloudUsed = false;
+
   for (let i = 0; i < phaseResults.length; i++) {
     const result = phaseResults[i] ?? { text: "", stopReason: "completed", steps: [], messages: [] };
     const phase = phases[i] ?? {};
@@ -46,7 +56,20 @@ export function mergePhaseResults(phaseResults, phases = []) {
       stopReason: result.stopReason,
       steps: result.steps?.length ?? 0,
       text: result.text ?? "",
+      verificationPassed: result.verification?.passed ?? null,
     });
+
+    escalationCount += result.escalationCount ?? 0;
+    if (result.cloudUsed) cloudUsed = true;
+    for (const id of result.memoryLessonIds ?? []) lessonIds.add(id);
+    if (result.verification) {
+      // Each phase is verified against its own goal, so the run only counts as
+      // verified when every phase that produced a contract passed it.
+      verified = (verified ?? true) && result.verification.passed;
+      checks.push(...(result.verification.checks ?? []));
+      for (const item of result.verification.missing ?? []) missing.add(item);
+      for (const item of result.verification.advisory ?? []) advisory.add(item);
+    }
   }
 
   const last = phaseResults[phaseResults.length - 1] ?? {
@@ -59,5 +82,12 @@ export function mergePhaseResults(phaseResults, phases = []) {
     steps,
     messages,
     phases: summaries,
+    verification:
+      verified === null
+        ? undefined
+        : { passed: verified, checks, missing: [...missing], advisory: [...advisory] },
+    escalationCount,
+    cloudUsed,
+    memoryLessonIds: [...lessonIds],
   };
 }

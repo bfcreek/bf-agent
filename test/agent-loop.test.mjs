@@ -558,7 +558,7 @@ test("short create goals still get a planning pre-pass", async () => {
     { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
     { role: "assistant", content: "Created the Electron shell." },
   ]);
-  const loop = new AgentLoop({ client, registry: makeRegistry() });
+  const loop = new AgentLoop({ client, registry: makeRegistry(), critique: false });
 
   const result = await loop.run("create the shell for an electron app");
 
@@ -573,7 +573,7 @@ test("first-turn goals get a planning pre-pass before tools", async () => {
     { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
     { role: "assistant", content: "The feature outline is ready for review." },
   ]);
-  const loop = new AgentLoop({ client, registry: makeRegistry() });
+  const loop = new AgentLoop({ client, registry: makeRegistry(), critique: false });
 
   const result = await loop.run("implement a new feature and then run the tests to verify");
 
@@ -581,6 +581,104 @@ test("first-turn goals get a planning pre-pass before tools", async () => {
   assert.match(result.steps[0].content, /grep_search/);
   assert.equal(client.calls[0].tools, undefined);
   assert.equal(client.calls[1].tools.length, 2);
+});
+
+test("the critique pass revises the plan before tools are offered", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "1. grep_search for foo\n2. edit" },
+    { role: "assistant", content: "Risk: editing before reading.\n1. read_file src/foo.mjs\n2. edit" },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
+    { role: "assistant", content: "The feature outline is ready for review." },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  const planSteps = result.steps.filter((s) => s.kind === "plan");
+  assert.equal(planSteps.length, 2);
+  assert.match(planSteps[1].content, /Risk: editing before reading/);
+  assert.equal(client.calls[0].tools, undefined);
+  assert.equal(client.calls[1].tools, undefined);
+  assert.match(client.calls[1].messages.at(-1).content, /failure modes/i);
+  assert.equal(client.calls[2].tools.length, 2);
+});
+
+test("an acceptance command from the plan blocks completion until it runs", async () => {
+  const ran = [];
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "run_command",
+    execute: ({ command }) => {
+      ran.push(command);
+      return { status: "success", exitCode: 0, stdout: "1 passing\n", stderr: "" };
+    },
+  });
+  const client = new FakeClient([
+    { role: "assistant", content: "1. edit the module\n\n## Acceptance\n- command: node test.mjs" },
+    { role: "assistant", content: "All set — the feature works." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [toolCall("run_command", { command: "node test.mjs" })],
+    },
+    { role: "assistant", content: "Feature implemented; node test.mjs passes." },
+  ]);
+  const loop = new AgentLoop({ client, registry, critique: false });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.stopReason, "completed");
+  assert.deepEqual(ran, ["node test.mjs"]);
+  assert.equal(result.verification.passed, true);
+  assert.ok(
+    client.calls.some((c) =>
+      c.messages.some(
+        (m) =>
+          m.role === "user" && /do not finish yet|verification command|node test\.mjs/i.test(m.content),
+      ),
+    ),
+    "the premature final answer should have been blocked",
+  );
+});
+
+test("an unsatisfiable acceptance contract reports failure instead of looping", async () => {
+  const plan = { role: "assistant", content: "1. write it\n\n## Acceptance\n- command: node missing.mjs" };
+  const done = { role: "assistant", content: "Done." };
+  const client = new FakeClient([plan, done, done, done, done, done, done, done, done]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    maxSteps: 6,
+  });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.verification.passed, false);
+  assert.ok(result.verification.missing.some((m) => /node missing\.mjs/.test(m)));
+  assert.ok(result.steps.length <= 8, "the gate must not spin past the step budget");
+});
+
+test("the gate keeps pushing rather than accepting an early premature finish", async () => {
+  const done = { role: "assistant", content: "All done." };
+  const client = new FakeClient([
+    { role: "assistant", content: "1. write it\n\n## Acceptance\n- command: node test.mjs" },
+    ...Array.from({ length: 16 }, () => done),
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    maxSteps: 12,
+  });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  const blocks = client.calls.filter((c) =>
+    c.messages.some((m) => m.role === "user" && /acceptance contract not satisfied/i.test(m.content)),
+  ).length;
+  assert.ok(blocks >= 3, `expected the gate to block repeatedly, saw ${blocks}`);
+  assert.equal(result.verification.passed, false);
 });
 
 test("task hints are injected into the user message", async () => {
@@ -605,7 +703,13 @@ test("explicit goals are injected for artifact-creation tasks", async () => {
     { role: "assistant", content: "done" },
     { role: "assistant", content: "done" },
   ]);
-  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, taskHints: false });
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    taskHints: false,
+    acceptance: false,
+  });
 
   await loop.run("Write the output fasta file titled primers.fasta from sequences.fasta.");
 
@@ -647,7 +751,12 @@ test("premature final without tools is nudged to use tools", async () => {
     },
     { role: "assistant", content: "Created greet.mjs; tests already present and passing." },
   ]);
-  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    acceptance: false,
+  });
 
   const result = await loop.run("Create greet.mjs and test.mjs, then run node test.mjs.");
 
@@ -826,7 +935,7 @@ test("ambiguous edit_file injects a re-read and per-function plan nudge", async 
     { role: "assistant", content: "Need enclosing function context before editing again." },
     { role: "assistant", content: "Stopped until the snippet is unique." },
   ]);
-  const loop = new AgentLoop({ client, registry, planning: false });
+  const loop = new AgentLoop({ client, registry, planning: false, acceptance: false });
 
   const result = await loop.run("Inspect calc.py and correct the mul function.");
 

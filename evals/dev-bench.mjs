@@ -24,6 +24,7 @@ import path from "node:path";
 import { createAgent } from "../src/index.mjs";
 import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
+import { resolveModelWithEscalation } from "../src/escalation.mjs";
 import { loadBenchOptions, resolveTierModel, uniqueTierModels } from "./config.mjs";
 import {
   DEFAULT_CHECKPOINT_REL,
@@ -48,6 +49,7 @@ import {
 } from "./gates.mjs";
 import { captureIntegritySnapshot, checkScenarioIntegrity } from "./integrity.mjs";
 import { judgeRun } from "./judge.mjs";
+import { appendScoreboardEntry, computeRunMetrics } from "./scoreboard.mjs";
 import { mergePhaseResults, scenarioPhases } from "./phases.mjs";
 import { buildAssessmentReport, formatReportConsole, formatReportMarkdown } from "./report.mjs";
 import { SCENARIOS, agentAnswerText, filterAvailableScenarios, selectScenarios } from "./scenarios.mjs";
@@ -103,6 +105,12 @@ async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSte
     projectIndex: false,
     planning: options.planning,
     taskHints: options.taskHints,
+    memory: options.memory !== false,
+    memoryReadonly: options.memoryReadonly === true,
+    acceptance: options.noAcceptance !== true,
+    critique: options.noCritique !== true,
+    escalation: options.escalation !== false,
+    escalationCloud: options.escalationCloud === true,
     onStep: options.verbose
       ? (step) => {
           for (const call of step.toolCalls) {
@@ -219,6 +227,10 @@ async function runScenario({ scenario, model, options }) {
         steps: agentResult.steps.length,
         phases: agentResult.phases ?? null,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
+        escalationCount: agentResult.escalationCount ?? 0,
+        cloudUsed: agentResult.cloudUsed ?? false,
+        verificationPassed: agentResult.verification?.passed ?? null,
+        memoryEnabled: options.memory !== false,
       },
       verdict,
       judgeError,
@@ -259,6 +271,10 @@ async function runScenario({ scenario, model, options }) {
         steps: agentResult.steps?.length ?? 0,
         phases: agentResult.phases ?? null,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
+        escalationCount: agentResult.escalationCount ?? 0,
+        cloudUsed: agentResult.cloudUsed ?? false,
+        verificationPassed: agentResult.verification?.passed ?? null,
+        memoryEnabled: options.memory !== false,
       },
       verdict: null,
       judgeError: null,
@@ -274,7 +290,13 @@ async function logResolvedModel(model, options) {
   if (options.judgeOnly) return model;
   try {
     const client = new OllamaClient({ baseUrl: options.baseUrl, model });
-    const routed = await resolveModelAuto({ requested: model, client });
+    // Escalation-first routing starts on the weakest capable local model and
+    // climbs on struggle. Resolving "auto" the strongest-model way here would
+    // pin every scenario to the top rung and the ladder would never be used.
+    const routed =
+      options.escalation !== false && model === "auto"
+        ? await resolveModelWithEscalation({ requested: model, client, escalationEnabled: true })
+        : await resolveModelAuto({ requested: model, client });
     console.error(`  resolved Ollama model: ${routed.model}`);
     return routed.model;
   } catch (err) {
@@ -752,6 +774,22 @@ async function main() {
   const meta = { resolvedModel, version: PACKAGE_VERSION };
   const capabilityProfile = buildCapabilityProfile(report, gateEvaluation, meta);
   const publicBenchmark = buildPublicBenchmark(report, gateEvaluation, meta);
+
+  const metrics = computeRunMetrics(allResults);
+  await appendScoreboardEntry({
+    label: options.label ?? null,
+    models: reportModels,
+    planning: options.planning === true,
+    memory: options.memory !== false,
+    memoryReadonly: options.memoryReadonly === true,
+    acceptance: options.noAcceptance !== true,
+    critique: options.noCritique !== true,
+    escalation: options.escalation !== false,
+    escalationCloud: options.escalationCloud === true,
+    scenarios: allResults.length,
+    ...metrics,
+    avgScore: report.overall.avgScore,
+  });
 
   console.log("");
   console.log(formatReportConsole(report));
