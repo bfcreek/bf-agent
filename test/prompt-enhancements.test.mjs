@@ -8,6 +8,12 @@ import {
   completionVerifyNudge,
   detectTaskHints,
   emptyFinalAnswerNudge,
+  emptyResponseRecoveryNudge,
+  firstTurnBootstrapNudge,
+  formatZeroTokenDiagnostic,
+  isEmptyAssistantResponse,
+  isThinkingOnlyResponse,
+  shouldFailOnEmptyResponses,
   extractCompilerDiagnostics,
   extractNamedDeliverables,
   extractNamedNodeCommands,
@@ -103,6 +109,40 @@ test("isSimpleReadAnswerGoal skips planning for read-and-answer tasks", () => {
   assert.equal(shouldPlanGoal(goal), false);
   assert.equal(isComplexGoal(goal), false);
   assert.equal(shouldPlanGoal("Reply with just ok."), false);
+});
+
+test("empty response helpers detect thinking-only turns and polyglot bootstrap", () => {
+  assert.equal(isEmptyAssistantResponse({ role: "assistant", content: "" }), true);
+  assert.equal(
+    isThinkingOnlyResponse({ role: "assistant", content: "", thinking: "plan the polyglot" }),
+    true,
+  );
+  assert.equal(isEmptyAssistantResponse({ role: "assistant", content: "done" }), false);
+
+  const goal =
+    "Create a polyglot in /app/polyglot/main.rs that compiles with rustc and g++.";
+  const bootstrap = firstTurnBootstrapNudge({ goal, steps: [] });
+  assert.match(bootstrap, /mkdir -p polyglot/i);
+  assert.match(bootstrap, /write_file polyglot\/main\.rs/i);
+
+  assert.equal(
+    shouldFailOnEmptyResponses({ goal, steps: [], consecutiveEmpty: 2 }),
+    true,
+  );
+  assert.equal(
+    shouldFailOnEmptyResponses({ goal: "say hi", steps: [], consecutiveEmpty: 3 }),
+    false,
+  );
+
+  const diag = formatZeroTokenDiagnostic({
+    totalEvalCount: 0,
+    elapsedMs: 120_000,
+    model: "auto",
+    baseUrl: "http://host.docker.internal:11434",
+  });
+  assert.match(diag, /0 completion tokens/i);
+  assert.match(diag, /host\.docker\.internal:11434/);
+  assert.equal(formatZeroTokenDiagnostic({ totalEvalCount: 5, elapsedMs: 120_000 }), null);
 });
 
 test("prematureFinalNudge fires when action goals finish without tools", () => {

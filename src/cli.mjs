@@ -742,6 +742,13 @@ async function main() {
       process.exitCode = 2;
       return;
     }
+    if (result.stopReason === "failed") {
+      if (result.diagnostic) console.error(result.diagnostic);
+      else console.error("Agent stopped: required work incomplete after empty model responses.");
+      if (result.text) console.log(result.text);
+      process.exitCode = 1;
+      return;
+    }
     console.log(result.text);
   } catch (err) {
     if (err instanceof OllamaClientError) {

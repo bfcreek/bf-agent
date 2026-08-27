@@ -55,7 +55,7 @@ test("system prompt covers build pipelines, artifacts, and tool-call discipline"
   assert.match(DEFAULT_SYSTEM_PROMPT, /Keep reasoning in thinking/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /not app\/filter\.py/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Only use[\s\S]*search_project if that tool is listed/);
-  assert.match(DEFAULT_SYSTEM_PROMPT, /git merge CONFLICT|<<<<<<< markers/i);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Internal thinking\/reasoning never counts as task progress/i);
 });
 
 test("plain answer with no tool calls completes in one step", async () => {
@@ -934,4 +934,43 @@ test("empty final answers are synthesized instead of completing blank", async ()
   assert.equal(result.stopReason, "completed");
   assert.ok(result.text.trim().length > 0);
   assert.match(result.text, /empty final answer/i);
+});
+
+test("consecutive empty responses on artifact tasks fail instead of completing", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "", thinking: "planning polyglot layout" },
+    { role: "assistant", content: "", thinking: "still planning" },
+    { role: "assistant", content: "" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, maxSteps: 5 });
+  const goal =
+    "Create a polyglot at polyglot/main.rs that compiles with rustc and g++.";
+  const result = await loop.run(goal);
+  assert.equal(result.stopReason, "failed");
+  assert.match(result.text, /No files were created|Still required/i);
+  const nudges = client.calls.flatMap((c) =>
+    c.messages.filter((m) => m.role === "user").map((m) => m.content),
+  );
+  assert.ok(nudges.some((n) => /mkdir -p polyglot|write_file polyglot\/main\.rs/i.test(n)));
+});
+
+test("thinking-only turns do not consume the step budget", async () => {
+  let chatCalls = 0;
+  const client = {
+    async chat() {
+      chatCalls += 1;
+      if (chatCalls <= 2) {
+        return {
+          message: { role: "assistant", content: "", thinking: "reasoning only" },
+          raw: { eval_count: 0 },
+        };
+      }
+      return { message: { role: "assistant", content: "hi" }, raw: { eval_count: 3 } };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, maxSteps: 2 });
+  const result = await loop.run("say hello");
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.text, "hi");
+  assert.ok(chatCalls >= 3, "thinking-only turns should not consume the 2-step budget");
 });

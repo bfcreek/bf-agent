@@ -1,4 +1,4 @@
-# Publish halo-agent release zip to R2 staging (no production promote).
+# Publish halo-agent release zip to R2 staging (no production promote, no npm).
 #
 # Usage:
 #   .\scripts\release\publish-release.ps1
@@ -6,8 +6,10 @@
 #   .\scripts\release\publish-release.ps1 -BumpPatch
 #   .\scripts\release\publish-release.ps1 -DryRun
 #
-# After upload, verify staging then promote at:
-#   https://www.halosoftworks.com/admin/releases
+# After upload:
+#   1. Verify staging at https://halo-agent-releases.halosoftworks.com/staging/latest.yml
+#   2. Promote at https://www.halosoftworks.com/admin/releases
+#   3. Publish npm (production only): .\scripts\release\publish-production.ps1
 
 param(
     [switch] $SkipTests,
@@ -92,4 +94,4 @@ $pkg = Get-Content -Raw -Path $PkgPath | ConvertFrom-Json
 $version = [string]$pkg.version
 
 Write-Host ""
-Write-Host "halo-agent v$version uploaded to R2 staging/. Promote at https://www.halosoftworks.com/admin/releases" -ForegroundColor Green
+Write-Host "halo-agent v$version uploaded to R2 staging/. Next: promote at https://www.halosoftworks.com/admin/releases, then run publish-production.ps1 for npm." -ForegroundColor Green

@@ -3,7 +3,7 @@
  * are built from is exported here, plus `createAgent` — a one-call setup
  * for the common case.
  *
- * import { createAgent } from "halo-agent";
+ * import { createAgent } from "@halosoftworks/halo-agent";
  * const agent = await createAgent({ model: "qwen3-coder:30b" });
  * const { text } = await agent.run("summarize src/agent-loop.mjs");
  */

@@ -15,6 +15,7 @@ import {
   finalAnswerNudge,
   formatExplicitGoals,
   formatTaskConstraints,
+  goalNeedsSubstantiveTools,
   shouldPlanGoal,
   isTerminalVerificationMessage,
   mutationBlockedUntilPretest,
@@ -25,6 +26,12 @@ import {
   repeatedToolCallMessage,
   secretHitWithoutEditNudge,
   deliverableDriftNudge,
+  emptyResponseRecoveryNudge,
+  formatZeroTokenDiagnostic,
+  isEmptyAssistantResponse,
+  isThinkingOnlyResponse,
+  shouldFailOnEmptyResponses,
+  substantiveToolsUsed,
   synthesizeFinalAnswer,
   TOOL_NUDGE_NEAR_LIMIT,
   verificationCompleteOutcome,
@@ -174,6 +181,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Keep reasoning in thinking or plain content only. When you call tools,",
   "  leave assistant content empty or minimal so the tool-call JSON is not",
   "  rejected. Do not mix prose into the tool-call channel.",
+  "- Internal thinking/reasoning never counts as task progress. For",
+  "  artifact-creation or implementation tasks, your first actionable turn",
+  "  must be a tool call (write_file or run_command), not an empty assistant",
+  "  message with only thinking.",
   "- When the task mentions failing tests, your first tool step must be",
   "  run_command with that test command; do not edit until you have seen the",
   "  failure exit code and output. If the first run already exits 0, read the",
@@ -272,7 +283,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
 /**
  * @typedef {object} AgentRunResult
  * @property {string} text Final assistant answer ("" if the loop was cut off).
- * @property {"completed"|"max-steps"|"aborted"} stopReason
+ * @property {"completed"|"max-steps"|"aborted"|"failed"} stopReason
  * @property {AgentStep[]} steps
  * @property {Array<object>} messages Full transcript, replayable into another run.
  */
@@ -411,8 +422,13 @@ export class AgentLoop {
     let repeatedCount = 0;
     let toolNudgeCount = 0;
     let nearLimitNudged = false;
+    let consecutiveEmpty = 0;
+    let totalEvalCount = 0;
+    const runStarted = Date.now();
 
-    for (let index = 1; index <= this.maxSteps; index++) {
+    let paidSteps = 0;
+    while (paidSteps < this.maxSteps) {
+      const index = paidSteps + 1;
       if (signal?.aborted) {
         return { text: "", stopReason: "aborted", steps, messages };
       }
@@ -429,7 +445,7 @@ export class AgentLoop {
         messages = compacted;
       }
 
-      if (!nearLimitNudged && index >= this.maxSteps) {
+      if (!nearLimitNudged && paidSteps + 1 >= this.maxSteps) {
         nearLimitNudged = true;
         messages.push({ role: "user", content: TOOL_NUDGE_NEAR_LIMIT });
       }
@@ -443,45 +459,131 @@ export class AgentLoop {
         },
         {
           onParseError: ({ recovery, error }) => {
-            const step = {
+            const parseStep = {
               index,
               kind: "tool-parse-error",
               content: String(error?.message ?? "error parsing tool call"),
               toolCalls: [],
               recoveries: recovery,
             };
-            steps.push(step);
-            this.onStep?.(step);
+            steps.push(parseStep);
+            this.onStep?.(parseStep);
           },
         },
       );
+      totalEvalCount += raw?.eval_count ?? 0;
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
       messages.push(normalizeAssistantMessage(message));
 
       const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      const thinkingOnly = toolCalls.length === 0 && isThinkingOnlyResponse(message);
+
       if (toolCalls.length === 0) {
+        if (isEmptyAssistantResponse(message)) {
+          consecutiveEmpty += 1;
+          if (
+            shouldFailOnEmptyResponses({
+              goal,
+              steps,
+              consecutiveEmpty,
+            })
+          ) {
+            const diagnostic = formatZeroTokenDiagnostic({
+              totalEvalCount,
+              elapsedMs: Date.now() - runStarted,
+              model: this.client?.model,
+              baseUrl: this.client?.baseUrl,
+            });
+            const text =
+              synthesizeFinalAnswer({ goal, steps }) +
+              (diagnostic ? `\n\n${diagnostic}` : "");
+            const failStep = {
+              index,
+              kind: "failed",
+              content: text,
+              toolCalls: [],
+              diagnostic,
+            };
+            steps.push(failStep);
+            this.onStep?.(failStep);
+            return {
+              text,
+              stopReason: "failed",
+              steps,
+              messages,
+              diagnostic,
+            };
+          }
+          const recovery = emptyResponseRecoveryNudge({ goal, steps, consecutiveEmpty });
+          if (recovery) {
+            messages.push({ role: "user", content: recovery });
+            if (!thinkingOnly) paidSteps += 1;
+            continue;
+          }
+        } else {
+          consecutiveEmpty = 0;
+        }
+
         const answerText = textOf(message.content);
         const nudge = finalAnswerNudge({
           goal,
           answerText,
           steps,
           nudgeCount: toolNudgeCount,
+          consecutiveEmpty,
         });
         if (nudge) {
           toolNudgeCount += 1;
           messages.push({ role: "user", content: nudge });
+          if (!thinkingOnly) paidSteps += 1;
           continue;
         }
+        if (
+          shouldFailOnEmptyResponses({
+            goal,
+            steps,
+            consecutiveEmpty,
+          }) ||
+          (!String(answerText ?? "").trim() &&
+            goalNeedsSubstantiveTools(goal) &&
+            substantiveToolsUsed(steps).size === 0)
+        ) {
+          const diagnostic = formatZeroTokenDiagnostic({
+            totalEvalCount,
+            elapsedMs: Date.now() - runStarted,
+            model: this.client?.model,
+            baseUrl: this.client?.baseUrl,
+          });
+          const text =
+            synthesizeFinalAnswer({ goal, steps }) +
+            (diagnostic ? `\n\n${diagnostic}` : "");
+          const failStep = {
+            index,
+            kind: "failed",
+            content: text,
+            toolCalls: [],
+            diagnostic,
+          };
+          steps.push(failStep);
+          this.onStep?.(failStep);
+          return {
+            text,
+            stopReason: "failed",
+            steps,
+            messages,
+            diagnostic,
+          };
+        }
         const text = String(answerText ?? "").trim() || synthesizeFinalAnswer({ goal, steps });
-        const step = {
+        const finalStep = {
           index,
           kind: "final",
           content: text,
           toolCalls: [],
         };
-        steps.push(step);
-        this.onStep?.(step);
+        steps.push(finalStep);
+        this.onStep?.(finalStep);
         return {
           text,
           stopReason: "completed",
@@ -489,6 +591,8 @@ export class AgentLoop {
           messages,
         };
       }
+
+      consecutiveEmpty = 0;
 
       const stepKey = JSON.stringify(
         toolCalls.map((c) => [c?.function?.name, c?.function?.arguments]),
@@ -533,14 +637,14 @@ export class AgentLoop {
         });
       }
 
-      const step = {
+      const toolStep = {
         index,
         kind: "tool-calls",
         content: textOf(message.content),
         toolCalls: executed,
       };
-      steps.push(step);
-      this.onStep?.(step);
+      steps.push(toolStep);
+      this.onStep?.(toolStep);
 
       const stopNudge = alreadyVerifiedFinishNudge({
         goal,
@@ -559,6 +663,7 @@ export class AgentLoop {
           deliverableDriftNudge({ goal, steps });
         if (editNudge) messages.push({ role: "user", content: editNudge });
       }
+      paidSteps += 1;
     }
 
     // Out of steps: ask for a plain-text wrap-up (no tools offered) so the
@@ -582,7 +687,14 @@ export class AgentLoop {
       }
     }
     if (!text) text = synthesizeFinalAnswer({ goal, steps });
-    return { text: text ?? "", stopReason: "max-steps", steps, messages };
+    const diagnostic = formatZeroTokenDiagnostic({
+      totalEvalCount,
+      elapsedMs: Date.now() - runStarted,
+      model: this.client?.model,
+      baseUrl: this.client?.baseUrl,
+    });
+    if (diagnostic) text = `${text}\n\n${diagnostic}`;
+    return { text: text ?? "", stopReason: "max-steps", steps, messages, diagnostic };
   }
 }
 

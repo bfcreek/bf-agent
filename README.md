@@ -29,6 +29,28 @@ Product shape:
 
 No npm dependencies — the runtime uses only Node built-ins.
 
+## Install
+
+Published releases:
+
+```powershell
+npm install -g @halosoftworks/halo-agent
+halo-agent models
+halo-agent "what time is it right now?"
+```
+
+Try without installing:
+
+```powershell
+npx @halosoftworks/halo-agent "summarize README.md"
+```
+
+Or download the zip from [Explore](https://www.halosoftworks.com/explore#halo-agent) and use the `bin/` launchers below.
+
+halo-agent is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Halo Softworks EULA](https://halosoftworks.com/eula).
+
+From a git checkout, use `node src/cli.mjs` or the launchers in `bin/`.
+
 ## Quick start
 
 ```powershell
@@ -132,7 +154,7 @@ The same machinery is embeddable — `createAgent()` wires up the client,
 builtin tools, context-built system prompt, and compaction in one call:
 
 ```js
-import { createAgent } from "halo-agent";
+import { createAgent } from "@halosoftworks/halo-agent";
 
 const agent = await createAgent({
   model: "qwen3-coder:30b",
@@ -209,6 +231,22 @@ stop conditions: no tool calls, max steps, cancellation
 ```
 
 See `ROADMAP.md` for what is built and what is next.
+
+## Release (maintainers)
+
+Staging (R2 zip upload only — no npm):
+
+```powershell
+.\scripts\release\publish-release.ps1 -BumpPatch
+```
+
+Production (after [admin promote](https://www.halosoftworks.com/admin/releases)):
+
+```powershell
+.\scripts\release\publish-production.ps1
+```
+
+`publish-production.ps1` verifies production `latest.yml` matches `package.json`, then runs `npm publish`. Credentials: `scripts/release/.env.release` (`R2_*` for staging, `NPM_TOKEN` for production npm).
 
 ## Tests
 

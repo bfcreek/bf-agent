@@ -1,9 +1,26 @@
 {
-  "name": "halo-agent",
+  "name": "@halosoftworks/halo-agent",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Local agent runtime for Ollama: plan/act/observe loop, tools, and an OpenAI-compatible facade.",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Halo Softworks",
+  "homepage": "https://www.halosoftworks.com/explore#halo-agent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/froggy523/halo-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/froggy523/halo-agent/issues"
+  },
+  "keywords": [
+    "ollama",
+    "agent",
+    "cli",
+    "mcp",
+    "openai",
+    "local-ai"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -13,6 +30,18 @@
   },
   "bin": {
     "halo-agent": "src/cli.mjs"
+  },
+  "files": [
+    "src/",
+    "bin/halo-agent.cmd",
+    "bin/halo-agent.ps1",
+    "bin/halo-agent.sh",
+    "README.md",
+    "LIMITATIONS.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "node src/cli.mjs",
@@ -28,10 +57,13 @@
     "bench:tb:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb.ps1",
     "bench:tb:mini:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb-mini.ps1",
     "bench:hv-tb": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/hv-bench-tb.ps1",
+    "bench:ah-train": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ah-train.ps1",
     "release:build": "node scripts/release/build-release-zip.cjs",
     "release:stage": "node scripts/release/stage-release-artifacts.cjs",
     "release:upload": "node scripts/release/upload-r2-release.cjs",
-    "release:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-release.ps1"
+    "release:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-release.ps1",
+    "release:npm": "node scripts/release/publish-npm.cjs",
+    "release:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-production.ps1"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.888.0"

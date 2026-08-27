@@ -40,7 +40,16 @@ const RELEASE_TARGETS = {
 };
 
 /** Paths included in the release zip (relative to repo root). */
-const RELEASE_INCLUDE_PATHS = ["package.json", "src", "bin", "README.md", "LIMITATIONS.md"];
+const RELEASE_INCLUDE_PATHS = [
+    "package.json",
+    "src",
+    "bin/halo-agent.cmd",
+    "bin/halo-agent.ps1",
+    "bin/halo-agent.sh",
+    "README.md",
+    "LIMITATIONS.md",
+    "LICENSE",
+];
 
 /** @param {string} text */
 function parseSimpleYaml(text) {

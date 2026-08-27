@@ -5,6 +5,7 @@ node_modules/
 evals-*.json
 bench-*.json
 bench-*.md
+ah-train-log.md
 bench-test.json
 bench-test.md
 __pycache__/

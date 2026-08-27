@@ -184,6 +184,12 @@ const TASK_HINT_RULES = [
       "For numeric artifacts, exit 0 plus file-exists is not enough. Sanity-check values against stated domain ranges (e.g. graphene G≈1580 cm⁻¹, 2D≈2700, narrow gamma) before finishing. Huge gamma, negative multi-million offsets, or hard-coded zeros mean the fit is wrong — tighten bounds and retry rather than deleting required parameters.",
   },
   {
+    id: "polyglot",
+    test: /\bpolyglot\b|\bmain\.rs\b.{0,120}\b(?:rustc|g\+\+|c\+\+)\b/i,
+    constraint:
+      "Mandatory first actions: run_command mkdir -p polyglot (or the named directory), then write_file the named main source (e.g. polyglot/main.rs) with a minimal scaffold. Internal thinking/reasoning does not create files — the first model turn after planning must call write_file or run_command, not an empty response.",
+  },
+  {
     id: "pinned-package",
     test: /\b(must use|use the|revision|sentence.?transformers|mteb|huggingface)\b|\bpip install\s+[\w.-]+==/i,
     constraint:
@@ -327,6 +333,25 @@ export const TOOL_NUDGE_NO_TOOLS = [
   "to complete the work before giving your final answer.",
 ].join(" ");
 
+export const TOOL_NUDGE_EMPTY_RESPONSE = [
+  "Your last response had no tool calls and no final answer.",
+  "For artifact-creation tasks, internal thinking alone does not write files or run commands.",
+  "Call write_file or run_command now — do not send another empty turn.",
+].join(" ");
+
+export const TOOL_NUDGE_FIRST_TOOL_ACTION = [
+  "This task requires creating or changing files on disk.",
+  "Thinking/reasoning alone never satisfies artifact-creation — your next response MUST be a tool call",
+  "(write_file or run_command), not another empty assistant turn.",
+].join(" ");
+
+export const TOOL_NUDGE_POLYGLOT_BOOTSTRAP = [
+  "Bootstrap now — do not reason further without tools:",
+  "1) run_command: mkdir -p polyglot",
+  "2) write_file polyglot/main.rs with a minimal Fibonacci scaffold (you can refine after).",
+  "Then verify with the instruction's rustc and g++ commands.",
+].join(" ");
+
 export const TOOL_NUDGE_EMPTY_ANSWER = [
   "Your answer was empty. Use tools to gather information or make the required changes,",
   "then reply in plain text with your final answer.",
@@ -458,6 +483,135 @@ export const TOOL_NUDGE_DELIVERABLE_DRIFT = [
   "Before the final answer, read_file that path and confirm your answer matches",
   "on-disk contents (no answer/disk drift).",
 ].join(" ");
+
+/** Max consecutive empty assistant turns (no content, no tool calls) before hard fail. */
+export const MAX_CONSECUTIVE_EMPTY_RESPONSES = 2;
+
+/**
+ * Assistant message with no tool calls and no public content.
+ * @param {object} message
+ * @returns {boolean}
+ */
+export function isEmptyAssistantResponse(message) {
+  const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+  if (toolCalls.length > 0) return false;
+  return !String(typeof message?.content === "string" ? message.content : "").trim();
+}
+
+/**
+ * Model returned only internal thinking with no tool calls or answer text.
+ * @param {object} message
+ * @returns {boolean}
+ */
+export function isThinkingOnlyResponse(message) {
+  if (!isEmptyAssistantResponse(message)) return false;
+  return String(message?.thinking ?? "").trim().length > 0;
+}
+
+/**
+ * Nudge after an empty model turn. Polyglot / deliverable tasks get a concrete bootstrap.
+ * @param {object} input
+ * @param {string} input.goal
+ * @param {Array<{toolCalls?: Array<object>}>} input.steps
+ * @param {number} input.consecutiveEmpty
+ * @returns {string|null}
+ */
+export function emptyResponseRecoveryNudge({ goal, steps, consecutiveEmpty }) {
+  if (consecutiveEmpty < 1) return null;
+  const bootstrap = firstTurnBootstrapNudge({ goal, steps });
+  if (bootstrap) return bootstrap;
+  if (!goalNeedsSubstantiveTools(goal)) return null;
+  return TOOL_NUDGE_FIRST_TOOL_ACTION;
+}
+
+/**
+ * Concrete bootstrap when the first substantive turns produced no tool calls.
+ * @param {object} input
+ * @param {string} input.goal
+ * @param {Array<{toolCalls?: Array<object>, kind?: string}>} input.steps
+ * @returns {string|null}
+ */
+export function firstTurnBootstrapNudge({ goal, steps } = {}) {
+  const calls = flattenToolCalls(steps);
+  if (calls.length > 0) return null;
+  const actionSteps = (steps ?? []).filter((s) => s.kind !== "plan");
+  if (actionSteps.length > 2) return null;
+
+  const text = String(goal ?? "");
+  const hints = detectTaskHints(text);
+  if (hints.some((h) => h.id === "polyglot") || /\bpolyglot\b/i.test(text)) {
+    const dir =
+      text.match(/\b([\w.-]+)\/main\.(?:rs|c|py|cpp)\b/i)?.[1] ??
+      (/\bpolyglot\b/i.test(text) ? "polyglot" : null);
+    const file =
+      text.match(/\b([\w.-]+\/main\.(?:rs|c|py|cpp))\b/i)?.[1] ??
+      (dir ? `${dir}/main.rs` : null);
+    if (dir && file) {
+      return [
+        `Bootstrap now — do not reason further without tools:`,
+        `1) run_command: mkdir -p ${dir}`,
+        `2) write_file ${file} with a minimal scaffold (refine after).`,
+        `Then run the instruction's compile/smoke commands.`,
+      ].join(" ");
+    }
+    return TOOL_NUDGE_POLYGLOT_BOOTSTRAP;
+  }
+
+  const deliverables = extractNamedDeliverables(text).filter(isCreatedFileDeliverable);
+  if (deliverables.length > 0 || hints.some((h) => h.id === "artifact-create" || h.id === "implement")) {
+    if (deliverables[0]) {
+      return [
+        TOOL_NUDGE_FIRST_TOOL_ACTION,
+        `Start with write_file ${deliverables[0]} (minimal stub is fine), then iterate.`,
+      ].join(" ");
+    }
+    return TOOL_NUDGE_FIRST_TOOL_ACTION;
+  }
+  return null;
+}
+
+/**
+ * Hard-fail when the model stalls on empty turns and required work is still missing.
+ * @param {object} input
+ * @param {string} input.goal
+ * @param {Array<{toolCalls?: Array<object>}>} input.steps
+ * @param {number} input.consecutiveEmpty
+ * @returns {boolean}
+ */
+export function shouldFailOnEmptyResponses({ goal, steps, consecutiveEmpty }) {
+  if (consecutiveEmpty < MAX_CONSECUTIVE_EMPTY_RESPONSES) return false;
+  if (!goalNeedsSubstantiveTools(goal)) return false;
+  const calls = flattenToolCalls(steps);
+  if (substantiveToolsUsed(steps).size > 0 && missingRequiredVerification(goal, calls).length === 0) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Human-readable note when Ollama returned zero completion tokens for a long run.
+ * @param {object} input
+ * @param {number} input.totalEvalCount
+ * @param {number} input.elapsedMs
+ * @param {string} [input.model]
+ * @param {string} [input.baseUrl]
+ * @returns {string|null}
+ */
+export function formatZeroTokenDiagnostic({
+  totalEvalCount,
+  elapsedMs,
+  model,
+  baseUrl,
+} = {}) {
+  if (totalEvalCount > 0) return null;
+  if (elapsedMs < 30_000) return null;
+  const modelLabel = model ? `model '${model}'` : "the model";
+  const host = baseUrl ? ` via ${baseUrl}` : "";
+  return (
+    `Ollama returned 0 completion tokens (${modelLabel}${host}) after ${Math.round(elapsedMs / 1000)}s. ` +
+    "The backend may have returned malformed or thinking-only completions — check routing, context size, and tool-call support."
+  );
+}
 
 /**
  * After an ambiguous edit_file (or a non-identifier replace_all that hit
@@ -1665,6 +1819,15 @@ export function completionVerifyNudge({ goal, answerText, steps, nudgeCount }) {
  * @returns {string|null}
  */
 export function finalAnswerNudge(input) {
+  if (
+    shouldFailOnEmptyResponses({
+      goal: input.goal,
+      steps: input.steps,
+      consecutiveEmpty: input.consecutiveEmpty ?? 0,
+    })
+  ) {
+    return null;
+  }
   return prematureFinalNudge(input) ?? completionVerifyNudge(input) ?? emptyFinalAnswerNudge(input);
 }
 
