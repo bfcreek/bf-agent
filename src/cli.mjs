@@ -414,7 +414,7 @@ async function runInteractiveSession({
 
   const sessionLabel = sessionName ? ` | session: ${sessionName}` : "";
   console.error(
-    `halo-agent interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
+    `Halo Softworks halo-agent v${VERSION} | interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
   );
   console.error("Enter a prompt, or /help for commands. /quit to exit.");
   if (priorSession && !options.quiet) {

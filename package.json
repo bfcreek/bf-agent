@@ -62,6 +62,7 @@
     "release:stage": "node scripts/release/stage-release-artifacts.cjs",
     "release:upload": "node scripts/release/upload-r2-release.cjs",
     "release:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-release.ps1",
+    "release:ha": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ha-release.ps1",
     "release:npm": "node scripts/release/publish-npm.cjs",
     "release:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-production.ps1"
   },
