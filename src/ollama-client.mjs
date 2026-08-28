@@ -274,7 +274,8 @@ export class OllamaClient {
 
   /**
    * Model details via Ollama `/api/show` — notably `capabilities`, which
-   * lists "tools" for models whose template supports native tool calling.
+   * lists "tools", "thinking", and "vision" for models whose template
+   * supports those features.
    *
    * @param {object} request
    * @param {string} request.model

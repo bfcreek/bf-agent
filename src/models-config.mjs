@@ -30,13 +30,17 @@ preset: auto
 # Default task difficulty for a single CLI run (0=safety … 6=hardest).
 default-tier: ${DEFAULT_TASK_TIER}
 
-# Optional explicit bands (override preset):
+# Optional explicit bands (override preset).
+# \`vision\` is used when the request includes image attachments.
 # bands:
 #   - through-tier: 1
-#     model: glm-4.6:cloud
+#     model: qwen3-coder:14b
+#     vision: devstral-small-2
 #   - through-tier: 3
-#     model: kimi-k2.6:cloud
+#     model: qwen3-coder:30b
+#     vision: devstral-small-2
 #   - model: kimi-k2.7-code:cloud
+#     vision: kimi-k2.7-code:cloud
 `;
 
 /** @returns {string} */
@@ -151,6 +155,7 @@ export async function ensureModelsConfigFile() {
  * @param {string|null} [options.tierPreset]
  * @param {number|null} [options.taskTier]
  * @param {string} options.baseUrl
+ * @param {boolean} [options.requireVision] Prefer each band's `vision` model.
  * @param {{listModelsDetailed?: Function, show?: Function}} client
  * @param {ReturnType<typeof normalizeModelsConfigValues>["values"]} [modelsConfig]
  * @param {boolean} [modelsConfigExists]
@@ -161,8 +166,10 @@ export async function resolveCliModel(
   modelsConfig = normalizeModelsConfigValues({}).values,
   modelsConfigExists = false,
 ) {
+  const requireVision = options.requireVision === true;
+
   if (options.model && options.model !== "auto" && options.model !== "tier") {
-    return resolveModelAuto({ requested: options.model, client });
+    return resolveModelAuto({ requested: options.model, client, requireVision });
   }
 
   const tierModels = await resolveEffectiveTierModels({
@@ -179,12 +186,12 @@ export async function resolveCliModel(
     (options.model === "auto" && modelsConfigExists);
 
   if (!useTier || !tierModels?.length) {
-    return resolveModelAuto({ requested: "auto", client });
+    return resolveModelAuto({ requested: "auto", client, requireVision });
   }
 
   const taskTier = options.taskTier ?? modelsConfig.defaultTier ?? DEFAULT_TASK_TIER;
-  const bandModel = resolveTierModel(taskTier, tierModels, "auto");
-  return resolveModelAuto({ requested: bandModel, client });
+  const bandModel = resolveTierModel(taskTier, tierModels, "auto", { requireVision });
+  return resolveModelAuto({ requested: bandModel, client, requireVision });
 }
 
 export { openConfigInEditor };

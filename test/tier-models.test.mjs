@@ -23,22 +23,47 @@ test("resolveTierModel maps scenario tiers to configured bands", () => {
   assert.equal(resolveTierModel(2, null, "fallback"), "fallback");
 });
 
-test("uniqueTierModels preserves band order without duplicates", () => {
+test("resolveTierModel uses band vision models when requireVision", () => {
   const bands = [
-    { throughTier: 1, model: "small" },
-    { throughTier: 3, model: "medium" },
-    { model: "medium" },
+    { throughTier: 1, model: "small", vision: "small-vl" },
+    { throughTier: 3, model: "medium", vision: "medium-vl" },
+    { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
   ];
-  assert.deepEqual(uniqueTierModels(bands), ["small", "medium"]);
+  assert.equal(resolveTierModel(0, bands, "fallback", { requireVision: true }), "small-vl");
+  assert.equal(resolveTierModel(2, bands, "fallback", { requireVision: true }), "medium-vl");
+  assert.equal(resolveTierModel(5, bands, "fallback", { requireVision: true }), "kimi-k2.7-code:cloud");
+  // No vision on a band → fall back to primary model.
+  assert.equal(
+    resolveTierModel(0, [{ throughTier: 1, model: "text-only" }], "fallback", { requireVision: true }),
+    "text-only",
+  );
 });
 
-test("normalizeTierModels accepts through-tier from user YAML", () => {
+test("uniqueTierModels includes vision models without duplicates", () => {
+  const bands = [
+    { throughTier: 1, model: "small", vision: "vl" },
+    { throughTier: 3, model: "medium", vision: "vl" },
+    { model: "medium" },
+  ];
+  assert.deepEqual(uniqueTierModels(bands), ["small", "vl", "medium"]);
+});
+
+test("normalizeTierModels accepts vision from user YAML", () => {
   const bands = normalizeTierModels([
-    { "through-tier": 1, model: "glm-4.6:cloud" },
+    { "through-tier": 1, model: "qwen3-coder:14b", vision: "devstral-small-2" },
     { model: "kimi-k2.7-code:cloud" },
   ]);
   assert.equal(bands[0].throughTier, 1);
-  assert.equal(bands[1].model, "kimi-k2.7-code:cloud");
+  assert.equal(bands[0].vision, "devstral-small-2");
+  assert.equal(bands[1].vision, undefined);
+});
+
+test("TIER_PRESETS include vision models on every band", () => {
+  for (const [name, bands] of Object.entries(TIER_PRESETS)) {
+    for (const band of bands) {
+      assert.ok(band.vision, `${name} band missing vision: ${JSON.stringify(band)}`);
+    }
+  }
 });
 
 test("getTierPresetBands returns cloud-first routing without local models", () => {

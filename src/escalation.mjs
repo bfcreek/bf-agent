@@ -27,6 +27,8 @@ const SIGNAL_WEIGHTS = {
   searchLoop: 2,
   budgetPressure: 2,
   budgetCritical: 4,
+  hollowCompletion: 4,
+  failedCommands: 4,
 };
 
 /** Fraction of the step budget spent before outstanding work counts as struggle. */
@@ -44,6 +46,10 @@ export const BUDGET_CRITICAL_RATIO = 0.85;
  * @property {boolean} searchLoop
  * @property {number} [budgetPressure] Fraction of the step budget consumed.
  * @property {boolean} [workOutstanding] Acceptance contract still unsatisfied.
+ * @property {boolean} [hollowCompletion] Work goal with no substantive tools yet.
+ * @property {number} [paidSteps] Paid model turns so far.
+ * @property {number} [consecutiveFailedRuns] Trailing non-diagnostic command failures.
+ * @property {boolean} [verifyOutstandingOnly] Only named verify/work commands remain.
  */
 
 /**
@@ -61,12 +67,26 @@ export function computeStruggleScore(state) {
   if (state.searchLoop) score += SIGNAL_WEIGHTS.searchLoop;
 
   // Burning through the step budget with contract work still outstanding is the
-  // clearest sign the current model will not finish. The other signals only
-  // catch a loop that is visibly stuck, not one that is steadily going nowhere.
-  if (state.workOutstanding) {
+  // clearest sign the current model will not finish. Skip when the only gap is
+  // a missing verify step — climbing the ladder will not invent that tool call;
+  // the acceptance nudge is the right lever.
+  if (state.workOutstanding && !state.verifyOutstandingOnly) {
     const pressure = state.budgetPressure ?? 0;
     if (pressure >= BUDGET_CRITICAL_RATIO) score += SIGNAL_WEIGHTS.budgetCritical;
     else if (pressure >= BUDGET_PRESSURE_RATIO) score += SIGNAL_WEIGHTS.budgetPressure;
+  }
+  // Calmly producing nothing is more valuable to escalate than a visible loop.
+  // Wait for at least one empty reply or two paid steps so turn 1 can still try.
+  if (
+    state.hollowCompletion &&
+    ((state.paidSteps ?? 0) >= 2 || (state.consecutiveEmpty ?? 0) >= 1)
+  ) {
+    score += SIGNAL_WEIGHTS.hollowCompletion;
+  }
+  // Tools that keep failing are "calmly producing nothing" — escalate rather
+  // than waiting for the step budget to drain.
+  if (state.workOutstanding && (state.consecutiveFailedRuns ?? 0) >= 2) {
+    score += SIGNAL_WEIGHTS.failedCommands;
   }
   return score;
 }
@@ -307,6 +327,7 @@ export class EscalationController {
  * @param {string} options.requested
  * @param {{show?: Function, listModelsDetailed: Function}} options.client
  * @param {boolean} [options.escalationEnabled]
+ * @param {boolean} [options.requireVision]
  * @returns {Promise<{model: string, warnings: string[], ladder: Array<{name: string, paramsB: number, cloud: boolean}>}>}
  */
 export async function resolveModelWithEscalation({
@@ -315,13 +336,21 @@ export async function resolveModelWithEscalation({
   escalationEnabled = true,
   totalMemBytes,
   vramBytes,
+  requireVision = false,
 }) {
   const warnings = [];
   const ladder = await buildModelLadder({ client, totalMemBytes, vramBytes });
 
-  if (!escalationEnabled || requested !== "auto") {
+  if (!escalationEnabled || requested !== "auto" || requireVision) {
+    // Image turns need a vision model up front — do not start on a text-only
+    // weak local and hope escalation finds vision later.
     const { resolveModelAuto } = await import("./model-routing.mjs");
-    const routed = await resolveModelAuto({ requested, client, totalMemBytes });
+    const routed = await resolveModelAuto({
+      requested,
+      client,
+      totalMemBytes,
+      requireVision,
+    });
     return { ...routed, ladder };
   }
 
@@ -332,6 +361,6 @@ export async function resolveModelWithEscalation({
   }
 
   const { resolveModelAuto } = await import("./model-routing.mjs");
-  const routed = await resolveModelAuto({ requested, client, totalMemBytes });
+  const routed = await resolveModelAuto({ requested, client, totalMemBytes, requireVision });
   return { ...routed, ladder };
 }

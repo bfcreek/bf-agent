@@ -3,12 +3,17 @@ import { test } from "node:test";
 
 import {
   assertToolCapable,
+  assertVisionCapable,
   detectToolCapable,
+  detectVisionCapable,
   isCloudModel,
   isLikelyThinkingCapable,
   isLikelyToolCapable,
+  isLikelyVisionCapable,
   listClassifiedModels,
   listClassifiedModelsDetected,
+  messageHasImages,
+  messagesHaveImages,
   MIN_EFFECTIVE_PARAMS_B,
   ModelRoutingError,
   parseParamsBillions,
@@ -413,4 +418,151 @@ test("listClassifiedModelsDetected groups by probed capabilities", async () => {
   assert.deepEqual(classified.compliant, ["brand-new-agent:7b"]);
   assert.deepEqual(classified.notCompliant, ["llama3.2:latest"]);
   assert.deepEqual(classified.unknown, ["some-brand-new-model:7b"]);
+});
+
+test("known vision families are detected; unknown stay null", () => {
+  for (const name of ["llava:7b", "gemma3:12b", "qwen2.5vl:32b", "minicpm-v:latest"]) {
+    assert.equal(isLikelyVisionCapable(name), true, name);
+  }
+  assert.equal(isLikelyVisionCapable("qwen3:14b"), null);
+  assert.equal(isLikelyVisionCapable("llama3.2:latest"), null);
+});
+
+test("assertVisionCapable accepts known vision models and rejects unknown", () => {
+  assertVisionCapable("gemma3:12b");
+  assert.throws(() => assertVisionCapable("qwen3:14b"), {
+    name: "ModelRoutingError",
+    message: /not a known vision-capable family/,
+  });
+});
+
+test("detectVisionCapable trusts /api/show over the family list", async () => {
+  const client = makeShowClient({
+    "coder-with-eyes:14b": ["completion", "tools", "vision"],
+    "gemma3:12b": ["completion"], // family says vision; probe says no
+  });
+  assert.equal(await detectVisionCapable(client, "coder-with-eyes:14b"), true);
+  assert.equal(await detectVisionCapable(client, "gemma3:12b"), false);
+});
+
+test("messagesHaveImages detects OpenAI parts and Ollama images arrays", () => {
+  assert.equal(messageHasImages({ role: "user", content: "hi" }), false);
+  assert.equal(
+    messageHasImages({
+      role: "user",
+      content: [
+        { type: "text", text: "look" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,aaaa" } },
+      ],
+    }),
+    true,
+  );
+  assert.equal(
+    messageHasImages({ role: "user", content: "see this", images: ["YWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ=="] }),
+    true,
+  );
+  assert.equal(
+    messagesHaveImages([
+      { role: "system", content: "sys" },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/jpeg;base64,bb" } }] },
+    ]),
+    true,
+  );
+});
+
+const TOOLS_VISION = ["completion", "tools", "vision"];
+const THINKING_TOOLS_VISION = ["completion", "tools", "thinking", "vision"];
+
+test("suggestModel with requireVision picks tools+vision and prefers thinking", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+    {
+      name: "devstral-small-2:latest",
+      sizeBytes: 15 * GB,
+      parameterSize: "24B",
+      capabilities: TOOLS_VISION,
+    },
+    {
+      name: "kimi-vision:cloud",
+      sizeBytes: 400,
+      parameterSize: "100B",
+      capabilities: THINKING_TOOLS_VISION,
+    },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 64 * GB,
+    requireVision: true,
+  });
+  // Local tools+vision beats cloud even without thinking.
+  assert.equal(picked.model, "devstral-small-2:latest");
+  assert.equal(picked.cloud, false);
+  assert.match(picked.reason, /tools \+ vision/);
+});
+
+test("suggestModel with requireVision prefers thinking among vision candidates", async () => {
+  const client = makeAutoClient([
+    {
+      name: "eyes-only:14b",
+      sizeBytes: 9 * GB,
+      parameterSize: "14B",
+      capabilities: TOOLS_VISION,
+    },
+    {
+      name: "eyes-think:20b",
+      sizeBytes: 12 * GB,
+      parameterSize: "20B",
+      capabilities: THINKING_TOOLS_VISION,
+    },
+  ]);
+  const picked = await suggestModel({
+    client,
+    models: await client.listModelsDetailed(),
+    totalMemBytes: 64 * GB,
+    requireVision: true,
+  });
+  assert.equal(picked.model, "eyes-think:20b");
+});
+
+test("resolveModelAuto rejects an explicit model without vision when requireVision", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+    {
+      name: "devstral-small-2:latest",
+      sizeBytes: 15 * GB,
+      parameterSize: "24B",
+      capabilities: TOOLS_VISION,
+    },
+  ]);
+  await assert.rejects(
+    () =>
+      resolveModelAuto({
+        requested: "qwen3:14b",
+        client,
+        totalMemBytes: 64 * GB,
+        requireVision: true,
+      }),
+    { name: "ModelRoutingError", message: /does not support images/ },
+  );
+});
+
+test("resolveModelAuto auto-selects a vision model when requireVision", async () => {
+  const client = makeAutoClient([
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+    {
+      name: "devstral-small-2:latest",
+      sizeBytes: 15 * GB,
+      parameterSize: "24B",
+      capabilities: TOOLS_VISION,
+    },
+  ]);
+  const routed = await resolveModelAuto({
+    requested: "auto",
+    client,
+    totalMemBytes: 64 * GB,
+    requireVision: true,
+  });
+  assert.equal(routed.model, "devstral-small-2:latest");
+  assert.match(routed.warnings[0], /tools \+ vision/);
 });

@@ -2,7 +2,23 @@
  * Structured JSON + descriptive markdown for recognized-benchmark runs.
  */
 
+import {
+  buildArchitectureInsights,
+  formatInsightsConsole,
+  formatInsightsMarkdown,
+} from "../patterns.mjs";
+
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
+
+/** Closed-loop flags the Harbor adapter actually runs with. */
+export const HARBOR_RUN_FLAGS = {
+  planning: true,
+  memory: true,
+  acceptance: true,
+  critique: true,
+  escalation: true,
+  escalationCloud: false,
+};
 
 /**
  * @param {object} input
@@ -10,7 +26,10 @@ const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 export function buildRecognizedReport(input) {
   const tasks = input.tasks ?? [];
   const overall = input.overall ?? {};
-  return {
+  const flags = input.flags ?? HARBOR_RUN_FLAGS;
+  const maxSteps = input.maxSteps ?? null;
+
+  const report = {
     version: 1,
     kind: "recognized",
     suite: input.suite,
@@ -26,6 +45,8 @@ export function buildRecognizedReport(input) {
     environment: input.environment ?? {},
     notes: input.notes ?? [],
     harborJobDir: input.harborJobDir ?? null,
+    maxSteps,
+    flags,
     overall: {
       tasks: overall.tasks ?? tasks.length,
       resolved: overall.resolved ?? 0,
@@ -34,6 +55,9 @@ export function buildRecognizedReport(input) {
       judged: overall.judged ?? 0,
       judgeAvg: overall.judgeAvg ?? null,
       totalSeconds: overall.totalSeconds ?? 0,
+      avgSteps: overall.avgSteps ?? null,
+      cloudRate: overall.cloudRate ?? null,
+      avgEscalations: overall.avgEscalations ?? null,
     },
     tasks: tasks.map((task) => ({
       name: task.name,
@@ -43,16 +67,29 @@ export function buildRecognizedReport(input) {
       exception: task.exception,
       seconds: task.seconds,
       trialDir: task.trialDir,
-      score: task.verdict?.score ?? null,
-      grade: task.verdict?.grade ?? null,
-      summary: task.verdict?.summary ?? null,
-      strengths: task.verdict?.strengths ?? [],
-      weaknesses: task.verdict?.weaknesses ?? [],
-      agentImprovements: task.verdict?.agentImprovements ?? [],
+      score: task.verdict?.score ?? task.score ?? null,
+      grade: task.verdict?.grade ?? task.grade ?? null,
+      summary: task.verdict?.summary ?? task.summary ?? null,
+      strengths: task.verdict?.strengths ?? task.strengths ?? [],
+      weaknesses: task.verdict?.weaknesses ?? task.weaknesses ?? [],
+      agentImprovements: task.verdict?.agentImprovements ?? task.agentImprovements ?? [],
       judgeError: task.judgeError ?? null,
+      steps: task.steps ?? task.stepCount ?? 0,
+      stopReason: task.stopReason ?? null,
+      escalationCount: task.escalationCount ?? 0,
+      cloudUsed: task.cloudUsed ?? false,
+      verificationPassed: task.verificationPassed ?? null,
     })),
     recommendations: collectRecommendations(tasks),
   };
+
+  report.architectureInsights = buildArchitectureInsights(report, {
+    history: input.history ?? [],
+    flags,
+    maxSteps,
+  });
+
+  return report;
 }
 
 /**
@@ -127,6 +164,12 @@ export function formatRecognizedMarkdown(report) {
     lines.push("");
   }
 
+  if (report.architectureInsights?.length) {
+    lines.push(formatInsightsMarkdown(report.architectureInsights));
+  } else if (Array.isArray(report.architectureInsights)) {
+    lines.push(formatInsightsMarkdown([]));
+  }
+
   return lines.join("\n");
 }
 
@@ -162,6 +205,10 @@ export function formatRecognizedConsole(report) {
     for (const rec of report.recommendations.slice(0, 8)) {
       lines.push(`  [${rec.priority}] ${rec.area}: ${rec.suggestion}`);
     }
+  }
+  const insightBlock = formatInsightsConsole(report.architectureInsights ?? []);
+  if (insightBlock) {
+    lines.push("", insightBlock.trimEnd());
   }
   lines.push(bar);
   return lines.join("\n");

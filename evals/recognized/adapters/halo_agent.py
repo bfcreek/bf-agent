@@ -111,7 +111,7 @@ class HaloAgent(BaseInstalledAgent):
         cmd = (
             "set -uo pipefail; "
             f"node {shlex.quote(CLI_PATH)} "
-            f"--mode agent --quiet --no-index --no-plan "
+            f"--mode agent --quiet --no-index "
             f"--session harbor --cwd \"$PWD\" "
             f"--model {shlex.quote(model)} "
             f"--base-url {shlex.quote(self._base_url)} "

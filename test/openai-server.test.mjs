@@ -6,10 +6,12 @@ import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /** Client that replays scripted assistant messages and records requests. */
 class FakeClient {
-  constructor(script, { models, streamPieces } = {}) {
+  constructor(script, { models, streamPieces, capabilitiesByModel, detailedModels } = {}) {
     this.script = [...script];
     this.calls = [];
     this.models = models;
+    this.capabilitiesByModel = capabilitiesByModel;
+    this.detailedModels = detailedModels;
     /** When true, chatStream splits content into small onDelta pieces. */
     this.streamPieces = streamPieces === true;
   }
@@ -40,6 +42,20 @@ class FakeClient {
   async listModels() {
     if (!this.models) throw new Error("no models endpoint");
     return this.models;
+  }
+
+  async listModelsDetailed() {
+    if (this.detailedModels) return this.detailedModels;
+    if (this.models) {
+      return this.models.map((name) => ({ name, sizeBytes: 0, parameterSize: "14B" }));
+    }
+    throw new Error("no models endpoint");
+  }
+
+  async show({ model }) {
+    const capabilities = this.capabilitiesByModel?.[model];
+    if (!capabilities) throw new Error(`model '${model}' not found`);
+    return { capabilities };
   }
 }
 
@@ -332,4 +348,117 @@ test("unknown routes get a 404", async () => {
 
   const response = await fetch(`${baseUrl}/v1/nope`);
   assert.equal(response.status, 404);
+});
+
+const TINY_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+test("image attachments are forwarded as Ollama images and keep a vision model", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "a red pixel" }], {
+    capabilitiesByModel: {
+      "devstral-small-2:latest": ["completion", "tools", "vision"],
+      "test-model": ["completion", "tools"],
+    },
+    detailedModels: [
+      {
+        name: "devstral-small-2:latest",
+        sizeBytes: 15e9,
+        parameterSize: "24B",
+      },
+      { name: "test-model", sizeBytes: 2e9, parameterSize: "3B" },
+    ],
+  });
+  await startServer(client, { defaultModel: "test-model" });
+
+  const response = await postChat({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what color?" },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${TINY_PNG_B64}` },
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.model, "devstral-small-2:latest");
+  assert.equal(body.choices[0].message.content, "a red pixel");
+
+  const userMsg = client.calls[0].messages.find((m) => m.role === "user");
+  assert.equal(userMsg.content.includes("what color?"), true);
+  assert.deepEqual(userMsg.images, [TINY_PNG_B64]);
+});
+
+test("pinned model without vision is rejected when images are attached", async () => {
+  const client = new FakeClient([], {
+    capabilitiesByModel: {
+      "llama3.2:latest": ["completion", "tools"],
+    },
+  });
+  await startServer(client);
+
+  const response = await postChat({
+    model: "llama3.2:latest",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "describe" },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${TINY_PNG_B64}` },
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.match(body.error.message, /does not support images/);
+});
+
+test("image turns prefer the tier band vision model when configured", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "seen" }], {
+    capabilitiesByModel: {
+      "qwen3-coder:14b": ["completion", "tools", "thinking"],
+      "eyes:14b": ["completion", "tools", "vision"],
+      "test-model": ["completion", "tools"],
+    },
+    detailedModels: [
+      { name: "qwen3-coder:14b", sizeBytes: 9e9, parameterSize: "14B" },
+      { name: "eyes:14b", sizeBytes: 9e9, parameterSize: "14B" },
+      { name: "test-model", sizeBytes: 2e9, parameterSize: "3B" },
+    ],
+  });
+  await startServer(client, {
+    defaultModel: "test-model",
+    defaultTier: 1,
+    tierModels: [
+      { throughTier: 1, model: "qwen3-coder:14b", vision: "eyes:14b" },
+      { model: "qwen3-coder:14b", vision: "eyes:14b" },
+    ],
+  });
+
+  const response = await postChat({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${TINY_PNG_B64}` },
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.model, "eyes:14b");
 });

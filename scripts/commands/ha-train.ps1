@@ -1,14 +1,16 @@
-# /ah-train - Terminal-Bench training iteration(s): 1 random TB task + recommendations plan.
+# /ha-train - Terminal-Bench training iteration(s): random TB sample + architecture-pattern plan.
 #
 # Usage (from repo root):
-#   .\scripts\commands\ah-train.ps1                    # one iteration (exit 0 even if bench/judge failed)
-#   .\scripts\commands\ah-train.ps1 -Iterations 100    # bench+plan loop; continues on any failure
-#   .\scripts\commands\ah-train.ps1 -Iterations 100 -StartFrom 12
-#   .\scripts\commands\ah-train.ps1 -Seed 42
-#   .\scripts\commands\ah-train.ps1 -SkipBench
-#   .\scripts\commands\ah-train.ps1 -DryRun
+#   .\scripts\commands\ha-train.ps1                    # one iteration, 5 random TB tasks (exit 0 even if bench/judge failed)
+#   .\scripts\commands\ha-train.ps1 -Count 3           # 3-task sample
+#   .\scripts\commands\ha-train.ps1 -Iterations 100    # bench+plan loop; continues on any failure
+#   .\scripts\commands\ha-train.ps1 -Iterations 100 -StartFrom 12
+#   .\scripts\commands\ha-train.ps1 -Seed 42
+#   .\scripts\commands\ha-train.ps1 -SkipBench
+#   .\scripts\commands\ha-train.ps1 -DryRun
 
 param(
+    [int]$Count = 5,
     [int]$Iterations = 1,
     [int]$StartFrom = 1,
     [string]$Seed,
@@ -28,13 +30,16 @@ $TbMini = Join-Path $RepoRoot "bin\bench-tb-mini.ps1"
 $ProcessScript = Join-Path $RepoRoot "evals\process-recommendations.mjs"
 $PlanJson = Join-Path $RepoRoot "bench-recommendations-plan.json"
 $PlanMd = Join-Path $RepoRoot "bench-recommendations-plan.md"
-$TrainLog = Join-Path $RepoRoot "ah-train-log.md"
+$TrainLog = Join-Path $RepoRoot "ha-train-log.md"
 
 if (-not (Test-Path $TbMini)) {
     throw "Missing bench launcher: $TbMini"
 }
 if (-not (Test-Path $ProcessScript)) {
     throw "Missing recommendations processor: $ProcessScript"
+}
+if ($Count -lt 2) {
+    throw "-Count must be at least 2 so pattern detection has a sample, not a single case."
 }
 if ($Iterations -lt 1) {
     throw "-Iterations must be at least 1."
@@ -51,8 +56,9 @@ function Invoke-TrainIteration {
     )
 
     Write-Host ""
-    Write-Host "=== ah-train iteration $Index/$Total (seed $IterationSeed) ===" -ForegroundColor Cyan
-    Write-Host "  plan: bench-recommendations-plan.json + bench-recommendations-plan.md"
+    Write-Host "=== ha-train iteration $Index/$Total (seed $IterationSeed, count $Count) ===" -ForegroundColor Cyan
+    Write-Host "  sample: $Count random Terminal-Bench tasks"
+    Write-Host "  plan:   architecture patterns (not per-task judge tips)"
     Write-Host ""
 
     $benchExit = 0
@@ -62,7 +68,7 @@ function Invoke-TrainIteration {
 
     if (-not $SkipBench) {
         $forward = @{
-            Count = 1
+            Count = $Count
             Seed  = $IterationSeed
         }
         if ($SkipJudge) { $forward.SkipJudge = $true }
@@ -89,7 +95,7 @@ function Invoke-TrainIteration {
         }
         if ($benchExit -ne 0) {
             $notes += "bench exit $benchExit"
-            Write-Host "Bench exited $benchExit - still building recommendations plan from the partial report." -ForegroundColor Yellow
+            Write-Host "Bench exited $benchExit - still building pattern plan from the partial report." -ForegroundColor Yellow
         }
         Write-Host ""
     }
@@ -98,7 +104,7 @@ function Invoke-TrainIteration {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $planOutput = & node $ProcessScript --json $PlanJson --markdown $PlanMd 2>&1
+        $planOutput = & node $ProcessScript --patterns --json $PlanJson --markdown $PlanMd 2>&1
         $planExit = $LASTEXITCODE
         foreach ($line in $planOutput) {
             if ($line -is [System.Management.Automation.ErrorRecord]) {
@@ -113,7 +119,7 @@ function Invoke-TrainIteration {
     } catch {
         $planExit = 1
         $notes += "plan threw: $($_.Exception.Message)"
-        Write-Host "Recommendations plan failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Pattern plan failed: $($_.Exception.Message)" -ForegroundColor Yellow
     } finally {
         $ErrorActionPreference = $prevEap
         Pop-Location
@@ -142,12 +148,12 @@ function Append-TrainLog {
     )
 
     $status = if ($Notes.Count -gt 0) { "fail: $($Notes -join '; ')" } else { "ok" }
-    $line = "iteration $Index/$Total | seed $IterationSeed | recs $RecCount | bench-plan: $status"
+    $line = "iteration $Index/$Total | seed $IterationSeed | count $Count | levers $RecCount | bench-plan: $status"
     Add-Content -Path $TrainLog -Value $line -Encoding utf8
 }
 
 $endAt = $StartFrom + $Iterations - 1
-Write-Host "halo-agent /ah-train - $Iterations iteration(s), indices $StartFrom..$endAt" -ForegroundColor Cyan
+Write-Host "halo-agent /ha-train - $Iterations iteration(s), $Count TB task(s) each, indices $StartFrom..$endAt" -ForegroundColor Cyan
 Write-Host "  failures (bench, judge, plan) do not stop the loop - only missing prerequisites throw" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -171,7 +177,7 @@ for ($i = $StartFrom; $i -le $endAt; $i++) {
 
 Write-Host ""
 if ($Iterations -eq 1) {
-    Write-Host "Done (seed $iterationSeed). Assimilate bench-recommendations-plan.md, then run the next iteration." -ForegroundColor Green
+    Write-Host "Done (seed $iterationSeed, count $Count). Assimilate pending pattern levers in bench-recommendations-plan.md, then run the next iteration." -ForegroundColor Green
 } else {
     Write-Host "Done - completed iterations $StartFrom..$endAt. See $TrainLog for the bench/plan log." -ForegroundColor Green
     Write-Host "Assimilate each bench-recommendations-plan.md snapshot before the next full loop if plans changed per iteration." -ForegroundColor DarkGray

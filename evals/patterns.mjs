@@ -55,19 +55,37 @@ const BUDGET_BURN_RATIO = 0.85;
  * @returns {ScenarioMetrics[]}
  */
 export function normalizeScenarioMetrics(rows) {
-  return (rows ?? []).map((row) => ({
-    name: row.name ?? row.scenario ?? "unknown",
-    score: row.score ?? row.verdict?.score ?? null,
-    precheck: row.precheck?.pass ?? row.precheck ?? null,
-    integrity: row.integrity?.pass ?? row.integrity ?? null,
-    steps: row.steps ?? row.agent?.steps ?? 0,
-    stopReason: row.stopReason ?? row.agent?.stopReason ?? null,
-    escalationCount: row.escalationCount ?? row.agent?.escalationCount ?? 0,
-    cloudUsed: row.cloudUsed ?? row.agent?.cloudUsed ?? false,
-    verificationPassed: row.verificationPassed ?? row.agent?.verificationPassed ?? null,
-    memoryEnabled: row.memoryEnabled ?? row.agent?.memoryEnabled ?? null,
-    error: row.error ?? null,
-  }));
+  return (rows ?? []).map((row) => {
+    const rawSteps = row.steps ?? row.agent?.steps ?? 0;
+    const precheck =
+      row.precheck?.pass ??
+      row.precheck ??
+      (typeof row.resolved === "boolean" ? row.resolved : null);
+    return {
+      name: row.name ?? row.scenario ?? "unknown",
+      score: row.score ?? row.verdict?.score ?? null,
+      precheck,
+      integrity: row.integrity?.pass ?? row.integrity ?? null,
+      steps: Array.isArray(rawSteps) ? rawSteps.length : rawSteps,
+      stopReason: row.stopReason ?? row.agent?.stopReason ?? null,
+      escalationCount: row.escalationCount ?? row.agent?.escalationCount ?? 0,
+      cloudUsed: row.cloudUsed ?? row.agent?.cloudUsed ?? false,
+      verificationPassed: row.verificationPassed ?? row.agent?.verificationPassed ?? null,
+      memoryEnabled: row.memoryEnabled ?? row.agent?.memoryEnabled ?? null,
+      error: row.error ?? row.exception ?? null,
+    };
+  });
+}
+
+/**
+ * Scenario/task rows from either the local assessment report or a recognized
+ * (Terminal-Bench) report.
+ * @param {object} report
+ */
+export function rowsFromReport(report) {
+  if (Array.isArray(report?.scenarios) && report.scenarios.length > 0) return report.scenarios;
+  if (Array.isArray(report?.tasks)) return report.tasks;
+  return [];
 }
 
 /**
@@ -333,6 +351,28 @@ export function detectRunPatterns(results, meta = {}) {
     });
   }
 
+  // Hidden tests (Harbor / precheck) failed on most of the sample — a
+  // cross-task shape, not a tip for any one scenario name.
+  if (
+    precheckFail.length >= MIN_PATTERN_SCENARIOS &&
+    precheckFail.length >= Math.ceil(scenarios.length / 2)
+  ) {
+    insights.push({
+      id: "tests-mostly-failed",
+      source: "run",
+      priority: "high",
+      pattern:
+        "Ground-truth tests failed on most of this sample — the loop is not producing check-passing artifacts.",
+      lever:
+        "Prefer stronger deliverable + verify gating over task-specific hints. Refuse 'done' until the instruction's own checks would pass; do not hard-code this sample's task names into the prompt table.",
+      scenarios: namesOf(precheckFail),
+      evidence: {
+        failed: precheckFail.length,
+        total: scenarios.length,
+      },
+    });
+  }
+
   // Unverified majority with acceptance supposedly on.
   if (
     flags.acceptance !== false &&
@@ -565,22 +605,25 @@ function insightFromAblation(flag, ablation) {
  * @returns {ArchitectureInsight[]}
  */
 export function buildArchitectureInsights(report, options = {}) {
-  const runInsights = detectRunPatterns(report?.scenarios ?? [], {
-    maxSteps: options.maxSteps,
-    flags: options.flags ?? inferFlagsFromReport(report),
+  const maxSteps = options.maxSteps ?? report?.maxSteps ?? null;
+  const flags = options.flags ?? inferFlagsFromReport(report);
+  const runInsights = detectRunPatterns(rowsFromReport(report), {
+    maxSteps,
+    flags,
   });
 
+  const overall = report?.overall ?? {};
+  const n = overall.scenarios ?? overall.tasks ?? 0;
+  const passed = overall.precheckPassed ?? overall.resolved ?? 0;
   const currentEntry =
     report?.overall != null
       ? {
-          avgScore: report.overall.avgScore,
-          cloudRate: report.overall.cloudRate,
-          avgEscalations: report.overall.avgEscalations,
-          passRate:
-            report.overall.scenarios > 0
-              ? report.overall.precheckPassed / report.overall.scenarios
-              : null,
-          ...(options.flags ?? {}),
+          avgScore: overall.avgScore ?? overall.judgeAvg,
+          cloudRate: overall.cloudRate,
+          avgEscalations: overall.avgEscalations,
+          passRate: n > 0 ? passed / n : null,
+          scenarios: n,
+          ...(flags),
         }
       : null;
 

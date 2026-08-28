@@ -169,6 +169,9 @@ export function summarizeTasks(tasks) {
   const judgeAvg =
     judged.length > 0 ? judged.reduce((sum, t) => sum + t.verdict.score, 0) / judged.length : null;
   const totalSeconds = tasks.reduce((sum, t) => sum + (t.seconds ?? 0), 0);
+  const stepCounts = tasks.map((t) => Number(t.steps ?? t.stepCount ?? 0) || 0);
+  const clouded = tasks.filter((t) => t.cloudUsed === true).length;
+  const escalations = tasks.map((t) => Number(t.escalationCount ?? 0) || 0);
   return {
     tasks: tasks.length,
     resolved,
@@ -177,5 +180,8 @@ export function summarizeTasks(tasks) {
     judged: judged.length,
     judgeAvg,
     totalSeconds,
+    avgSteps: tasks.length ? stepCounts.reduce((a, b) => a + b, 0) / tasks.length : null,
+    cloudRate: tasks.length ? clouded / tasks.length : null,
+    avgEscalations: tasks.length ? escalations.reduce((a, b) => a + b, 0) / tasks.length : null,
   };
 }

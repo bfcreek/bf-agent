@@ -8,8 +8,10 @@ import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
 import {
   acceptanceFailureNudge,
   buildAcceptanceContract,
+  CONTRACT_PROGRESS_CRITIQUE,
   CRITIQUE_USER_MESSAGE,
   formatAcceptanceContract,
+  isVerifyOutstandingOnly,
   verifyAcceptanceContract,
 } from "./acceptance.mjs";
 import { listWorkspaceTopLevel } from "./context-builder.mjs";
@@ -39,9 +41,11 @@ import {
   alreadyVerifiedFinishNudge,
   ambiguousEditRecoveryNudge,
   blockedCommandOutcome,
+  countConsecutiveFailedWorkCommands,
   detectTaskHints,
   extractCompilerDiagnostics,
   finalAnswerNudge,
+  flattenToolCalls,
   formatExplicitGoals,
   formatTaskConstraints,
   goalNeedsSubstantiveTools,
@@ -459,10 +463,12 @@ export class AgentLoop {
    * @param {Array<object>} [options.history] Prior transcript (from a previous
    *   run's `messages`) to continue a session. Must already include a system
    *   message if it is non-empty.
+   * @param {string[]} [options.images] Ollama-format base64 images for the
+   *   new user turn (when the goal came with attachments).
    * @param {AbortSignal} [options.signal]
    * @returns {Promise<AgentRunResult>}
    */
-  async run(goal, { history, signal } = {}) {
+  async run(goal, { history, signal, images } = {}) {
     // Give tools the user's own words for safety decisions (e.g. the shell
     // tool only deletes files the goal explicitly names).
     this.registry.setRunContext?.({ goal });
@@ -506,7 +512,11 @@ export class AgentLoop {
     const focusBlocks = [memoryFocus, taskFocus].filter(Boolean).join("\n\n");
     if (focusBlocks) userContent = `${focusBlocks}\n\n${userContent}`;
 
-    messages.push({ role: "user", content: userContent });
+    const userMessage = { role: "user", content: userContent };
+    if (Array.isArray(images) && images.length > 0) {
+      userMessage.images = images;
+    }
+    messages.push(userMessage);
 
     if (this.projectBootstrap && freshTurn) {
       const bootstrap = await gatherFirstTurnProjectContext({
@@ -653,7 +663,10 @@ export class AgentLoop {
     const runStarted = Date.now();
 
     let budgetPressure = 0;
-    let workOutstanding = false;
+    let workOutstanding =
+      this.acceptance &&
+      goalNeedsSubstantiveTools(goal) &&
+      !(acceptanceContract?.checks?.length);
     let escalationBlockReported = false;
     let acceptanceNudgeCount = 0;
     let replanCount = 0;
@@ -661,6 +674,8 @@ export class AgentLoop {
     let lastMissingFingerprint = "";
     let stuckMissingCount = 0;
     let lastReplanPaidSteps = -Infinity;
+    let verifyOutstandingOnly = false;
+    let contractCritiqueInjected = false;
     const maxAcceptanceNudges = Math.max(
       MIN_ACCEPTANCE_NUDGES,
       Math.floor(this.maxSteps * ACCEPTANCE_NUDGE_BUDGET_RATIO),
@@ -675,6 +690,10 @@ export class AgentLoop {
       searchLoop: Boolean(repeatedSearchLoopNudge({ steps })),
       budgetPressure,
       workOutstanding,
+      hollowCompletion: workOutstanding && substantiveToolsUsed(steps).size === 0,
+      paidSteps,
+      consecutiveFailedRuns: countConsecutiveFailedWorkCommands(flattenToolCalls(steps), goal),
+      verifyOutstandingOnly,
     });
 
     const finalizeRun = async (result) => {
@@ -724,15 +743,16 @@ export class AgentLoop {
 
       budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
 
-      if (budgetPressure >= 0.5) {
-        if (this.acceptance && acceptanceContract?.checks?.length) {
-          const progress = await verifyAcceptanceContract({
-            contract: acceptanceContract,
-            steps,
-            goal,
-            workspaceRoot,
-          });
-          workOutstanding = !progress.passed;
+      if (this.acceptance && (budgetPressure >= 0.5 || !(acceptanceContract?.checks?.length))) {
+        const progress = await verifyAcceptanceContract({
+          contract: acceptanceContract,
+          steps,
+          goal,
+          workspaceRoot,
+        });
+        workOutstanding = !progress.passed;
+        verifyOutstandingOnly = isVerifyOutstandingOnly(progress);
+        if (acceptanceContract?.checks?.length) {
           const fingerprint = missingKey(progress.missing);
           if (!progress.passed && fingerprint) {
             if (fingerprint === lastMissingFingerprint) stuckMissingCount += 1;
@@ -745,7 +765,19 @@ export class AgentLoop {
             stuckMissingCount = 0;
           }
         }
+        // Cheaper than escalating: once the same unmet checks repeat, force a
+        // contract-vs-plan critique that ends in a tool call.
+        if (
+          !contractCritiqueInjected &&
+          stuckMissingCount >= 2 &&
+          progress.missing?.length
+        ) {
+          contractCritiqueInjected = true;
+          messages.push({ role: "user", content: CONTRACT_PROGRESS_CRITIQUE });
+        }
+      }
 
+      if (budgetPressure >= 0.5) {
         if (planState?.steps?.length && !checkpointInjected) {
           planState = markProgress(planState, { steps });
           const checkpoint = formatCheckpoint(planState);
@@ -1009,7 +1041,7 @@ export class AgentLoop {
         // Verification gate. Bounded by its own budget so an unsatisfiable
         // contract degrades into a reported failure rather than burning every
         // remaining step.
-        if (this.acceptance && acceptanceNudgeCount < maxAcceptanceNudges) {
+        if (this.acceptance) {
           const verification = await verifyAcceptanceContract({
             contract: acceptanceContract,
             steps,
@@ -1017,11 +1049,28 @@ export class AgentLoop {
             workspaceRoot,
           });
           const acceptNudge = acceptanceFailureNudge(verification);
-          if (acceptNudge) {
+          if (acceptNudge && acceptanceNudgeCount < maxAcceptanceNudges) {
             acceptanceNudgeCount += 1;
             messages.push({ role: "user", content: acceptNudge });
             if (!thinkingOnly) paidSteps += 1;
             continue;
+          }
+          if (!verification.passed && goalNeedsSubstantiveTools(goal)) {
+            const failStep = {
+              index,
+              kind: "failed",
+              content: text,
+              toolCalls: [],
+            };
+            steps.push(failStep);
+            this.onStep?.(failStep);
+            return finalizeRun({
+              text,
+              stopReason: "failed",
+              steps,
+              messages,
+              verification,
+            });
           }
         }
         const finalStep = {
@@ -1147,7 +1196,31 @@ export class AgentLoop {
       baseUrl: this.client?.baseUrl,
     });
     if (diagnostic) text = `${text}\n\n${diagnostic}`;
-    return finalizeRun({ text: text ?? "", stopReason: "max-steps", steps, messages, diagnostic });
+    let verification;
+    if (this.acceptance) {
+      verification = await verifyAcceptanceContract({
+        contract: acceptanceContract,
+        steps,
+        goal,
+        workspaceRoot,
+      });
+    }
+    // Unmet acceptance after the step budget is a failed run, not a completed one.
+    const stopReason =
+      this.acceptance &&
+      verification &&
+      !verification.passed &&
+      goalNeedsSubstantiveTools(goal)
+        ? "failed"
+        : "max-steps";
+    return finalizeRun({
+      text: text ?? "",
+      stopReason,
+      steps,
+      messages,
+      diagnostic,
+      verification,
+    });
   }
 }
 

@@ -23,6 +23,12 @@ test("normalizeScenarioMetrics accepts raw rows and report rows", () => {
   assert.equal(raw[0].score, 84);
   assert.equal(raw[0].verificationPassed, true);
 
+  const harbor = normalizeScenarioMetrics([
+    { name: "openssl-selfsigned-cert", resolved: false, score: 40, exception: "timeout", steps: 12 },
+  ]);
+  assert.equal(harbor[0].precheck, false);
+  assert.equal(harbor[0].error, "timeout");
+
   const flat = normalizeScenarioMetrics([
     { name: "todo-cli", score: 84, precheck: true, steps: 15, verificationPassed: true },
   ]);
@@ -249,6 +255,30 @@ test("buildAssessmentReport attaches architectureInsights", () => {
 test("formatInsightsMarkdown explains empty evidence", () => {
   const md = formatInsightsMarkdown([]);
   assert.match(md, /No recurring telemetry patterns/);
+});
+
+test("tests-mostly-failed fires on a Harbor-style sample majority", () => {
+  const insights = detectRunPatterns([
+    { name: "a", resolved: false, score: 20, steps: 10, stopReason: "completed" },
+    { name: "b", resolved: false, score: 30, steps: 12, stopReason: "completed" },
+    { name: "c", resolved: true, score: 80, steps: 8, stopReason: "completed" },
+  ]);
+  const hit = insights.find((i) => i.id === "tests-mostly-failed");
+  assert.ok(hit, "expected tests-mostly-failed pattern");
+  assert.equal(hit.scenarios.length, 2);
+  assert.match(hit.lever, /task-specific|hard-code/i);
+});
+
+test("buildArchitectureInsights reads recognized report tasks", () => {
+  const insights = buildArchitectureInsights({
+    overall: { tasks: 2, resolved: 0, judgeAvg: 20, cloudRate: 0, avgEscalations: 0 },
+    tasks: [
+      { name: "alpha", resolved: false, score: 10, steps: 2, stopReason: "completed", verificationPassed: false },
+      { name: "beta", resolved: false, score: 15, steps: 3, stopReason: "completed", verificationPassed: false },
+    ],
+    maxSteps: 80,
+  });
+  assert.ok(insights.some((i) => i.id === "hollow-completion" || i.id === "tests-mostly-failed"));
 });
 
 test("buildArchitectureInsights merges run and history signals", () => {

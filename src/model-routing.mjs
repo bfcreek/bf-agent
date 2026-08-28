@@ -76,6 +76,25 @@ const THINKING_CAPABLE = [
 ];
 
 /**
+ * Families known to accept image inputs. Fallback only — /api/show
+ * `capabilities` including "vision" is authoritative when available.
+ * Do not list every tools+vision coder here; unknown families stay null
+ * so the probe decides.
+ */
+const VISION_CAPABLE = [
+  /vision/,
+  /(^|[^a-z])vl\b/,
+  /^qwen2\.5vl/,
+  /^llava/,
+  /^bakllava/,
+  /^minicpm/,
+  /^moondream/,
+  /^gemma3/,
+  /^gemma4/,
+  /^llama3\.2-vision/,
+];
+
+/**
  * @param {string} name Model name, with or without a tag.
  * @returns {boolean|null} true/false when the family is known, null when unknown.
  */
@@ -83,6 +102,16 @@ export function isLikelyToolCapable(name) {
   const base = String(name).toLowerCase();
   if (NOT_TOOL_CAPABLE.some((re) => re.test(base))) return false;
   if (TOOL_CAPABLE.some((re) => re.test(base))) return true;
+  return null;
+}
+
+/**
+ * @param {string} name
+ * @returns {boolean|null} true when the family is known to accept images, null when unknown.
+ */
+export function isLikelyVisionCapable(name) {
+  const base = String(name).toLowerCase();
+  if (VISION_CAPABLE.some((re) => re.test(base))) return true;
   return null;
 }
 
@@ -111,6 +140,52 @@ export function isLikelyThinkingCapable(name) {
   const base = String(name).toLowerCase();
   if (THINKING_CAPABLE.some((re) => re.test(base))) return true;
   return null;
+}
+
+/**
+ * @param {string} name
+ * @throws {ModelRoutingError} When the family is known to lack vision or is unknown.
+ */
+export function assertVisionCapable(name) {
+  const capable = isLikelyVisionCapable(name);
+  if (capable === true) return;
+  if (capable === false) {
+    throw new ModelRoutingError(
+      `Model '${name}' does not support images. Choose a vision-capable model (e.g. gemma3, qwen2.5vl, or a tools+vision coder).`,
+    );
+  }
+  throw new ModelRoutingError(
+    `Model '${name}' is not a known vision-capable family. Choose a model with image support, or use --model auto with an image attachment.`,
+  );
+}
+
+/**
+ * True when a chat message carries image payloads (Ollama `images`, OpenAI
+ * `image_url` parts, or similar typed content parts).
+ *
+ * @param {object} message
+ * @returns {boolean}
+ */
+export function messageHasImages(message) {
+  if (!message || typeof message !== "object") return false;
+  if (Array.isArray(message.images) && message.images.length > 0) return true;
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!part || typeof part !== "object") return false;
+    if (part.type === "image_url" && part.image_url) return true;
+    if (part.type === "input_image") return true;
+    if (part.type === "image" && (part.source || part.data || part.url || part.image)) return true;
+    return false;
+  });
+}
+
+/**
+ * @param {Array<object>|null|undefined} messages
+ * @returns {boolean}
+ */
+export function messagesHaveImages(messages) {
+  return (messages ?? []).some((m) => messageHasImages(m));
 }
 
 /** Ollama cloud models carry a -cloud / :cloud suffix and run remotely. */
@@ -144,13 +219,13 @@ export function parseParamsBillions(parameterSize, sizeBytes = 0) {
 
 /**
  * Ask Ollama itself what a model supports: `/api/show` reports a
- * `capabilities` array ("tools", "thinking", ...). Accurate for any
+ * `capabilities` array ("tools", "thinking", "vision", ...). Accurate for any
  * installed model — the family regexes above are only the fallback for
  * older Ollama versions or when the probe fails.
  *
  * @param {{show?: Function}} client
  * @param {string} name Installed model name.
- * @returns {Promise<{tools: boolean|null, thinking: boolean|null}>}
+ * @returns {Promise<{tools: boolean|null, thinking: boolean|null, vision: boolean|null}>}
  */
 export async function detectCapabilities(client, name) {
   if (client?.show) {
@@ -160,13 +235,18 @@ export async function detectCapabilities(client, name) {
         return {
           tools: info.capabilities.includes("tools"),
           thinking: info.capabilities.includes("thinking"),
+          vision: info.capabilities.includes("vision"),
         };
       }
     } catch {
       // old Ollama or transient failure — fall back to the family lists
     }
   }
-  return { tools: isLikelyToolCapable(name), thinking: isLikelyThinkingCapable(name) };
+  return {
+    tools: isLikelyToolCapable(name),
+    thinking: isLikelyThinkingCapable(name),
+    vision: isLikelyVisionCapable(name),
+  };
 }
 
 /**
@@ -179,10 +259,22 @@ export async function detectToolCapable(client, name) {
 }
 
 /**
+ * @param {{show?: Function}} client
+ * @param {string} name Installed model name.
+ * @returns {Promise<boolean|null>} Same contract as isLikelyVisionCapable.
+ */
+export async function detectVisionCapable(client, name) {
+  return (await detectCapabilities(client, name)).vision;
+}
+
+/**
  * Pick the strongest suitable installed model. Requirements: tool calling
  * and thinking (both improve agent reliability), at least
  * MIN_EFFECTIVE_PARAMS_B parameters (below that agent tasks mostly fail),
  * and — for local models — a file size that fits comfortably in memory.
+ * When `requireVision` is set (image attachments), vision is also required
+ * and thinking becomes a preference rather than a hard filter — tools+vision
+ * models without thinking still beat a text-only thinker for image turns.
  * Local models win when any qualify; otherwise installed Ollama cloud
  * models are considered, since a capable cloud model beats an ineffective
  * local one.
@@ -193,36 +285,56 @@ export async function detectToolCapable(client, name) {
  *   Installed models (from listModelsDetailed, or bare {name} objects).
  * @param {number} [options.totalMemBytes] Defaults to this machine's RAM.
  * @param {number} [options.vramBytes] Pass 0 to ignore the GPU, omit to probe.
+ * @param {boolean} [options.requireVision] Require image/vision capability.
  * @returns {Promise<{model: string, paramsB: number, cloud: boolean, reason: string}|null>}
  */
-export async function suggestModel({ client, models, totalMemBytes = os.totalmem(), vramBytes }) {
+export async function suggestModel({
+  client,
+  models,
+  totalMemBytes = os.totalmem(),
+  vramBytes,
+  requireVision = false,
+}) {
   const { resolveModelFitBudget } = await import("./hardware.mjs");
   const { budgetBytes: memoryBudget } = await resolveModelFitBudget({ totalMemBytes, vramBytes });
   const locals = [];
   const clouds = [];
 
   for (const entry of models ?? []) {
-    const { tools, thinking } = await detectCapabilities(client, entry.name);
-    if (tools !== true || thinking !== true) continue;
+    const { tools, thinking, vision } = await detectCapabilities(client, entry.name);
+    if (tools !== true) continue;
+    if (requireVision) {
+      if (vision !== true) continue;
+    } else if (thinking !== true) {
+      continue;
+    }
     const paramsB = parseParamsBillions(entry.parameterSize ?? "", entry.sizeBytes ?? 0);
     if (paramsB < MIN_EFFECTIVE_PARAMS_B) continue;
+    const candidate = { name: entry.name, paramsB, thinking: thinking === true };
     if (isCloudModel(entry.name)) {
-      clouds.push({ name: entry.name, paramsB });
+      clouds.push(candidate);
     } else if (!entry.sizeBytes || entry.sizeBytes <= memoryBudget) {
-      locals.push({ name: entry.name, paramsB });
+      locals.push(candidate);
     }
   }
 
+  // Prefer thinking when vision made it optional; otherwise params decide.
   const best = (list) =>
-    list.sort((a, b) => b.paramsB - a.paramsB || a.name.localeCompare(b.name))[0];
+    list.sort(
+      (a, b) =>
+        Number(b.thinking) - Number(a.thinking) ||
+        b.paramsB - a.paramsB ||
+        a.name.localeCompare(b.name),
+    )[0];
 
+  const capsLabel = requireVision ? "tools + vision" : "thinking + tools";
   const local = best(locals);
   if (local) {
     return {
       model: local.name,
       paramsB: local.paramsB,
       cloud: false,
-      reason: `strongest local model with thinking + tools that fits in memory (${Math.round(local.paramsB)}B parameters)`,
+      reason: `strongest local model with ${capsLabel} that fits in memory (${Math.round(local.paramsB)}B parameters)`,
     };
   }
   const cloud = best(clouds);
@@ -231,34 +343,54 @@ export async function suggestModel({ client, models, totalMemBytes = os.totalmem
       model: cloud.name,
       paramsB: cloud.paramsB,
       cloud: true,
-      reason: "no local model is strong enough (thinking + tools, " +
+      reason:
+        `no local model is strong enough (${capsLabel}, ` +
         `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, fitting in memory); using an installed Ollama cloud model`,
     };
   }
   return null;
 }
 
-const NO_SUITABLE_MODEL_HELP =
-  `No installed model is suitable for agent use (needs tool calling + thinking, ` +
-  `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
-  "Pull a stronger local model (e.g. ollama pull qwen3:14b) or an Ollama cloud model " +
-  "(e.g. ollama pull gpt-oss:120b-cloud), or pass --model to override.";
+function noSuitableModelHelp(requireVision) {
+  if (requireVision) {
+    return (
+      `No installed model is suitable for agent use with images (needs tool calling + vision, ` +
+      `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
+      "Pull a tools+vision model (e.g. ollama pull devstral-small-2) or an Ollama cloud model " +
+      "with vision (e.g. ollama pull kimi-k2.7-code:cloud), or pass --model to override."
+    );
+  }
+  return (
+    `No installed model is suitable for agent use (needs tool calling + thinking, ` +
+    `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
+    "Pull a stronger local model (e.g. ollama pull qwen3:14b) or an Ollama cloud model " +
+    "(e.g. ollama pull gpt-oss:120b-cloud), or pass --model to override."
+  );
+}
 
 /**
  * Resolve the model for a run. "auto" (or empty) picks the best installed
  * model via suggestModel. An explicit name is honored as long as it is
  * installed and tool-capable — thinking and the size floor are advisory
- * (warning) for explicit choices, never blocking.
+ * (warning) for explicit choices, never blocking. When `requireVision` is
+ * set, lack of vision is blocking for both auto and explicit picks.
  *
  * @param {object} options
  * @param {string} [options.requested] Model name or "auto".
  * @param {{show?: Function, listModelsDetailed: Function}} options.client
  * @param {number} [options.totalMemBytes]
  * @param {AbortSignal} [options.signal]
+ * @param {boolean} [options.requireVision] Require image/vision capability.
  * @returns {Promise<{model: string, warnings: string[]}>}
  * @throws {ModelRoutingError} When nothing suitable can be used.
  */
-export async function resolveModelAuto({ requested, client, totalMemBytes, signal }) {
+export async function resolveModelAuto({
+  requested,
+  client,
+  totalMemBytes,
+  signal,
+  requireVision = false,
+}) {
   const warnings = [];
   const models = await client.listModelsDetailed({ signal });
   const auto = !requested || requested === "auto";
@@ -266,7 +398,7 @@ export async function resolveModelAuto({ requested, client, totalMemBytes, signa
   if (!auto) {
     const match = findInstalled(requested, models.map((m) => m.name));
     if (match) {
-      const { tools, thinking } = await detectCapabilities(client, match);
+      const { tools, thinking, vision } = await detectCapabilities(client, match);
       if (tools === false) {
         throw new ModelRoutingError(
           `Model '${match}' does not support tool calling. Choose a tool-capable model or use --model auto.`,
@@ -274,6 +406,16 @@ export async function resolveModelAuto({ requested, client, totalMemBytes, signa
       }
       if (tools === null) {
         warnings.push(`Could not verify that '${match}' supports tool calling; continuing anyway.`);
+      }
+      if (requireVision) {
+        if (vision === false) {
+          throw new ModelRoutingError(
+            `Model '${match}' does not support images. Choose a vision-capable model or use --model auto.`,
+          );
+        }
+        if (vision === null) {
+          warnings.push(`Could not verify that '${match}' supports images; continuing anyway.`);
+        }
       }
       const entry = models.find((m) => m.name === match);
       const paramsB = parseParamsBillions(entry?.parameterSize ?? "", entry?.sizeBytes ?? 0);
@@ -302,14 +444,15 @@ export async function resolveModelAuto({ requested, client, totalMemBytes, signa
     }
     if (models.length === 0) {
       assertToolCapable(requested);
+      if (requireVision) assertVisionCapable(requested);
       warnings.push(`Could not verify '${requested}' is installed; Ollama returned no models.`);
       return { model: requested, warnings };
     }
     warnings.push(`Model '${requested}' is not installed; auto-selecting instead.`);
   }
 
-  const suggestion = await suggestModel({ client, models, totalMemBytes });
-  if (!suggestion) throw new ModelRoutingError(NO_SUITABLE_MODEL_HELP);
+  const suggestion = await suggestModel({ client, models, totalMemBytes, requireVision });
+  if (!suggestion) throw new ModelRoutingError(noSuitableModelHelp(requireVision));
   warnings.push(`Using '${suggestion.model}': ${suggestion.reason}.`);
   return { model: suggestion.model, warnings };
 }

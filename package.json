@@ -58,7 +58,7 @@
     "bench:tb:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb.ps1",
     "bench:tb:mini:ps": "powershell -NoProfile -ExecutionPolicy Bypass -File bin/bench-tb-mini.ps1",
     "bench:hv-tb": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/hv-bench-tb.ps1",
-    "bench:ah-train": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ah-train.ps1",
+    "bench:ha-train": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ha-train.ps1",
     "release:build": "node scripts/release/build-release-zip.cjs",
     "release:stage": "node scripts/release/stage-release-artifacts.cjs",
     "release:upload": "node scripts/release/upload-r2-release.cjs",

@@ -10,7 +10,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildArchitectureInsights } from "./patterns.mjs";
 import { latestReportPaths } from "./recognized/layout.mjs";
+import { TB_SCOREBOARD, loadScoreboardHistory } from "./scoreboard.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -30,9 +32,54 @@ export const AREA_TARGETS = {
     "src/prompt-enhancements.mjs",
     "src/agent-loop.mjs",
   ],
+  acceptance: [
+    "src/acceptance.mjs",
+    "src/agent-loop.mjs",
+  ],
+  escalation: [
+    "src/escalation.mjs",
+    "src/agent-loop.mjs",
+    "src/model-routing.mjs",
+  ],
+  memory: ["src/memory-store.mjs"],
   compaction: ["src/compaction.mjs"],
   other: [],
 };
+
+const INSIGHT_AREAS = {
+  "verified-but-weak-score": "acceptance",
+  "verification-missed-precheck": "acceptance",
+  "precheck-ok-gate-fail": "acceptance",
+  "hollow-completion": "acceptance",
+  "budget-burned-unverified": "acceptance",
+  "acceptance-mostly-failing": "acceptance",
+  "tests-mostly-failed": "acceptance",
+  "costly-escalation-still-failed": "escalation",
+  "escalation-became-cloud": "escalation",
+  "failed-without-escalation": "escalation",
+  "stable-without-escalation": "escalation",
+  "expensive-passes": "planning",
+};
+
+const SKIP_INSIGHT_IDS = new Set(["stable-without-escalation"]);
+
+const PATTERN_GUIDANCE = [
+  "Pending items are architecture-pattern levers — change the closed loop (acceptance, escalation, memory, critique), not a specific Terminal-Bench task.",
+  "Do not add TASK_HINT_RULES or prompt text keyed to a task name from this sample.",
+  "Skip items with status `skip` — the pattern says the current approach is holding.",
+  "Judge notes (if any) are corroborating color, not a punch list. Ignore advice that only fits one task.",
+  "Keep changes minimal and focused. Run npm test after edits; add a focused test when the change is testable.",
+  "Skip levers that duplicate existing behavior or conflict with LIMITATIONS.md.",
+];
+
+const DEFAULT_GUIDANCE = [
+  "Judge recommendations below are concrete runtime fixes — implement those in the mapped target files.",
+  "Architecture insights are pattern-level approach signals (acceptance, escalation, memory, critique). Use them to decide *whether* to change strategy, not as a punch list of edits.",
+  "Prefer prompt-enhancements.mjs for task-type hints; context-builder/agent-loop for system prompt.",
+  "Keep changes minimal and focused — one recommendation per logical commit when possible.",
+  "Run npm test after edits; add a focused test when the change is testable.",
+  "Skip recommendations that are vague, duplicate existing behavior, or conflict with LIMITATIONS.md.",
+];
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
@@ -93,46 +140,92 @@ export function extractRecommendations(report) {
 }
 
 /**
+ * @param {object} insight
+ */
+export function areaForInsight(insight) {
+  const id = String(insight?.id ?? "");
+  if (INSIGHT_AREAS[id]) return INSIGHT_AREAS[id];
+  if (/memory/.test(id)) return "memory";
+  if (/critique|planning/.test(id)) return "planning";
+  if (/acceptance|verif|contract|hollow|budget/.test(id)) return "acceptance";
+  if (/escalation|cloud/.test(id)) return "escalation";
+  return "other";
+}
+
+/**
+ * @param {object} insight
+ */
+export function shouldSkipInsight(insight) {
+  if (SKIP_INSIGHT_IDS.has(insight?.id)) return true;
+  return /^resist\b/i.test(String(insight?.lever ?? ""));
+}
+
+/**
+ * @param {object[]} insights
+ */
+export function itemsFromInsights(insights) {
+  return (insights ?? []).map((insight, index) => {
+    const area = areaForInsight(insight);
+    const skip = shouldSkipInsight(insight);
+    return {
+      id: index + 1,
+      kind: "pattern",
+      insightId: insight.id,
+      area,
+      suggestion: insight.lever ?? "",
+      pattern: insight.pattern ?? "",
+      priority: insight.priority ?? "medium",
+      count: insight.scenarios?.length ?? 1,
+      sources: insight.scenarios ?? [],
+      targetFiles: targetsForArea(area),
+      status: skip ? "skip" : "pending",
+      skipReason: skip ? "Pattern says not to change — leave the loop as-is." : null,
+    };
+  });
+}
+
+/**
  * @param {object} report
  * @param {object} [meta]
  */
 export function buildProcessingPlan(report, meta = {}) {
-  const recommendations = extractRecommendations(report);
-  const items = recommendations.map((rec, index) => ({
-    id: index + 1,
-    area: rec.area,
-    suggestion: rec.suggestion,
-    priority: rec.priority,
-    count: rec.count,
-    sources: rec.sources,
-    targetFiles: targetsForArea(rec.area),
-    status: "pending",
-  }));
-
+  const patterns = meta.patterns === true;
   const architectureInsights = Array.isArray(report?.architectureInsights)
     ? report.architectureInsights
     : [];
+  const judgeRecs = extractRecommendations(report);
+
+  const items = patterns
+    ? itemsFromInsights(architectureInsights)
+    : judgeRecs.map((rec, index) => ({
+        id: index + 1,
+        kind: "recommendation",
+        area: rec.area,
+        suggestion: rec.suggestion,
+        priority: rec.priority,
+        count: rec.count,
+        sources: rec.sources,
+        targetFiles: targetsForArea(rec.area),
+        status: "pending",
+      }));
+
+  const pending = items.filter((item) => item.status === "pending");
 
   return {
     version: 1,
-    kind: "recommendations-plan",
+    kind: patterns ? "patterns-plan" : "recommendations-plan",
+    mode: patterns ? "patterns" : "recommendations",
     generatedAt: new Date().toISOString(),
     reportPath: meta.reportPath ?? null,
     suite: report.suite ?? report.kind ?? null,
     dataset: report.dataset ?? report.datasetLabel ?? null,
     ranAt: report.ranAt ?? null,
     model: report.model ?? null,
-    recommendationCount: items.length,
+    recommendationCount: pending.length,
     items,
+    judgeNotes: patterns ? judgeRecs : [],
     architectureInsights,
-    guidance: [
-      "Judge recommendations below are concrete runtime fixes — implement those in the mapped target files.",
-      "Architecture insights are pattern-level approach signals (acceptance, escalation, memory, critique). Use them to decide *whether* to change strategy, not as a punch list of edits.",
-      "Prefer prompt-enhancements.mjs for task-type hints; context-builder/agent-loop for system prompt.",
-      "Keep changes minimal and focused — one recommendation per logical commit when possible.",
-      "Run npm test after edits; add a focused test when the change is testable.",
-      "Skip recommendations that are vague, duplicate existing behavior, or conflict with LIMITATIONS.md.",
-    ],
+    guidance: patterns ? PATTERN_GUIDANCE : DEFAULT_GUIDANCE,
   };
 }
 
@@ -140,8 +233,11 @@ export function buildProcessingPlan(report, meta = {}) {
  * @param {ReturnType<typeof buildProcessingPlan>} plan
  */
 export function formatProcessingMarkdown(plan) {
+  const patterns = plan.mode === "patterns";
   const lines = [
-    "# halo-agent — bench recommendations plan",
+    patterns
+      ? "# halo-agent — architecture patterns plan"
+      : "# halo-agent — bench recommendations plan",
     "",
     `Generated: ${plan.generatedAt}`,
   ];
@@ -149,37 +245,50 @@ export function formatProcessingMarkdown(plan) {
   if (plan.suite) lines.push(`Suite: ${plan.suite}${plan.dataset ? ` (${plan.dataset})` : ""}`);
   if (plan.ranAt) lines.push(`Bench ran: ${plan.ranAt}`);
   if (plan.model) lines.push(`Model: ${plan.model}`);
-  lines.push("", `**${plan.recommendationCount}** recommendation(s) to process.`, "");
-  if (plan.recommendationCount === 0 && !plan.architectureInsights?.length) {
-    lines.push("No agent improvements were recorded. Nothing to implement.");
+  if (patterns) lines.push("", `**${plan.recommendationCount}** pattern lever(s) to consider.`, "");
+  else lines.push("", `**${plan.recommendationCount}** recommendation(s) to process.`, "");
+
+  const hasInsights = plan.architectureInsights?.length > 0;
+  const hasJudgeNotes = plan.judgeNotes?.length > 0;
+  if (plan.recommendationCount === 0 && !hasInsights && !hasJudgeNotes && plan.items?.length === 0) {
+    lines.push(
+      patterns
+        ? "No recurring telemetry patterns crossed the evidence threshold. Nothing to implement."
+        : "No agent improvements were recorded. Nothing to implement.",
+    );
     return lines.join("\n");
   }
 
   lines.push("## Guidance", "");
   for (const note of plan.guidance) lines.push(`- ${note}`);
 
-  if (plan.recommendationCount > 0) {
-    lines.push("", "## Recommendations", "");
+  if (plan.items?.length > 0) {
+    lines.push("", patterns ? "## Pattern levers" : "## Recommendations", "");
 
     for (const item of plan.items) {
       const seen =
-        item.sources.length > 0
+        item.sources?.length > 0
           ? ` (${item.count > 1 ? `${item.count}x: ` : ""}${item.sources.join(", ")})`
           : "";
       lines.push(`### ${item.id}. [${item.priority}] ${item.area}${seen}`, "");
-      lines.push(item.suggestion, "");
-      if (item.targetFiles.length > 0) {
+      if (item.pattern) {
+        lines.push(`**Pattern:** ${item.pattern}`, "");
+        lines.push(`**Lever:** ${item.suggestion}`, "");
+      } else {
+        lines.push(item.suggestion, "");
+      }
+      if (item.targetFiles?.length > 0) {
         lines.push("**Target files:**");
         for (const file of item.targetFiles) lines.push(`- \`${file}\``);
         lines.push("");
       } else {
-        lines.push("**Target files:** (judge area `other` — pick the closest module)", "");
+        lines.push("**Target files:** (area `other` — pick the closest module)", "");
       }
-      lines.push(`Status: ${item.status}`, "");
+      lines.push(`Status: ${item.status}${item.skipReason ? ` — ${item.skipReason}` : ""}`, "");
     }
   }
 
-  if (plan.architectureInsights?.length) {
+  if (!patterns && plan.architectureInsights?.length) {
     lines.push("## Architecture patterns", "");
     lines.push(
       "Evidence-backed approach signals from telemetry. These are not edit tickets — they suggest which lever to reconsider.",
@@ -189,6 +298,18 @@ export function formatProcessingMarkdown(plan) {
       const where = insight.scenarios?.length ? ` _(seen in: ${insight.scenarios.join(", ")})_` : "";
       lines.push(`- **[${insight.priority} · ${insight.source}]** ${insight.pattern}${where}`);
       lines.push(`  - **Lever:** ${insight.lever}`);
+    }
+    lines.push("");
+  }
+
+  if (patterns && hasJudgeNotes) {
+    lines.push("## Judge notes (do not treat as tickets)", "");
+    lines.push(
+      "Freeform Cursor-judge advice from this sample. Use only as color. Skip anything that names a specific task.",
+      "",
+    );
+    for (const rec of plan.judgeNotes) {
+      lines.push(`- **[${rec.priority}] ${rec.area}:** ${rec.suggestion}`);
     }
     lines.push("");
   }
@@ -217,8 +338,28 @@ export async function processRecommendations(options = {}) {
     ? path.resolve(options.report)
     : latestReportPaths("terminal-bench", { repoRoot }).json;
 
-  const report = await loadReport(reportPath);
-  const plan = buildProcessingPlan(report, { reportPath });
+  let report = await loadReport(reportPath);
+  if (options.patterns && (!Array.isArray(report.architectureInsights) || report.architectureInsights.length === 0)) {
+    let history = [];
+    try {
+      history = await loadScoreboardHistory(path.join(repoRoot, TB_SCOREBOARD));
+    } catch {
+      history = [];
+    }
+    report = {
+      ...report,
+      architectureInsights: buildArchitectureInsights(report, {
+        history,
+        flags: report.flags,
+        maxSteps: report.maxSteps,
+      }),
+    };
+  }
+
+  const plan = buildProcessingPlan(report, {
+    reportPath,
+    patterns: options.patterns === true,
+  });
   const outputs = { plan, reportPath };
 
   if (options.json) {
@@ -247,6 +388,7 @@ Options:
   --report <path>   Report JSON (default: ../halo-agent-benchmark/recognized/terminal-bench/latest.json)
   --json <path>     Write plan JSON
   --markdown <path> Write plan markdown
+  --patterns        Plan from architecture-pattern levers, not per-task judge tips
   --help            Show this help
 `);
 }
@@ -264,6 +406,7 @@ async function main() {
     if (arg === "--report") options.report = argv[++i];
     else if (arg === "--json") options.json = argv[++i];
     else if (arg === "--markdown") options.markdown = argv[++i];
+    else if (arg === "--patterns") options.patterns = true;
     else {
       console.error(`Unknown option: ${arg}`);
       process.exitCode = 1;

@@ -80,6 +80,7 @@ On bench failure, still read the plan — partial runs write `latest.json`. On i
 
 ## Related
 
+- Pattern train loop: `/ha-train`
 - Full TB suite: `.\bin\bench-tb.ps1`
 - 5-task random sample: `.\bin\bench-tb-mini.ps1`
 - Local dev bench (no Harbor): `.\bin\bench-local.ps1`

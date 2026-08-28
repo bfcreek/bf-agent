@@ -46,13 +46,14 @@ import {
   openConfigInEditor,
 } from "./user-config.mjs";
 import {
+  DEFAULT_TASK_TIER,
   ensureModelsConfigFile,
   getModelsConfigPath,
   loadModelsConfig,
   openConfigInEditor as openModelsConfigInEditor,
   resolveCliModel,
 } from "./models-config.mjs";
-import { parseTierPresetArg } from "./tier-models.mjs";
+import { parseTierPresetArg, resolveEffectiveTierModels } from "./tier-models.mjs";
 
 function parseArgs(argv, initial = getBuiltinDefaults()) {
   const options = {
@@ -281,7 +282,7 @@ Usage:
 
 Config:
   General defaults: ${getConfigPath()} (YAML)
-  Model routing:    ${getModelsConfigPath()} (YAML — tier presets and bands)
+  Model routing:    ${getModelsConfigPath()} (YAML — tier presets, bands, vision models)
   Keys match CLI flag names (without --). Command-line flags override config values.
 
 Options:
@@ -842,12 +843,26 @@ async function main() {
   }
 
   if (options.serve) {
+    let serveTierModels = null;
+    try {
+      serveTierModels = await resolveEffectiveTierModels({
+        cliTierPreset: options.tierPreset ?? null,
+        userTierModels: modelsConfigValues.tierModels,
+        userTierPreset: modelsConfigValues.tierPreset,
+        baseUrl: options.baseUrl,
+        client,
+      });
+    } catch {
+      // Tier config optional for serve; image turns fall back to auto vision pick.
+    }
     const server = createOpenAIServer({
       client,
       registry,
       systemPrompt,
       maxSteps: options.maxSteps,
       defaultModel: options.model,
+      tierModels: serveTierModels,
+      defaultTier: options.taskTier ?? modelsConfigValues.defaultTier ?? DEFAULT_TASK_TIER,
       projectBootstrap: makeProjectBootstrap(options, client),
     });
     server.listen(options.port, () => {

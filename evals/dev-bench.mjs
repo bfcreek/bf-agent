@@ -321,7 +321,8 @@ function describeTierModels(tierModels) {
       band.throughTier != null
         ? `tier ${prev + 1}–${band.throughTier}`
         : `tier ${prev + 1}+`;
-    console.error(`  ${range}: ${band.model}`);
+    const vision = band.vision && band.vision !== band.model ? ` (vision: ${band.vision})` : "";
+    console.error(`  ${range}: ${band.model}${vision}`);
     prev = band.throughTier ?? prev;
   }
 }

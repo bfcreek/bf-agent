@@ -1038,6 +1038,7 @@ function looksLikeDiagnostic(text) {
   if (/^(file|stat)\s/i.test(text)) return true;
   if (/^(echo|printf)\b(?![\s\S]*[>&])/i.test(text)) return true;
   if (/^cat\b(?![\s\S]*[>&])/i.test(text)) return true;
+  if (/^(true|:|exit\s+0)$/i.test(text)) return true;
   return false;
 }
 
@@ -1120,7 +1121,7 @@ export function isArtifactOnlyTerminalSuccess(goal, calls) {
   return missingInstructionNamedVerification(goal, calls).length === 0;
 }
 
-function missingInstructionNamedVerification(goal, calls) {
+export function missingInstructionNamedVerification(goal, calls) {
   const missing = [];
   for (const cmd of extractNamedNodeCommands(goal).filter((c) => !String(c).startsWith("/"))) {
     if (isExistenceCheckCommand(cmd)) continue;
@@ -1128,6 +1129,10 @@ function missingInstructionNamedVerification(goal, calls) {
   }
   for (const file of extractNamedVerifyFiles(goal)) {
     if (!ranVerifyFile(calls, file, goal)) missing.push(`run ${file}`);
+  }
+  for (const cmd of extractInstructionVerifyCommands(goal)) {
+    if (ranNamedCommand(calls, cmd)) continue;
+    if (!missing.includes(cmd) && !missing.includes(`run ${cmd}`)) missing.push(cmd);
   }
   return missing;
 }
@@ -1268,6 +1273,28 @@ export function hasFailedCommandWithoutRecovery(calls) {
     if (isActualRun(c) && commandExitCode(c.result) === 0) return false;
   }
   return true;
+}
+
+/**
+ * Trailing non-diagnostic run_command failures. A later diagnostic success
+ * (ls, echo, true) does not count as recovery.
+ * @param {Array<object>} calls
+ * @param {string} [goal]
+ * @returns {number}
+ */
+export function countConsecutiveFailedWorkCommands(calls, goal = "") {
+  let n = 0;
+  for (let i = (calls ?? []).length - 1; i >= 0; i--) {
+    const c = calls[i];
+    if (!isActualRun(c)) continue;
+    const cmd = runCommandText(c);
+    if (isDiagnosticCommand(cmd, goal)) continue;
+    const code = commandExitCode(c.result);
+    if (code == null) continue;
+    if (code !== 0) n += 1;
+    else break;
+  }
+  return n;
 }
 
 function looksLikeHeredocCommand(command) {
@@ -1873,11 +1900,44 @@ export function extractNamedVerifyFiles(goal) {
     found.push(value);
   };
   for (const m of text.matchAll(
-    /\b(?:run|verify|check|against|via)\b[^.\n]{0,80}\b([\w./-]+\.json)\b/gi,
+    /\b(?:run|verify|check|against|via|execute)\b[^.\n]{0,80}\b([\w./-]+\.(json|py|sh|mjs|pl))\b/gi,
   )) {
     push(m[1]);
   }
   if (/\bexamples\.json\b/i.test(text)) push("examples.json");
+  return found;
+}
+
+/**
+ * Shell/sanity-check commands the instruction itself names (backticks or
+ * absolute binaries). Prefer these over a self-authored always-true Acceptance.
+ * @param {string} goal
+ * @returns {string[]}
+ */
+export function extractInstructionVerifyCommands(goal) {
+  const text = String(goal ?? "");
+  const found = [];
+  const push = (raw) => {
+    const cmd = trimTrailingCommandProse(
+      String(raw ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/[.,;:]+$/, ""),
+    );
+    if (!cmd || cmd.length < 4) return;
+    if (isDiagnosticCommand(cmd, goal)) return;
+    if (found.includes(cmd)) return;
+    found.push(cmd);
+  };
+
+  for (const m of text.matchAll(
+    /(?:sanity check|you can run|we will test|verify (?:by|with)|as a check)[^`\n]{0,160}`([^`]+)`/gi,
+  )) {
+    push(m[1]);
+  }
+  for (const m of text.matchAll(/`((?:\/(?:usr\/local\/bin|app|opt|tmp)\/)[^`]+)`/g)) {
+    push(m[1]);
+  }
   return found;
 }
 
@@ -2106,6 +2166,25 @@ export function mutatedBeforeTestRun(calls) {
 }
 
 /**
+ * Drop trailing English that the node/python regex swallows
+ * ("node test.mjs until it passes" → "node test.mjs").
+ * @param {string} cmd
+ * @returns {string}
+ */
+function trimTrailingCommandProse(cmd) {
+  const parts = String(cmd ?? "").trim().split(/\s+/);
+  while (
+    parts.length > 1 &&
+    /^(until|then|and|to|the|it|if|when|after|before|so|that|this|with|for|from|into|on|of|a|an|pass(?:es|ed)?|succeeds?)$/i.test(
+      parts[parts.length - 1],
+    )
+  ) {
+    parts.pop();
+  }
+  return parts.join(" ");
+}
+
+/**
  * Extract likely verify commands mentioned in the goal (node …).
  * @param {string} goal
  * @returns {string[]}
@@ -2123,11 +2202,13 @@ export function extractNamedNodeCommands(goal) {
   for (const re of patterns) {
     let m;
     while ((m = re.exec(text))) {
-      const cmd = m[0]
-        .replace(/\s+/g, " ")
-        .trim()
-        .replace(/[.,;:]+$/, "");
-      if (!found.includes(cmd)) found.push(cmd);
+      const cmd = trimTrailingCommandProse(
+        m[0]
+          .replace(/\s+/g, " ")
+          .trim()
+          .replace(/[.,;:]+$/, ""),
+      );
+      if (cmd && !found.includes(cmd)) found.push(cmd);
     }
   }
   for (const pathName of extractNamedDeliverables(text)) {

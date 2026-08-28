@@ -28,7 +28,7 @@ import {
   ollamaUrlForContainer,
   runHarborProcess,
 } from "./harbor.mjs";
-import { judgeHarborTask } from "./judge.mjs";
+import { judgeHarborTask, loadTrialAgentMetrics } from "./judge.mjs";
 import {
   latestReportPaths,
   reportPaths,
@@ -40,9 +40,11 @@ import {
   buildRecognizedReport,
   formatRecognizedConsole,
   formatRecognizedMarkdown,
+  HARBOR_RUN_FLAGS,
 } from "./report.mjs";
 import { listSuites, resolveDataset, resolveSuite } from "./registry.mjs";
 import { resolveSampledIncludes } from "./terminal-bench/sample.mjs";
+import { appendScoreboardEntry, loadScoreboardHistory, TB_SCOREBOARD } from "../scoreboard.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const PACKAGE_VERSION = JSON.parse(
@@ -259,7 +261,27 @@ async function main() {
     }
   }
 
+  for (const task of parsed.tasks) {
+    try {
+      const metrics = await loadTrialAgentMetrics(task);
+      task.steps = metrics.stepCount;
+      task.stopReason = metrics.stopReason;
+      task.escalationCount = metrics.escalationCount;
+      task.cloudUsed = metrics.cloudUsed;
+      task.verificationPassed = metrics.verificationPassed;
+    } catch {
+      task.steps = 0;
+    }
+  }
+
   const overall = summarizeTasks(parsed.tasks);
+  const scoreboardPath = path.join(REPO_ROOT, TB_SCOREBOARD);
+  let history = [];
+  try {
+    history = await loadScoreboardHistory(scoreboardPath);
+  } catch {
+    history = [];
+  }
   const report = buildRecognizedReport({
     suite: suite.id,
     suiteTitle: suite.title,
@@ -274,6 +296,9 @@ async function main() {
     harborJobDir,
     overall,
     tasks: parsed.tasks,
+    maxSteps: options.maxSteps,
+    flags: HARBOR_RUN_FLAGS,
+    history,
     environment: {
       platform: `${os.platform()} ${os.release()} ${os.arch()}`,
       node: process.version,
@@ -285,6 +310,7 @@ async function main() {
     notes: [
       "Harbor reward is the shareable mechanical score (hidden tests).",
       "Cursor judge scores are qualitative (process + artifacts), same schema as the development bench.",
+      "Architecture patterns are telemetry-backed approach signals, not task-specific tips.",
       "Ollama must be reachable from Docker (host.docker.internal). On Linux, bind Ollama to 0.0.0.0 if the container cannot connect.",
       "halo-agent command timeouts are raised for this suite via HALO_COMMAND_TIMEOUT / HALO_MAX_COMMAND_TIMEOUT.",
       ...(sampled
@@ -297,6 +323,27 @@ async function main() {
 
   console.log(formatRecognizedConsole(report));
   await writeRecognizedReports(report, runDir, suite.id);
+  try {
+    await appendScoreboardEntry(
+      {
+        suite: suite.id,
+        dataset: dataset.id,
+        model: options.model,
+        sample: sampled?.count ?? parsed.tasks.length,
+        seed: sampled?.seed ?? null,
+        avgScore: overall.judgeAvg,
+        passRate: overall.resolveRate,
+        cloudRate: overall.cloudRate,
+        avgEscalations: overall.avgEscalations,
+        avgSteps: overall.avgSteps,
+        scenarios: overall.tasks,
+        ...HARBOR_RUN_FLAGS,
+      },
+      scoreboardPath,
+    );
+  } catch (err) {
+    console.error(`scoreboard: failed to append (${err.message})`);
+  }
   process.exitCode = harborCode === 0 ? 0 : 1;
 }
 

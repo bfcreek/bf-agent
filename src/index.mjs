@@ -12,7 +12,12 @@ import { buildSystemPrompt } from "./context-builder.mjs";
 import { EscalationController, resolveModelWithEscalation } from "./escalation.mjs";
 import { formatCanonicalPrinciples } from "./memory-store.mjs";
 import { buildProjectContext } from "./project-index.mjs";
-import { ModelRoutingError, resolveModelAuto, assertToolCapable } from "./model-routing.mjs";
+import {
+  ModelRoutingError,
+  resolveModelAuto,
+  assertToolCapable,
+  assertVisionCapable,
+} from "./model-routing.mjs";
 import { OllamaClient } from "./ollama-client.mjs";
 import { configureClientModel } from "./prompt-enhancements.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
@@ -24,8 +29,10 @@ export {
   acceptanceFailureNudge,
   buildAcceptanceContract,
   buildHeuristicContract,
+  CONTRACT_PROGRESS_CRITIQUE,
   CRITIQUE_USER_MESSAGE,
   formatAcceptanceContract,
+  isVerifyOutstandingOnly,
   parseAcceptanceBlock,
   verifyAcceptanceContract,
 } from "./acceptance.mjs";
@@ -110,14 +117,19 @@ export { McpClient, McpError, registerMcpTools } from "./mcp-client.mjs";
 
 export {
   assertToolCapable,
+  assertVisionCapable,
   detectCapabilities,
   detectToolCapable,
+  detectVisionCapable,
   isCloudModel,
   isLikelyThinkingCapable,
   isLikelyToolCapable,
+  isLikelyVisionCapable,
   listClassifiedModels,
   listClassifiedModelsDetected,
   MEMORY_FIT_FRACTION,
+  messageHasImages,
+  messagesHaveImages,
   MIN_EFFECTIVE_PARAMS_B,
   ModelRoutingError,
   parseParamsBillions,
@@ -271,6 +283,7 @@ export async function createAgent({
   escalation = false,
   escalationCloud = false,
   think,
+  requireVision = false,
   client,
 } = {}) {
   let resolvedModel = model;
@@ -289,6 +302,7 @@ export async function createAgent({
         requested: resolvedModel,
         client: resolvedClient,
         escalationEnabled: escalation !== false && resolvedModel === "auto",
+        requireVision,
       });
       resolvedModel = routed.model;
       modelLadder = routed.ladder ?? [];
@@ -303,6 +317,7 @@ export async function createAgent({
         );
       }
       assertToolCapable(resolvedModel);
+      if (requireVision) assertVisionCapable(resolvedModel);
     }
   }
   const registry = new ToolRegistry();

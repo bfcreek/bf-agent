@@ -84,7 +84,7 @@ async function main() {
   // If we only have a report without history-shaped flags, still surface run patterns.
   const runOnly =
     report && (!report.architectureInsights || report.architectureInsights.length === 0)
-      ? detectRunPatterns(report.scenarios ?? [], {
+      ? detectRunPatterns(report.scenarios ?? report.tasks ?? [], {
           flags: report.flags ?? {},
           maxSteps: report.maxSteps,
         })

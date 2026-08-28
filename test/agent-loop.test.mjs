@@ -680,6 +680,30 @@ test("the gate keeps pushing rather than accepting an early premature finish", a
   ).length;
   assert.ok(blocks >= 3, `expected the gate to block repeatedly, saw ${blocks}`);
   assert.equal(result.verification.passed, false);
+  assert.equal(result.stopReason, "failed", "a hollow finish must not be marked completed");
+});
+
+test("an always-true acceptance contract is failed not completed", async () => {
+  const done = { role: "assistant", content: "Done." };
+  const client = new FakeClient([
+    { role: "assistant", content: "1. start it\n\n## Acceptance\n- command: echo ok" },
+    done,
+    done,
+    done,
+    done,
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    maxSteps: 6,
+  });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.verification.passed, false);
+  assert.ok(result.verification.missing.some((m) => /always-true|empty acceptance/i.test(m)));
+  assert.equal(result.stopReason, "failed", "a vacuous contract must not count as done");
 });
 
 test("task hints are injected into the user message", async () => {

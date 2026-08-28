@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { parseRecognizedArgs, defaultRecognizedConfig } from "../evals/recognized/config.mjs";
 import { buildHarborArgs, buildHarborEnv, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
-import { findInstructionField, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
+import { findInstructionField, loadTrialAgentMetrics, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
 import { latestReportPaths, recognizedRoot, runDirectory, timestampRunId } from "../evals/recognized/layout.mjs";
 import { parseHarborJob, summarizeTasks } from "../evals/recognized/parse.mjs";
 import { buildRecognizedReport, formatRecognizedMarkdown } from "../evals/recognized/report.mjs";
@@ -222,6 +222,44 @@ test("markdown report includes Harbor rate and Cursor judge scores", () => {
   assert.match(md, /\| 80 \| B \|/);
 });
 
+test("recognized report attaches architecture insights from task telemetry", () => {
+  const report = buildRecognizedReport({
+    suite: "terminal-bench",
+    suiteTitle: "Terminal-Bench",
+    dataset: "terminal-bench/terminal-bench-2-1",
+    overall: { tasks: 2, resolved: 0, errors: 0, resolveRate: 0, judged: 2, judgeAvg: 20, totalSeconds: 90 },
+    maxSteps: 80,
+    tasks: [
+      {
+        name: "alpha",
+        resolved: false,
+        reward: 0,
+        score: 10,
+        steps: 2,
+        stopReason: "completed",
+        verificationPassed: false,
+        verdict: { score: 10, grade: "F", summary: "Hollow.", agentImprovements: [] },
+      },
+      {
+        name: "beta",
+        resolved: false,
+        reward: 0,
+        score: 15,
+        steps: 3,
+        stopReason: "completed",
+        verificationPassed: false,
+        verdict: { score: 15, grade: "F", summary: "Hollow.", agentImprovements: [] },
+      },
+    ],
+  });
+  assert.ok(Array.isArray(report.architectureInsights));
+  assert.ok(
+    report.architectureInsights.some((i) => i.id === "hollow-completion" || i.id === "tests-mostly-failed"),
+  );
+  const md = formatRecognizedMarkdown(report);
+  assert.match(md, /Architecture patterns/);
+});
+
 test("loadTrialJudgeInput uses Harbor reward in the rubric and session steps", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-tb-trial-"));
   await mkdir(path.join(dir, "agent"), { recursive: true });
@@ -232,6 +270,10 @@ test("loadTrialJudgeInput uses Harbor reward in the rubric and session steps", a
     JSON.stringify({
       messages: [{ role: "assistant", content: "done" }],
       steps: [{ index: 1, kind: "tool", content: "", toolCalls: [{ name: "write_file", args: { path: "hello.txt" }, ok: true }] }],
+      stopReason: "completed",
+      escalationCount: 1,
+      cloudUsed: false,
+      verification: { passed: true },
     }),
     "utf8",
   );
@@ -248,6 +290,11 @@ test("loadTrialJudgeInput uses Harbor reward in the rubric and session steps", a
   assert.match(packed.scenario.rubric, /Harbor verifier reward: 1/);
   assert.match(packed.preamble, /Terminal-Bench/);
   assert.equal(packed.agentResult.steps.length, 1);
+
+  const metrics = await loadTrialAgentMetrics({ trialDir: dir });
+  assert.equal(metrics.stepCount, 1);
+  assert.equal(metrics.escalationCount, 1);
+  assert.equal(metrics.verificationPassed, true);
 
   const prompt = buildJudgePrompt({
     scenario: packed.scenario,

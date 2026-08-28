@@ -90,6 +90,41 @@ test("early steps with work outstanding do not escalate", () => {
   assert.equal(computeStruggleScore(early), 0);
 });
 
+test("hollow completion with no tools is struggle after two paid steps", () => {
+  const firstTurn = { ...CALM, workOutstanding: true, hollowCompletion: true, paidSteps: 1 };
+  const later = { ...CALM, workOutstanding: true, hollowCompletion: true, paidSteps: 2 };
+  assert.equal(computeStruggleScore(firstTurn), 0, "turn 1 can still try");
+  assert.ok(computeStruggleScore(later) >= DEFAULT_ESCALATION_THRESHOLD);
+});
+
+test("two consecutive failed work commands with work outstanding is struggle", () => {
+  const oneFail = { ...CALM, workOutstanding: true, consecutiveFailedRuns: 1 };
+  const twoFails = { ...CALM, workOutstanding: true, consecutiveFailedRuns: 2 };
+  assert.equal(computeStruggleScore(oneFail), 0, "a single failed pretest must not escalate");
+  assert.ok(computeStruggleScore(twoFails) >= DEFAULT_ESCALATION_THRESHOLD);
+});
+
+test("budget pressure does not escalate when only verify commands remain", () => {
+  const verifyOnly = {
+    ...CALM,
+    budgetPressure: 0.9,
+    workOutstanding: true,
+    verifyOutstandingOnly: true,
+  };
+  const stillBuilding = {
+    ...CALM,
+    budgetPressure: 0.9,
+    workOutstanding: true,
+    verifyOutstandingOnly: false,
+  };
+  assert.equal(
+    computeStruggleScore(verifyOnly),
+    0,
+    "missing verify alone must use the acceptance nudge, not the model ladder",
+  );
+  assert.ok(computeStruggleScore(stillBuilding) >= DEFAULT_ESCALATION_THRESHOLD);
+});
+
 test("paramsBOf reads the size out of a model tag", () => {
   assert.equal(paramsBOf("qwen3:14b"), 14);
   assert.equal(paramsBOf("gpt-oss:120b-cloud"), 120);

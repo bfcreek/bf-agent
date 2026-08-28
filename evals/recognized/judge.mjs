@@ -155,6 +155,10 @@ export async function agentResultFromTrial(trialDir) {
         stopReason: inferAgentStopReason(session, { stdout: stdout ?? "" }),
         steps: session.steps ?? [],
         messages,
+        escalationCount: session.escalationCount ?? 0,
+        cloudUsed: session.cloudUsed ?? false,
+        verification: session.verification ?? null,
+        verificationPassed: session.verification?.passed ?? session.verificationPassed ?? null,
       };
     } catch {
       // fall through
@@ -165,6 +169,34 @@ export async function agentResultFromTrial(trialDir) {
     stopReason: inferAgentStopReason(null, { stdout: stdout ?? "" }),
     steps: [],
     messages: [],
+    escalationCount: 0,
+    cloudUsed: false,
+    verification: null,
+    verificationPassed: null,
+  };
+}
+
+/**
+ * Telemetry the pattern detector needs, pulled from a Harbor trial session.
+ * @param {object} task
+ */
+export async function loadTrialAgentMetrics(task) {
+  if (!task?.trialDir) {
+    return {
+      stepCount: 0,
+      stopReason: null,
+      escalationCount: 0,
+      cloudUsed: false,
+      verificationPassed: null,
+    };
+  }
+  const result = await agentResultFromTrial(task.trialDir);
+  return {
+    stepCount: (result.steps ?? []).length,
+    stopReason: result.stopReason ?? null,
+    escalationCount: result.escalationCount ?? 0,
+    cloudUsed: result.cloudUsed ?? false,
+    verificationPassed: result.verificationPassed ?? result.verification?.passed ?? null,
   };
 }
 

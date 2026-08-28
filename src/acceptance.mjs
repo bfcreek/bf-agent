@@ -3,16 +3,21 @@
  * the plan or goal heuristics, verified before the agent loop accepts done.
  */
 
-import { access } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
   commandExitCode,
+  countConsecutiveFailedWorkCommands,
+  extractInstructionVerifyCommands,
   extractNamedDeliverables,
   extractNamedNodeCommands,
   extractNamedVerifyFiles,
   flattenToolCalls,
   isCreatedFileDeliverable,
+  isDiagnosticCommand,
+  goalNeedsSubstantiveTools,
+  missingInstructionNamedVerification,
   missingRequiredVerification,
   MUTATING_TOOL_NAMES,
   ranNamedCommand,
@@ -123,6 +128,17 @@ export function buildHeuristicContract(goal) {
     checks.push({ kind: "command", target: `run ${file}`, description: `Verify file runs: ${file}` });
   }
 
+  // Prefer the instruction's own sanity-check / "you can run" commands over a
+  // model-authored Acceptance block that invents always-true probes.
+  for (const cmd of extractInstructionVerifyCommands(text)) {
+    if (checks.some((c) => c.kind === "command" && c.target === cmd)) continue;
+    checks.push({
+      kind: "command",
+      target: cmd,
+      description: `Instruction verify command: ${cmd}`,
+    });
+  }
+
   return { checks, outputShape: "", source: "heuristic" };
 }
 
@@ -205,6 +221,14 @@ export const CRITIQUE_USER_MESSAGE = [
   "Reply with a revised plan and ## Acceptance — still no tool calls.",
 ].join(" ");
 
+/** Mid-run: cheaper than escalating when checks are stuck unmet. */
+export const CONTRACT_PROGRESS_CRITIQUE = [
+  "Acceptance checks are still unmet. Critique the remaining work against the contract,",
+  "then make the single next tool call that satisfies an unmet check",
+  "(run the named verify command, or create/fill a missing non-empty deliverable).",
+  "Do not answer with another plan-only revision.",
+].join(" ");
+
 async function deliverableExists(workspaceRoot, relPath) {
   const root = path.resolve(workspaceRoot);
   const target = path.resolve(root, relPath.replace(/^\.\//, ""));
@@ -213,7 +237,10 @@ async function deliverableExists(workspaceRoot, relPath) {
     return { passed: false, detail: "path escapes workspace" };
   }
   try {
-    await access(target);
+    const info = await stat(target);
+    if (info.size === 0) {
+      return { passed: false, detail: "file exists but is empty" };
+    }
     return { passed: true, detail: "file exists" };
   } catch {
     return { passed: false, detail: "file not found" };
@@ -224,6 +251,7 @@ async function deliverableExists(workspaceRoot, relPath) {
  * A successful mutating tool call on the same path is accepted as evidence.
  * The tool resolves paths against its own root, which is not always the root
  * the loop probes, so a disk miss alone would produce false negatives.
+ * Empty writes are not evidence — an empty artifact is not a deliverable.
  */
 function wroteDeliverable(calls, relPath) {
   const wanted = relPath.replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase();
@@ -233,7 +261,10 @@ function wroteDeliverable(calls, relPath) {
       .replace(/\\/g, "/")
       .toLowerCase();
     if (!written) return false;
-    return written === wanted || written.endsWith(`/${wanted}`);
+    if (!(written === wanted || written.endsWith(`/${wanted}`))) return false;
+    const content = call.args?.content ?? call.args?.text;
+    if (content !== undefined && String(content).trim().length === 0) return false;
+    return true;
   });
 }
 
@@ -257,8 +288,19 @@ function matchingSilentRun(calls, normalized) {
   });
 }
 
-function commandCheckPassed(calls, target) {
+function isVacuousAcceptanceCommand(target, goal = "") {
   const normalized = String(target ?? "").replace(/^run\s+/i, "").trim();
+  return isDiagnosticCommand(normalized, goal) || /^(true|:|exit\s+0)$/i.test(normalized);
+}
+
+function commandCheckPassed(calls, target, goal = "") {
+  const normalized = String(target ?? "").replace(/^run\s+/i, "").trim();
+  if (isVacuousAcceptanceCommand(normalized, goal)) {
+    return {
+      passed: false,
+      detail: "trivial/diagnostic command is not an acceptance check",
+    };
+  }
 
   for (const call of calls ?? []) {
     if (call?.name !== "run_command" || !call.ok) continue;
@@ -317,30 +359,85 @@ export async function verifyAcceptanceContract({
       });
       if (!result.passed) missing.push(`create ${check.target}`);
     } else if (check.kind === "command") {
-      const result = commandCheckPassed(calls, check.target);
+      const result = commandCheckPassed(calls, check.target, goal);
       results.push({
         kind: "command",
         target: check.target,
         passed: result.passed,
         detail: result.detail,
       });
-      if (!result.passed) missing.push(`run ${check.target}`);
+      if (!result.passed && !isVacuousAcceptanceCommand(check.target, goal)) {
+        missing.push(`run ${check.target}`);
+      }
     }
   }
 
-  // Heuristic verification gaps stay advisory: the nudge pipeline already
-  // enforces them under narrower conditions, so gating on them here would
-  // block final answers the loop is meant to accept.
+  // The instruction's own named verify/run commands are gated. Broader
+  // heuristics (test-suite phrasing, merge, pytorch) stay advisory so they
+  // do not stall answers the loop is meant to accept.
+  for (const item of missingInstructionNamedVerification(goal, calls)) {
+    if (!missing.includes(item)) missing.push(item);
+  }
+
   const advisory = missingRequiredVerification(goal, calls).filter(
     (item) => !missing.includes(item),
   );
 
+  const workGoal = goalNeedsSubstantiveTools(goal);
+  const onlyVacuousChecks =
+    results.length > 0 &&
+    results.every(
+      (r) => r.kind === "command" && isVacuousAcceptanceCommand(r.target, goal),
+    );
+
+  // An empty or always-true contract that always "passes" teaches the loop
+  // nothing. On work goals that is a defect, not a skip; Q&A / explain goals
+  // may still complete without checks.
+  if (workGoal && (results.length === 0 || onlyVacuousChecks)) {
+    missing.push(
+      results.length === 0
+        ? "empty acceptance contract is not a pass — derive deliverable or verify checks from the goal"
+        : "always-true acceptance contract is not a pass — derive deliverable or verify checks from the goal",
+    );
+  }
+
+  if (workGoal && countConsecutiveFailedWorkCommands(calls, goal) >= 1) {
+    const item = "last command exited non-zero — fix and re-run before finishing";
+    if (!missing.includes(item)) missing.push(item);
+  }
+
   return {
-    passed: results.every((r) => r.passed),
+    passed: missing.length === 0 && (results.length === 0 || results.every((r) => r.passed)),
     checks: results,
     missing,
     advisory,
   };
+}
+
+/**
+ * True when the only outstanding work is running verify/work commands — not
+ * creating deliverables or fixing a hollow contract. Escalating models is the
+ * wrong lever here; the acceptance nudge should force the verify step.
+ * @param {VerificationResult|null|undefined} verification
+ * @returns {boolean}
+ */
+export function isVerifyOutstandingOnly(verification) {
+  if (!verification || verification.passed) return false;
+  const missing = verification.missing ?? [];
+  if (!missing.length) return false;
+  if (
+    missing.some((m) =>
+      /empty acceptance contract|always-true acceptance contract|^create /i.test(m),
+    )
+  ) {
+    return false;
+  }
+  return missing.every(
+    (m) =>
+      /^run /i.test(m) ||
+      /non-zero/i.test(m) ||
+      /\b(node|python3?|py|dotnet|pytest|make|cargo|go)\b/i.test(m),
+  );
 }
 
 /**
@@ -350,7 +447,14 @@ export async function verifyAcceptanceContract({
  */
 export function acceptanceFailureNudge(verification) {
   if (!verification || verification.passed) return null;
-  const items = verification.missing.slice(0, 6);
+  const missing = verification.missing ?? [];
+  const onlyVacuous =
+    missing.length > 0 &&
+    missing.every((item) =>
+      /empty acceptance contract|always-true acceptance contract/i.test(item),
+    );
+  if (onlyVacuous) return null;
+  const items = missing.slice(0, 6);
   if (!items.length) {
     const failed = verification.checks.filter((c) => !c.passed);
     if (!failed.length) return null;

@@ -6,6 +6,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 export const DEFAULT_SCOREBOARD = "evals/scoreboard-history.jsonl";
+export const TB_SCOREBOARD = "evals/tb-scoreboard-history.jsonl";
 
 /**
  * @param {Array<object>} results

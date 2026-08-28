@@ -111,6 +111,22 @@ test("merge persists stopReason and error from failed runs", () => {
   assert.equal(merged.error, "error parsing tool call");
 });
 
+test("merge persists closed-loop telemetry from a run", () => {
+  const store = new SessionStore({ workspaceRoot: root });
+  const merged = store.merge("tb", null, {
+    messages: [],
+    steps: [{ index: 1 }],
+    stopReason: "completed",
+    escalationCount: 2,
+    cloudUsed: true,
+    verification: { passed: false, missing: ["write output"] },
+  });
+  assert.equal(merged.escalationCount, 2);
+  assert.equal(merged.cloudUsed, true);
+  assert.equal(merged.verificationPassed, false);
+  assert.equal(merged.verification.passed, false);
+});
+
 test("list returns saved session names", async () => {
   const store = new SessionStore({ dir: path.join(root, "list-test") });
   assert.deepEqual(await store.list(), []);

@@ -5,6 +5,7 @@ import {
   acceptanceFailureNudge,
   buildAcceptanceContract,
   buildHeuristicContract,
+  isVerifyOutstandingOnly,
   parseAcceptanceBlock,
   verifyAcceptanceContract,
 } from "../src/acceptance.mjs";
@@ -120,7 +121,7 @@ test("a command that exits 0 with output satisfies its check", async () => {
   assert.equal(result.passed, true);
 });
 
-test("heuristic verification gaps are advisory, not gated on", async () => {
+test("heuristic verification gaps stay advisory; empty contracts fail on work goals", async () => {
   const goal = "implement a new feature and then run the tests to verify";
   const contract = buildAcceptanceContract(goal);
 
@@ -131,7 +132,150 @@ test("heuristic verification gaps are advisory, not gated on", async () => {
     workspaceRoot: process.cwd(),
   });
 
-  assert.equal(result.passed, true, "an empty contract must not block completion");
+  assert.equal(result.passed, false, "an empty contract is not a pass on a work goal");
+  assert.ok(result.missing.some((m) => /empty acceptance contract/i.test(m)));
   assert.ok(result.advisory.length > 0, "the unmet verify heuristic should still be reported");
-  assert.equal(acceptanceFailureNudge(result), null);
+  assert.equal(acceptanceFailureNudge(result), null, "tool work with a vacuous contract must not stall");
+});
+
+test("empty contracts still pass on question goals", async () => {
+  const result = await verifyAcceptanceContract({
+    contract: { checks: [], source: "heuristic" },
+    steps: [],
+    goal: "What does README.md say about setup?",
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, true);
+});
+
+test("an always-true diagnostic command is not a passing contract", async () => {
+  const goal = "implement a new feature and then run the tests to verify";
+  const result = await verifyAcceptanceContract({
+    contract: { checks: [{ kind: "command", target: "echo ok" }], source: "plan" },
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "echo ok" },
+            result: { exitCode: 0, stdout: "ok\n", stderr: "" },
+          },
+        ],
+      },
+    ],
+    goal,
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /always-true acceptance contract/i.test(m)));
+  assert.equal(acceptanceFailureNudge(result), null, "vacuous contracts must not stall");
+});
+
+test("instruction-named verify commands are gated even when the plan authored a weak check", async () => {
+  const goal = "port the script to Python and then run python eval.py";
+  const result = await verifyAcceptanceContract({
+    contract: { checks: [{ kind: "command", target: "echo done" }], source: "plan" },
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "echo done" },
+            result: { exitCode: 0, stdout: "done\n", stderr: "" },
+          },
+        ],
+      },
+    ],
+    goal,
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /eval\.py/i.test(m)));
+  assert.match(acceptanceFailureNudge(result) ?? "", /eval\.py/i);
+});
+
+test("a failed work command without recovery is not a pass", async () => {
+  const goal = "implement a new feature and then run the tests to verify";
+  const result = await verifyAcceptanceContract({
+    contract: { checks: [{ kind: "command", target: "node test.mjs" }], source: "plan" },
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "node test.mjs" },
+            result: { exitCode: 1, stdout: "fail\n", stderr: "" },
+          },
+        ],
+      },
+    ],
+    goal,
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /non-zero/i.test(m)));
+});
+
+test("an empty written deliverable is not a pass", async () => {
+  const contract = { checks: [{ kind: "deliverable", target: "out.txt" }] };
+  const result = await verifyAcceptanceContract({
+    contract,
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "write_file",
+            ok: true,
+            args: { path: "out.txt", content: "" },
+            result: { path: "out.txt" },
+          },
+        ],
+      },
+    ],
+    goal: "Create output file titled out.txt",
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /out\.txt/.test(m)));
+});
+
+test("instruction sanity-check commands become heuristic acceptance checks", () => {
+  const goal =
+    "Build the tool. As a sanity check you can run `/usr/local/bin/tool +I/app/in.pov +O/dev/null`.";
+  const contract = buildHeuristicContract(goal);
+  assert.ok(
+    contract.checks.some(
+      (c) => c.kind === "command" && /\/usr\/local\/bin\/tool/.test(c.target),
+    ),
+  );
+});
+
+test("isVerifyOutstandingOnly is true only for unmet verify commands", () => {
+  assert.equal(
+    isVerifyOutstandingOnly({
+      passed: false,
+      missing: ["run python eval.py"],
+      checks: [],
+    }),
+    true,
+  );
+  assert.equal(
+    isVerifyOutstandingOnly({
+      passed: false,
+      missing: ["create out.txt"],
+      checks: [],
+    }),
+    false,
+  );
+  assert.equal(
+    isVerifyOutstandingOnly({
+      passed: false,
+      missing: ["empty acceptance contract is not a pass — derive deliverable or verify checks from the goal"],
+      checks: [],
+    }),
+    false,
+  );
 });

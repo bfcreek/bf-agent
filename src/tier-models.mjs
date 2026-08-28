@@ -2,12 +2,15 @@
  * Tier-based model routing: map scenario difficulty tiers to Ollama models.
  * Presets and explicit bands live in ~/.config/halo-agent/models.yaml; bench
  * config can override per project.
+ *
+ * Each band has a primary `model` and an optional `vision` model used when
+ * the request carries image attachments (same band / tier selection rules).
  */
 
 import { OllamaClient } from "./ollama-client.mjs";
 import { suggestModel } from "./model-routing.mjs";
 
-/** @typedef {{throughTier?: number, model: string}} TierModelBand */
+/** @typedef {{throughTier?: number, model: string, vision?: string}} TierModelBand */
 
 export const DEFAULT_TIER_PRESET = "auto";
 
@@ -15,21 +18,21 @@ export const DEFAULT_TIER_PRESET = "auto";
 export const TIER_PRESETS = {
   /** Ollama cloud only — no local GPU or RAM required. */
   cloud: [
-    { throughTier: 1, model: "glm-4.6:cloud" },
-    { throughTier: 3, model: "kimi-k2.6:cloud" },
-    { model: "kimi-k2.7-code:cloud" },
+    { throughTier: 1, model: "glm-4.6:cloud", vision: "kimi-k2.6:cloud" },
+    { throughTier: 3, model: "kimi-k2.6:cloud", vision: "kimi-k2.6:cloud" },
+    { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
   ],
   /** Local models for easy/medium work; cloud for hard tiers. */
   hybrid: [
-    { throughTier: 1, model: "qwen3-coder:14b" },
-    { throughTier: 3, model: "qwen3-coder:30b" },
-    { model: "kimi-k2.7-code:cloud" },
+    { throughTier: 1, model: "qwen3-coder:14b", vision: "devstral-small-2" },
+    { throughTier: 3, model: "qwen3-coder:30b", vision: "devstral-small-2" },
+    { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
   ],
   /** Local models only — needs a capable GPU and enough RAM/VRAM. */
   local: [
-    { throughTier: 1, model: "qwen3-coder:14b" },
-    { throughTier: 3, model: "qwen3-coder:30b" },
-    { model: "qwen3-coder:30b" },
+    { throughTier: 1, model: "qwen3-coder:14b", vision: "devstral-small-2" },
+    { throughTier: 3, model: "qwen3-coder:30b", vision: "devstral-small-2" },
+    { model: "qwen3-coder:30b", vision: "devstral-small-2" },
   ],
 };
 
@@ -48,18 +51,28 @@ export function parseTierPresetArg(raw) {
 }
 
 /**
+ * Pick the band for a difficulty tier, then return its primary or vision model.
+ *
  * @param {number} tier
  * @param {TierModelBand[]|null|undefined} tierModels
  * @param {string} fallback
+ * @param {{requireVision?: boolean}} [options]
  * @returns {string}
  */
-export function resolveTierModel(tier, tierModels, fallback) {
+export function resolveTierModel(tier, tierModels, fallback, { requireVision = false } = {}) {
   if (!tierModels?.length) return fallback;
-  for (const band of tierModels) {
-    if (band.throughTier == null) continue;
-    if (tier <= band.throughTier) return band.model;
+  let band = null;
+  for (const candidate of tierModels) {
+    if (candidate.throughTier == null) continue;
+    if (tier <= candidate.throughTier) {
+      band = candidate;
+      break;
+    }
   }
-  return tierModels[tierModels.length - 1]?.model ?? fallback;
+  if (!band) band = tierModels[tierModels.length - 1];
+  if (!band) return fallback;
+  if (requireVision && band.vision) return band.vision;
+  return band.model || fallback;
 }
 
 /**
@@ -71,9 +84,11 @@ export function uniqueTierModels(tierModels) {
   const seen = new Set();
   const out = [];
   for (const band of tierModels) {
-    if (!band.model || seen.has(band.model)) continue;
-    seen.add(band.model);
-    out.push(band.model);
+    for (const name of [band.model, band.vision]) {
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
   }
   return out;
 }
@@ -90,15 +105,20 @@ export function normalizeTierModelBand(band, index) {
   const raw = /** @type {Record<string, unknown>} */ (band);
   const model = raw.model ?? raw.Model;
   const throughTier = raw.throughTier ?? raw["through-tier"];
+  const vision = raw.vision ?? raw.Vision;
   if (typeof model !== "string" || !model.trim()) {
     throw new Error(`tier-models[${index}] requires a model string.`);
   }
   if (throughTier != null && !Number.isFinite(Number(throughTier))) {
     throw new Error(`tier-models[${index}].through-tier must be a number when set.`);
   }
+  if (vision != null && (typeof vision !== "string" || !vision.trim())) {
+    throw new Error(`tier-models[${index}].vision must be a model string when set.`);
+  }
   return {
     model: model.trim(),
     ...(throughTier != null ? { throughTier: Number(throughTier) } : {}),
+    ...(vision != null ? { vision: String(vision).trim() } : {}),
   };
 }
 
@@ -106,7 +126,7 @@ export function normalizeTierModelBand(band, index) {
 export function normalizeTierModels(raw) {
   if (raw == null) return null;
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new Error("tier-models must be a non-empty list of { through-tier?, model } bands.");
+    throw new Error("tier-models must be a non-empty list of { through-tier?, model, vision? } bands.");
   }
   return raw.map((band, index) => normalizeTierModelBand(band, index));
 }

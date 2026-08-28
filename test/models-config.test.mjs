@@ -16,12 +16,16 @@ test("normalizeModelsConfigValues accepts preset, default-tier, and bands", () =
   const { values, errors } = normalizeModelsConfigValues({
     preset: "cloud",
     "default-tier": 3,
-    bands: [{ "through-tier": 1, model: "glm-4.6:cloud" }, { model: "kimi-k2.7-code:cloud" }],
+    bands: [
+      { "through-tier": 1, model: "glm-4.6:cloud", vision: "kimi-k2.6:cloud" },
+      { model: "kimi-k2.7-code:cloud" },
+    ],
   });
   assert.deepEqual(errors, []);
   assert.equal(values.tierPreset, "cloud");
   assert.equal(values.defaultTier, 3);
   assert.equal(values.tierModels[0].throughTier, 1);
+  assert.equal(values.tierModels[0].vision, "kimi-k2.6:cloud");
 });
 
 test("ensureModelsConfigFile creates models.yaml template", async () => {
@@ -35,6 +39,7 @@ test("ensureModelsConfigFile creates models.yaml template", async () => {
     const text = await readFile(configPath, "utf8");
     assert.match(text, /preset: auto/);
     assert.match(text, /default-tier:/);
+    assert.match(text, /vision:/);
   } finally {
     process.env = previous;
     await rm(dir, { recursive: true, force: true });
@@ -118,4 +123,34 @@ test("resolveCliModel --tier-preset overrides models.yaml bands", async () => {
   );
   assert.equal(routed.model, "qwen3-coder:14b");
   assert.deepEqual(getTierPresetBands("hybrid")[0].model, "qwen3-coder:14b");
+});
+
+test("resolveCliModel requireVision uses the band vision model", async () => {
+  const client = {
+    async listModelsDetailed() {
+      return [
+        { name: "qwen3-coder:14b", sizeBytes: 9e9, parameterSize: "14B" },
+        { name: "devstral-small-2:latest", sizeBytes: 15e9, parameterSize: "24B" },
+      ];
+    },
+    async show({ model }) {
+      if (model.startsWith("devstral")) {
+        return { capabilities: ["tools", "vision"] };
+      }
+      return { capabilities: ["tools", "thinking"] };
+    },
+  };
+  const routed = await resolveCliModel(
+    {
+      model: "tier",
+      baseUrl: "http://127.0.0.1:11434",
+      tierPreset: "hybrid",
+      taskTier: 1,
+      requireVision: true,
+    },
+    client,
+    normalizeModelsConfigValues({}).values,
+    false,
+  );
+  assert.equal(routed.model, "devstral-small-2:latest");
 });

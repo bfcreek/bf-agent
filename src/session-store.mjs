@@ -72,6 +72,14 @@ export class SessionStore {
       changedFiles: [...changed].sort((a, b) => a.localeCompare(b)),
       stopReason: runResult.stopReason ?? existing?.stopReason,
       error: runResult.error ?? existing?.error,
+      escalationCount: runResult.escalationCount ?? existing?.escalationCount ?? 0,
+      cloudUsed: runResult.cloudUsed ?? existing?.cloudUsed ?? false,
+      verification: runResult.verification ?? existing?.verification ?? null,
+      verificationPassed:
+        runResult.verification?.passed ??
+        runResult.verificationPassed ??
+        existing?.verificationPassed ??
+        null,
     };
   }
 

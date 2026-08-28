@@ -360,6 +360,9 @@ npm run bench:recognized -- --list
 `bench-tb-mini` shuffles the Terminal-Bench 2.1 catalog and runs **5** tasks (override with `-Count`). That is not Harbor `--n-tasks`, which takes the first N after filters. The chosen names and RNG seed are printed (`sample: … (seed N)`); pass `-Seed` / `--seed` to repeat the same draw. `--include` still works: the sample is drawn from that list instead of the full catalog.
 
 `--skip-judge` records only Harbor pass/fail. Default is to judge every trial.
+The report also includes **architecture patterns** from task telemetry (Harbor
+pass/fail, steps, verification, escalation) rather than only per-task judge tips.
+`/ha-train` samples random TB tasks and assimilates those pattern levers.
 
 Needs Docker, [Harbor](https://harborframework.com/) (`uv tool install harbor`),
 Ollama reachable from containers (`host.docker.internal`), and the Cursor CLI
