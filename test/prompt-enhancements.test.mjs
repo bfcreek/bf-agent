@@ -34,6 +34,7 @@ import {
   isFollowUpGoal,
   hasPyCompileOnlyWithoutFunctionalTest,
   isHarborStyleGoal,
+  goalNeedsSubstantiveTools,
   isMlPyTorchGoal,
   isPytorchModelCliGoal,
   ranPytorchCliSmoke,
@@ -107,6 +108,11 @@ test("formatExplicitGoals surfaces deliverables, verification, and fallbacks", (
   assert.match(fallback, /^## Goals\n- Before acting, state 2–5 explicit outcomes/);
 
   assert.equal(formatExplicitGoals(""), "");
+
+  const vendored = formatExplicitGoals(
+    "Compile SQLite in /app/sqlite. The snapshot is pre-vendored at /app/vendor/sqlite-fossil-release.tar.gz.",
+  );
+  assert.doesNotMatch(vendored, /vendor\/sqlite-fossil-release/);
 });
 
 test("shouldPlanGoal runs for short create goals, not only long ones", () => {
@@ -1056,6 +1062,7 @@ test("environment probes do not latch verification or block later build steps", 
   const goal =
     "Under /tmp/CompCert/, build the CompCert C verified compiler from source. Ensure that CompCert can be invoked through /tmp/CompCert/ccomp.";
   assert.equal(isHarborStyleGoal(goal), true);
+  assert.equal(goalNeedsSubstantiveTools(goal), true);
   assert.ok(extractNamedNodeCommands(goal).some((c) => /\/tmp\/CompCert\/ccomp/.test(c)));
   assert.equal(isDiagnosticCommand("apt-get --version", goal), true);
   assert.equal(isDiagnosticCommand("apt-cache policy", goal), true);

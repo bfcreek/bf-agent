@@ -97,6 +97,14 @@ test("hollow completion with no tools is struggle after two paid steps", () => {
   assert.ok(computeStruggleScore(later) >= DEFAULT_ESCALATION_THRESHOLD);
 });
 
+test("hollow completion escalates even when the contract looks satisfied", () => {
+  const later = { ...CALM, workOutstanding: false, hollowCompletion: true, paidSteps: 2 };
+  assert.ok(
+    computeStruggleScore(later) >= DEFAULT_ESCALATION_THRESHOLD,
+    "calmly producing nothing should escalate even if checks already pass on disk",
+  );
+});
+
 test("two consecutive failed work commands with work outstanding is struggle", () => {
   const oneFail = { ...CALM, workOutstanding: true, consecutiveFailedRuns: 1 };
   const twoFails = { ...CALM, workOutstanding: true, consecutiveFailedRuns: 2 };

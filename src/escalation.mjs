@@ -77,6 +77,8 @@ export function computeStruggleScore(state) {
   }
   // Calmly producing nothing is more valuable to escalate than a visible loop.
   // Wait for at least one empty reply or two paid steps so turn 1 can still try.
+  // Do not require workOutstanding: a plan that authorizes checks (or that
+  // treats an existing input as done) can still be a hollow run.
   if (
     state.hollowCompletion &&
     ((state.paidSteps ?? 0) >= 2 || (state.consecutiveEmpty ?? 0) >= 1)

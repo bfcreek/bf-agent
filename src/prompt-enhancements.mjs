@@ -820,7 +820,7 @@ export const MUTATION_BLOCKED_PRETEST =
   "Blocked: this task mentions failing tests. Run the test command with run_command and inspect the failure before edit_file or write_file.";
 
 const ACTION_GOAL =
-  /\b(create|write|build|fix|edit|change|update|implement|modify|extract|refactor|rename|move|persist|include|merge|resolve)\b/i;
+  /\b(create|write|build|compile|install|configure|instrument|fix|edit|change|update|implement|modify|extract|refactor|rename|move|persist|include|merge|resolve)\b/i;
 const RUN_TEST_GOAL = /\b(run|test)\b.{0,40}\b(node|npm|python|py|dotnet|test|spec|\.mjs|\.js|\.ts|\.py|\.cs)\b/i;
 const ADD_FEATURE_GOAL = /\badd\b.{0,40}\b(cli|flag|route|feature|function|file|module|test|support)\b/i;
 const READ_GOAL =
@@ -841,7 +841,8 @@ export function goalNeedsSubstantiveTools(goal) {
     RUN_TEST_GOAL.test(text) ||
     ADD_FEATURE_GOAL.test(text) ||
     READ_GOAL.test(text) ||
-    LOCATE_GOAL.test(text)
+    LOCATE_GOAL.test(text) ||
+    isHarborStyleGoal(text)
   );
 }
 
@@ -1645,6 +1646,7 @@ export function extractNamedDeliverables(goal) {
       .replace(/^[`'"]+|[`'".;,:]+$/g, "")
       .replace(/[.,;:]+$/, "");
     if (!value || value.length < 3) return;
+    if (isWorkspaceInputPath(value)) return;
     if (found.includes(value)) return;
     found.push(value);
   };
@@ -1691,6 +1693,16 @@ export function extractNumberedDeliverablePaths(goal) {
 
 export function isCreatedFileDeliverable(filePath) {
   return DATA_FILE_EXT.test(String(filePath ?? ""));
+}
+
+/**
+ * Vendor trees and similar pre-supplied snapshots are inputs, not outputs.
+ * Treating them as deliverables makes an empty run look finished.
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export function isWorkspaceInputPath(filePath) {
+  return /(?:^|\/)vendor\//i.test(String(filePath ?? "").replace(/\\/g, "/"));
 }
 
 export function isHarborStyleGoal(goal) {

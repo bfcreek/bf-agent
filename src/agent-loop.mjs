@@ -690,7 +690,7 @@ export class AgentLoop {
       searchLoop: Boolean(repeatedSearchLoopNudge({ steps })),
       budgetPressure,
       workOutstanding,
-      hollowCompletion: workOutstanding && substantiveToolsUsed(steps).size === 0,
+      hollowCompletion: goalNeedsSubstantiveTools(goal) && substantiveToolsUsed(steps).size === 0,
       paidSteps,
       consecutiveFailedRuns: countConsecutiveFailedWorkCommands(flattenToolCalls(steps), goal),
       verifyOutstandingOnly,
@@ -743,7 +743,7 @@ export class AgentLoop {
 
       budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
 
-      if (this.acceptance && (budgetPressure >= 0.5 || !(acceptanceContract?.checks?.length))) {
+      if (this.acceptance) {
         const progress = await verifyAcceptanceContract({
           contract: acceptanceContract,
           steps,
@@ -752,18 +752,16 @@ export class AgentLoop {
         });
         workOutstanding = !progress.passed;
         verifyOutstandingOnly = isVerifyOutstandingOnly(progress);
-        if (acceptanceContract?.checks?.length) {
-          const fingerprint = missingKey(progress.missing);
-          if (!progress.passed && fingerprint) {
-            if (fingerprint === lastMissingFingerprint) stuckMissingCount += 1;
-            else {
-              lastMissingFingerprint = fingerprint;
-              stuckMissingCount = 1;
-            }
-          } else {
-            lastMissingFingerprint = "";
-            stuckMissingCount = 0;
+        const fingerprint = missingKey(progress.missing);
+        if (!progress.passed && fingerprint) {
+          if (fingerprint === lastMissingFingerprint) stuckMissingCount += 1;
+          else {
+            lastMissingFingerprint = fingerprint;
+            stuckMissingCount = 1;
           }
+        } else {
+          lastMissingFingerprint = "";
+          stuckMissingCount = 0;
         }
         // Cheaper than escalating: once the same unmet checks repeat, force a
         // contract-vs-plan critique that ends in a tool call.
@@ -805,10 +803,13 @@ export class AgentLoop {
         paidSteps - lastReplanPaidSteps >= 2 &&
         !signal?.aborted
       ) {
-        const struggle = computeStruggleScore(struggleState());
+        const state = struggleState();
+        // Hollow / no-tool runs need a tool call or a stronger model, not another
+        // plan revision — that is the failure mode that accepts a hollow finish.
+        const struggle = computeStruggleScore({ ...state, hollowCompletion: false });
         const shouldReplan =
           struggle >= DEFAULT_ESCALATION_THRESHOLD ||
-          stuckMissingCount >= 2 ||
+          (stuckMissingCount >= 2 && !state.hollowCompletion) ||
           repeatedCount >= MAX_REPEATED_STEPS ||
           Boolean(ambiguousEditRecoveryNudge({ steps }));
         if (shouldReplan) {

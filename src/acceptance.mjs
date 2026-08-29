@@ -16,12 +16,15 @@ import {
   flattenToolCalls,
   isCreatedFileDeliverable,
   isDiagnosticCommand,
+  isExistenceCheckCommand,
+  isWorkspaceInputPath,
   goalNeedsSubstantiveTools,
   missingInstructionNamedVerification,
   missingRequiredVerification,
   MUTATING_TOOL_NAMES,
   ranNamedCommand,
   runCommandText,
+  substantiveToolsUsed,
 } from "./prompt-enhancements.mjs";
 
 /** @typedef {"deliverable"|"command"|"output"} AcceptanceCheckKind */
@@ -77,27 +80,35 @@ export function parseAcceptanceBlock(planText) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
 
-    const outputMatch = trimmed.match(/^[-*]\s*(?:output|final answer)\s*:\s*(.+)$/i);
+    // Models often wrap labels in **Deliverable** / **Command** despite the
+    // planning prompt asking for `deliverable:` / `command:`.
+    const unlabeled = trimmed.replace(/^[-*]\s+/, "").replace(/\*\*/g, "").trim();
+
+    const outputMatch = unlabeled.match(/^(?:output|final answer)\s*:\s*(.+)$/i);
     if (outputMatch) {
       outputShape = outputMatch[1].trim();
       continue;
     }
 
-    const deliverableMatch = trimmed.match(
-      /^[-*]\s*(?:deliverable|file|artifact)\s*:\s*[`'"]?([\w./-]+\.[A-Za-z0-9]+)/i,
+    const deliverableMatch = unlabeled.match(
+      /^(?:deliverable|file|artifact)\s*:\s*[`'"]?(\/?[\w./-]+)/i,
     );
     if (deliverableMatch) {
       checks.push({ kind: "deliverable", target: deliverableMatch[1] });
       continue;
     }
 
-    const commandMatch = trimmed.match(/^[-*]\s*(?:command|verify|run)\s*:\s*`?([^`]+?)`?\s*$/i);
-    if (commandMatch) {
-      checks.push({ kind: "command", target: commandMatch[1].trim() });
+    const commandBacktick = unlabeled.match(/^(?:command|verify|run)\s*:\s*`([^`]+)`/i);
+    const commandPlain = unlabeled.match(
+      /^(?:command|verify|run)\s*:\s*(.+?)(?:\s+must\b.*)?$/i,
+    );
+    if (commandBacktick || commandPlain) {
+      const target = (commandBacktick?.[1] ?? commandPlain[1]).trim().replace(/^`+|`+$/g, "");
+      if (target) checks.push({ kind: "command", target });
       continue;
     }
 
-    const backtickCmd = trimmed.match(/^[-*]\s*`([^`]+)`\s*(?:exits?\s*0|passes?)?\.?$/i);
+    const backtickCmd = unlabeled.match(/^`([^`]+)`\s*(?:exits?\s*0|passes?)?\.?$/i);
     if (backtickCmd && /\b(node|python|dotnet|npm|pytest|cargo|go)\b/i.test(backtickCmd[1])) {
       checks.push({ kind: "command", target: backtickCmd[1].trim() });
     }
@@ -290,7 +301,15 @@ function matchingSilentRun(calls, normalized) {
 
 function isVacuousAcceptanceCommand(target, goal = "") {
   const normalized = String(target ?? "").replace(/^run\s+/i, "").trim();
-  return isDiagnosticCommand(normalized, goal) || /^(true|:|exit\s+0)$/i.test(normalized);
+  return (
+    isDiagnosticCommand(normalized, goal) ||
+    isExistenceCheckCommand(normalized) ||
+    /^(true|:|exit\s+0)$/i.test(normalized)
+  );
+}
+
+function isVacuousDeliverable(target) {
+  return isWorkspaceInputPath(target);
 }
 
 function commandCheckPassed(calls, target, goal = "") {
@@ -347,6 +366,15 @@ export async function verifyAcceptanceContract({
 
   for (const check of contract?.checks ?? []) {
     if (check.kind === "deliverable") {
+      if (isVacuousDeliverable(check.target)) {
+        results.push({
+          kind: "deliverable",
+          target: check.target,
+          passed: false,
+          detail: "input/vendor path is not an acceptance deliverable",
+        });
+        continue;
+      }
       let result = await deliverableExists(workspaceRoot, check.target);
       if (!result.passed && wroteDeliverable(calls, check.target)) {
         result = { passed: true, detail: "written by a successful tool call" };
@@ -387,7 +415,9 @@ export async function verifyAcceptanceContract({
   const onlyVacuousChecks =
     results.length > 0 &&
     results.every(
-      (r) => r.kind === "command" && isVacuousAcceptanceCommand(r.target, goal),
+      (r) =>
+        (r.kind === "command" && isVacuousAcceptanceCommand(r.target, goal)) ||
+        (r.kind === "deliverable" && isVacuousDeliverable(r.target)),
     );
 
   // An empty or always-true contract that always "passes" teaches the loop
@@ -403,6 +433,12 @@ export async function verifyAcceptanceContract({
 
   if (workGoal && countConsecutiveFailedWorkCommands(calls, goal) >= 1) {
     const item = "last command exited non-zero — fix and re-run before finishing";
+    if (!missing.includes(item)) missing.push(item);
+  }
+
+  if (workGoal && !calls.some((c) => c.ok) && substantiveToolsUsed(steps).size === 0) {
+    const item =
+      "no deliverable work happened — run a tool that produces or verifies the result";
     if (!missing.includes(item)) missing.push(item);
   }
 
@@ -427,7 +463,9 @@ export function isVerifyOutstandingOnly(verification) {
   if (!missing.length) return false;
   if (
     missing.some((m) =>
-      /empty acceptance contract|always-true acceptance contract|^create /i.test(m),
+      /empty acceptance contract|always-true acceptance contract|^create |no deliverable work happened/i.test(
+        m,
+      ),
     )
   ) {
     return false;
@@ -451,7 +489,9 @@ export function acceptanceFailureNudge(verification) {
   const onlyVacuous =
     missing.length > 0 &&
     missing.every((item) =>
-      /empty acceptance contract|always-true acceptance contract/i.test(item),
+      /empty acceptance contract|always-true acceptance contract|no deliverable work happened/i.test(
+        item,
+      ),
     );
   if (onlyVacuous) return null;
   const items = missing.slice(0, 6);

@@ -687,10 +687,7 @@ test("an always-true acceptance contract is failed not completed", async () => {
   const done = { role: "assistant", content: "Done." };
   const client = new FakeClient([
     { role: "assistant", content: "1. start it\n\n## Acceptance\n- command: echo ok" },
-    done,
-    done,
-    done,
-    done,
+    ...Array.from({ length: 16 }, () => done),
   ]);
   const loop = new AgentLoop({
     client,
@@ -702,8 +699,39 @@ test("an always-true acceptance contract is failed not completed", async () => {
   const result = await loop.run("implement a new feature and then run the tests to verify");
 
   assert.equal(result.verification.passed, false);
-  assert.ok(result.verification.missing.some((m) => /always-true|empty acceptance/i.test(m)));
+  assert.ok(result.verification.missing.some((m) => /always-true|empty acceptance|no deliverable work/i.test(m)));
   assert.equal(result.stopReason, "failed", "a vacuous contract must not count as done");
+});
+
+test("a harbor-style compile goal cannot finish with plan-only turns", async () => {
+  const done = { role: "assistant", content: "Compiled successfully." };
+  const client = new FakeClient([
+    {
+      role: "assistant",
+      content: [
+        "## Plan",
+        "1. extract and compile",
+        "## Acceptance",
+        "- **Deliverable**: `/app/vendor/src.tar.gz` must exist.",
+        "- **Command**: `test -f /app/vendor/src.tar.gz` must exit 0.",
+      ].join("\n"),
+    },
+    ...Array.from({ length: 16 }, () => done),
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    critique: false,
+    maxSteps: 8,
+  });
+
+  const result = await loop.run(
+    "Compile the tool in /app/out using the pre-vendored snapshot at /app/vendor/src.tar.gz.",
+  );
+
+  assert.equal(result.verification.passed, false);
+  assert.ok(result.verification.missing.some((m) => /no deliverable work|always-true/i.test(m)));
+  assert.notEqual(result.stopReason, "completed");
 });
 
 test("task hints are injected into the user message", async () => {

@@ -278,4 +278,60 @@ test("isVerifyOutstandingOnly is true only for unmet verify commands", () => {
     }),
     false,
   );
+  assert.equal(
+    isVerifyOutstandingOnly({
+      passed: false,
+      missing: [
+        "no deliverable work happened — run a tool that produces or verifies the result",
+      ],
+      checks: [],
+    }),
+    false,
+  );
+});
+
+test("parseAcceptanceBlock reads bold labels and extensionless binaries", () => {
+  const plan = [
+    "## Acceptance",
+    "- **Deliverable**: `/app/sqlite/bin/sqlite3` must exist and be executable.",
+    "- **Command**: `/app/sqlite/bin/sqlite3 --version` must exit 0 with a version string.",
+  ].join("\n");
+  const parsed = parseAcceptanceBlock(plan);
+  assert.ok(parsed.checks.some((c) => c.kind === "deliverable" && /sqlite3$/.test(c.target)));
+  assert.ok(
+    parsed.checks.some((c) => c.kind === "command" && /sqlite3 --version/.test(c.target)),
+  );
+});
+
+test("a work goal with no tools is not a passing contract", async () => {
+  const goal =
+    "Compile SQLite in /app/sqlite with gcov instrumentation and make it available in the PATH.";
+  const result = await verifyAcceptanceContract({
+    contract: { checks: [], source: "heuristic" },
+    steps: [],
+    goal,
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /no deliverable work happened/i.test(m)));
+  assert.equal(
+    acceptanceFailureNudge(result),
+    null,
+    "premature tool nudges already cover zero-tool finishes; do not stall again",
+  );
+});
+
+test("an input/vendor deliverable does not count as done", async () => {
+  const goal = "Compile the project in /app/out using the snapshot under /app/vendor/src.tar.gz.";
+  const result = await verifyAcceptanceContract({
+    contract: {
+      checks: [{ kind: "deliverable", target: "/app/vendor/src.tar.gz" }],
+      source: "plan",
+    },
+    steps: [],
+    goal,
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.missing.some((m) => /always-true|no deliverable work/i.test(m)));
 });
