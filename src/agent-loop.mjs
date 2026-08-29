@@ -9,9 +9,12 @@ import {
   acceptanceFailureNudge,
   buildAcceptanceContract,
   CONTRACT_PROGRESS_CRITIQUE,
+  contractHasEnforceableChecks,
   CRITIQUE_USER_MESSAGE,
   formatAcceptanceContract,
+  isDeliverableOutstandingOnly,
   isVerifyOutstandingOnly,
+  mergeAcceptanceContracts,
   verifyAcceptanceContract,
 } from "./acceptance.mjs";
 import { listWorkspaceTopLevel } from "./context-builder.mjs";
@@ -98,6 +101,12 @@ const MAX_REPEATED_STEPS = 2;
  */
 const ACCEPTANCE_NUDGE_BUDGET_RATIO = 1 / 3;
 const MIN_ACCEPTANCE_NUDGES = 2;
+
+/**
+ * Fraction of the step budget after which unmet acceptance forces a mid-run
+ * course correction (write/verify nudge), not waiting until a hollow finish.
+ */
+const MID_RUN_ACCEPTANCE_PRESSURE = 0.4;
 
 /**
  * How many times to recover when Ollama rejects a malformed tool call
@@ -543,7 +552,10 @@ export class AgentLoop {
       if (!nextPlan) return;
       planText = nextPlan;
       planState = createPlanState(planText);
-      acceptanceContract = buildAcceptanceContract(goal, planText);
+      acceptanceContract = mergeAcceptanceContracts(
+        acceptanceContract,
+        buildAcceptanceContract(goal, planText),
+      );
       this.onPlan?.({ plan: planText, hints });
       if (!critique) {
         const contractBlock = formatAcceptanceContract(acceptanceContract);
@@ -675,7 +687,10 @@ export class AgentLoop {
     let stuckMissingCount = 0;
     let lastReplanPaidSteps = -Infinity;
     let verifyOutstandingOnly = false;
+    let deliverableOutstandingOnly = false;
     let contractCritiqueInjected = false;
+    let justInjectedContractCritique = false;
+    let midRunAcceptanceNudgeInjected = false;
     const maxAcceptanceNudges = Math.max(
       MIN_ACCEPTANCE_NUDGES,
       Math.floor(this.maxSteps * ACCEPTANCE_NUDGE_BUDGET_RATIO),
@@ -694,6 +709,8 @@ export class AgentLoop {
       paidSteps,
       consecutiveFailedRuns: countConsecutiveFailedWorkCommands(flattenToolCalls(steps), goal),
       verifyOutstandingOnly,
+      deliverableOutstandingOnly,
+      acceptanceNudgesSpent: acceptanceNudgeCount >= MIN_ACCEPTANCE_NUDGES,
     });
 
     const finalizeRun = async (result) => {
@@ -742,6 +759,7 @@ export class AgentLoop {
       }
 
       budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
+      justInjectedContractCritique = false;
 
       if (this.acceptance) {
         const progress = await verifyAcceptanceContract({
@@ -752,12 +770,18 @@ export class AgentLoop {
         });
         workOutstanding = !progress.passed;
         verifyOutstandingOnly = isVerifyOutstandingOnly(progress);
+        deliverableOutstandingOnly = isDeliverableOutstandingOnly(progress);
         const fingerprint = missingKey(progress.missing);
         if (!progress.passed && fingerprint) {
           if (fingerprint === lastMissingFingerprint) stuckMissingCount += 1;
           else {
             lastMissingFingerprint = fingerprint;
             stuckMissingCount = 1;
+            // The missing set changed: earlier one-shot guidance addressed a
+            // different gap. Re-arm it so mid-run course correction recurs
+            // instead of firing once per run.
+            midRunAcceptanceNudgeInjected = false;
+            contractCritiqueInjected = false;
           }
         } else {
           lastMissingFingerprint = "";
@@ -771,7 +795,31 @@ export class AgentLoop {
           progress.missing?.length
         ) {
           contractCritiqueInjected = true;
+          justInjectedContractCritique = true;
           messages.push({ role: "user", content: CONTRACT_PROGRESS_CRITIQUE });
+        }
+        // Under budget pressure, do not wait for a hollow finish — force the
+        // acceptance nudge while steps remain to act on it.
+        if (
+          !midRunAcceptanceNudgeInjected &&
+          budgetPressure >= MID_RUN_ACCEPTANCE_PRESSURE &&
+          !progress.passed &&
+          progress.missing?.length &&
+          acceptanceNudgeCount < maxAcceptanceNudges
+        ) {
+          const midNudge = acceptanceFailureNudge(progress);
+          if (midNudge) {
+            midRunAcceptanceNudgeInjected = true;
+            acceptanceNudgeCount += 1;
+            // Guidance was just injected — give it one model turn before an
+            // escalation can fire on the same symptoms it is meant to fix.
+            justInjectedContractCritique = true;
+            messages.push({ role: "user", content: midNudge });
+            if (!contractCritiqueInjected) {
+              contractCritiqueInjected = true;
+              messages.push({ role: "user", content: CONTRACT_PROGRESS_CRITIQUE });
+            }
+          }
         }
       }
 
@@ -867,7 +915,7 @@ export class AgentLoop {
         }
       }
 
-      if (this.escalation) {
+      if (this.escalation && !justInjectedContractCritique) {
         const escalated = await this.escalation.maybeEscalate(struggleState());
         if (escalated?.escalated) {
           const escStep = {
@@ -911,29 +959,77 @@ export class AgentLoop {
         messages.push({ role: "user", content: TOOL_NUDGE_NEAR_LIMIT });
       }
 
-      const { message, raw } = await chatWithParseRecovery(
-        this.client,
-        {
-          messages,
-          tools,
-          signal,
-          onDelta: this.onDelta,
-        },
-        {
-          onParseError: ({ recovery, error }) => {
-            parseRecoveries += 1;
-            const parseStep = {
-              index,
-              kind: "tool-parse-error",
-              content: String(error?.message ?? "error parsing tool call"),
-              toolCalls: [],
-              recoveries: recovery,
-            };
-            steps.push(parseStep);
-            this.onStep?.(parseStep);
+      let chatResult;
+      try {
+        chatResult = await chatWithParseRecovery(
+          this.client,
+          {
+            messages,
+            tools,
+            signal,
+            onDelta: this.onDelta,
           },
-        },
-      );
+          {
+            onParseError: ({ recovery, error }) => {
+              parseRecoveries += 1;
+              const parseStep = {
+                index,
+                kind: "tool-parse-error",
+                content: String(error?.message ?? "error parsing tool call"),
+                toolCalls: [],
+                recoveries: recovery,
+              };
+              steps.push(parseStep);
+              this.onStep?.(parseStep);
+            },
+          },
+        );
+      } catch (err) {
+        if (signal?.aborted || err?.name === "AbortError") throw err;
+        if (err?.name !== "OllamaClientError") throw err;
+        // Parse-recovery already spent its nudges — the caller decides next.
+        if (isToolCallParseError(err)) throw err;
+        // The model call died even after transient-error retries. A hung or
+        // crashed model rung is a struggle signal, not a reason to lose the
+        // whole trajectory: swap to a stronger rung and keep going.
+        const failReason = `model call failed: ${String(err.message ?? err).slice(0, 200)}`;
+        const escalated = this.escalation
+          ? await this.escalation.escalateOnFailure(failReason)
+          : null;
+        if (escalated?.escalated) {
+          const escStep = {
+            index,
+            kind: "escalation",
+            content: `Escalated model ${escalated.from} → ${escalated.to} (${escalated.reason})`,
+            toolCalls: [],
+          };
+          steps.push(escStep);
+          this.onStep?.(escStep);
+          continue;
+        }
+        // Startup failures (no work done yet) keep propagating so callers can
+        // map them to transport-specific exit codes. Mid-run failures end as
+        // a failed run with the steps preserved for the session log.
+        if (!steps.some((s) => s.kind === "tool-calls")) throw err;
+        const text = synthesizeFinalAnswer({ goal, steps });
+        const failStep = {
+          index,
+          kind: "failed",
+          content: text,
+          toolCalls: [],
+          diagnostic: failReason,
+        };
+        steps.push(failStep);
+        this.onStep?.(failStep);
+        return finalizeRun({
+          text,
+          stopReason: "failed",
+          steps,
+          messages,
+          diagnostic: failReason,
+        });
+      }
+      const { message, raw } = chatResult;
       totalEvalCount += raw?.eval_count ?? 0;
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
@@ -952,6 +1048,24 @@ export class AgentLoop {
               consecutiveEmpty,
             })
           ) {
+            // Prefer one acceptance nudge over an immediate fail when named
+            // checks are still unmet — empty turns must not skip the gate.
+            if (this.acceptance && acceptanceNudgeCount < maxAcceptanceNudges) {
+              const verification = await verifyAcceptanceContract({
+                contract: acceptanceContract,
+                steps,
+                goal,
+                workspaceRoot,
+              });
+              const acceptNudge = acceptanceFailureNudge(verification);
+              if (acceptNudge) {
+                acceptanceNudgeCount += 1;
+                consecutiveEmpty = 0;
+                messages.push({ role: "user", content: acceptNudge });
+                if (!thinkingOnly) paidSteps += 1;
+                continue;
+              }
+            }
             const diagnostic = formatZeroTokenDiagnostic({
               totalEvalCount,
               elapsedMs: Date.now() - runStarted,
@@ -1012,6 +1126,22 @@ export class AgentLoop {
             goalNeedsSubstantiveTools(goal) &&
             substantiveToolsUsed(steps).size === 0)
         ) {
+          if (this.acceptance && acceptanceNudgeCount < maxAcceptanceNudges) {
+            const verification = await verifyAcceptanceContract({
+              contract: acceptanceContract,
+              steps,
+              goal,
+              workspaceRoot,
+            });
+            const acceptNudge = acceptanceFailureNudge(verification);
+            if (acceptNudge) {
+              acceptanceNudgeCount += 1;
+              consecutiveEmpty = 0;
+              messages.push({ role: "user", content: acceptNudge });
+              if (!thinkingOnly) paidSteps += 1;
+              continue;
+            }
+          }
           const diagnostic = formatZeroTokenDiagnostic({
             totalEvalCount,
             elapsedMs: Date.now() - runStarted,
@@ -1056,7 +1186,14 @@ export class AgentLoop {
             if (!thinkingOnly) paidSteps += 1;
             continue;
           }
-          if (!verification.passed && goalNeedsSubstantiveTools(goal)) {
+          // An instruction that names deliverables or verify commands is work
+          // even when goal-text heuristics misclassify it — an enforceable
+          // contract must gate completion either way.
+          if (
+            !verification.passed &&
+            (goalNeedsSubstantiveTools(goal) ||
+              contractHasEnforceableChecks(acceptanceContract, goal))
+          ) {
             const failStep = {
               index,
               kind: "failed",
@@ -1211,7 +1348,8 @@ export class AgentLoop {
       this.acceptance &&
       verification &&
       !verification.passed &&
-      goalNeedsSubstantiveTools(goal)
+      (goalNeedsSubstantiveTools(goal) ||
+        contractHasEnforceableChecks(acceptanceContract, goal))
         ? "failed"
         : "max-steps";
     return finalizeRun({

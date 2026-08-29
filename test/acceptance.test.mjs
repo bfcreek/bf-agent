@@ -5,6 +5,8 @@ import {
   acceptanceFailureNudge,
   buildAcceptanceContract,
   buildHeuristicContract,
+  contractHasEnforceableChecks,
+  isDeliverableOutstandingOnly,
   isVerifyOutstandingOnly,
   parseAcceptanceBlock,
   verifyAcceptanceContract,
@@ -290,6 +292,51 @@ test("isVerifyOutstandingOnly is true only for unmet verify commands", () => {
   );
 });
 
+test("isDeliverableOutstandingOnly is true only for unmet create paths", () => {
+  assert.equal(
+    isDeliverableOutstandingOnly({
+      passed: false,
+      missing: ["create /app/secret.txt"],
+      checks: [],
+    }),
+    true,
+  );
+  assert.equal(
+    isDeliverableOutstandingOnly({
+      passed: false,
+      missing: ["create out.txt", "create report.md"],
+      checks: [],
+    }),
+    true,
+  );
+  assert.equal(
+    isDeliverableOutstandingOnly({
+      passed: false,
+      missing: ["create out.txt", "run node out.txt"],
+      checks: [],
+    }),
+    false,
+  );
+  assert.equal(
+    isDeliverableOutstandingOnly({
+      passed: false,
+      missing: ["empty acceptance contract is not a pass — derive deliverable or verify checks from the goal"],
+      checks: [],
+    }),
+    false,
+  );
+});
+
+test("acceptanceFailureNudge forces write_file when only deliverables remain", () => {
+  const nudge = acceptanceFailureNudge({
+    passed: false,
+    missing: ["create /app/out.txt"],
+    checks: [{ kind: "deliverable", target: "/app/out.txt", passed: false, detail: "missing" }],
+  });
+  assert.match(nudge ?? "", /write_file/i);
+  assert.match(nudge ?? "", /\/app\/out\.txt/);
+});
+
 test("parseAcceptanceBlock reads bold labels and extensionless binaries", () => {
   const plan = [
     "## Acceptance",
@@ -334,4 +381,70 @@ test("an input/vendor deliverable does not count as done", async () => {
   });
   assert.equal(result.passed, false);
   assert.ok(result.missing.some((m) => /always-true|no deliverable work/i.test(m)));
+});
+
+test("mergeAcceptanceContracts is monotone — replans cannot drop named checks", async () => {
+  const { mergeAcceptanceContracts } = await import("../src/acceptance.mjs");
+  const first = {
+    checks: [
+      { kind: "deliverable", target: "ars.R" },
+      { kind: "command", target: "Rscript test_ars.R" },
+    ],
+    outputShape: "TEST_NAME: PASS lines",
+    source: "plan",
+  };
+  const shrunk = {
+    checks: [{ kind: "deliverable", target: "ars.R" }],
+    outputShape: "",
+    source: "plan",
+  };
+
+  const merged = mergeAcceptanceContracts(first, shrunk);
+  assert.equal(merged.checks.length, 2, "the dropped verify command must be carried forward");
+  assert.ok(merged.checks.some((c) => c.target === "Rscript test_ars.R"));
+  assert.equal(merged.outputShape, "TEST_NAME: PASS lines");
+  assert.equal(merged.source, "merged");
+
+  assert.equal(
+    mergeAcceptanceContracts(null, shrunk),
+    shrunk,
+    "no prior contract passes the new one through",
+  );
+  const identical = mergeAcceptanceContracts(shrunk, shrunk);
+  assert.equal(identical.checks.length, 1, "duplicate targets are not doubled");
+});
+
+test("contractHasEnforceableChecks separates real checks from vacuous ones", () => {
+  assert.equal(contractHasEnforceableChecks(null), false);
+  assert.equal(contractHasEnforceableChecks({ checks: [] }), false);
+  assert.equal(
+    contractHasEnforceableChecks({
+      checks: [{ kind: "command", target: "node -v" }],
+    }),
+    false,
+    "a diagnostic-only contract is not enforceable",
+  );
+  assert.equal(
+    contractHasEnforceableChecks({
+      checks: [{ kind: "deliverable", target: "/app/vendor/src.tar.gz" }],
+    }),
+    false,
+    "an input path is not an enforceable deliverable",
+  );
+  assert.equal(
+    contractHasEnforceableChecks({
+      checks: [
+        { kind: "command", target: "node -v" },
+        { kind: "deliverable", target: "out/report.json" },
+      ],
+    }),
+    true,
+    "one real deliverable makes the contract enforceable",
+  );
+  assert.equal(
+    contractHasEnforceableChecks({
+      checks: [{ kind: "command", target: "python test.py" }],
+    }),
+    true,
+  );
 });

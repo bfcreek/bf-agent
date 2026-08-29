@@ -119,7 +119,11 @@ export async function readInstruction(trialDir, task) {
  */
 export function inferAgentStopReason(session, { stdout = "" } = {}) {
   if (!session) {
-    return /NonZeroAgentExitCode|error parsing tool call|exit code 3/i.test(stdout) ? "error" : "completed";
+    // The harbor-mode agent always writes session.json when it finishes. No
+    // session means the process was killed (Harbor agent timeout, hang) or
+    // crashed before the loop — never a completed run. Calling it "completed"
+    // with 0 steps poisons pattern detection with phantom hollow finishes.
+    return /timeout|timed.?out/i.test(stdout) ? "timeout" : "error";
   }
   const steps = session.steps ?? [];
   const explicit = session.stopReason;

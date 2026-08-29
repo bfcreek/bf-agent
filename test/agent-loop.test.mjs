@@ -683,6 +683,43 @@ test("the gate keeps pushing rather than accepting an early premature finish", a
   assert.equal(result.stopReason, "failed", "a hollow finish must not be marked completed");
 });
 
+test("mid-run acceptance nudge fires under budget pressure before a hollow finish", async () => {
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "run_command",
+    execute: () => ({ status: "success", exitCode: 0, stdout: "probe\n", stderr: "" }),
+  });
+  const probe = {
+    role: "assistant",
+    content: "",
+    tool_calls: [toolCall("run_command", { command: "echo probe" })],
+  };
+  const done = { role: "assistant", content: "Done without the file." };
+  const client = new FakeClient([
+    { role: "assistant", content: "1. explore\n\n## Acceptance\n- deliverable: out.txt" },
+    ...Array.from({ length: 8 }, () => probe),
+    ...Array.from({ length: 12 }, () => done),
+  ]);
+  const loop = new AgentLoop({
+    client,
+    registry,
+    critique: false,
+    maxSteps: 10,
+  });
+
+  const result = await loop.run("Create out.txt with the final answer for this task.");
+
+  assert.equal(result.verification?.passed, false);
+  const midRun = client.calls.some((c) =>
+    c.messages.some(
+      (m) =>
+        m.role === "user" &&
+        /named deliverable|Still required: create out\.txt|write_file.*out\.txt/i.test(m.content),
+    ),
+  );
+  assert.ok(midRun, "unmet deliverables under budget pressure must nudge before a hollow finish");
+});
+
 test("an always-true acceptance contract is failed not completed", async () => {
   const done = { role: "assistant", content: "Done." };
   const client = new FakeClient([
@@ -1102,9 +1139,11 @@ test("consecutive empty responses on artifact tasks fail instead of completing",
   const client = new FakeClient([
     { role: "assistant", content: "", thinking: "planning polyglot layout" },
     { role: "assistant", content: "", thinking: "still planning" },
+    { role: "assistant", content: "", thinking: "after acceptance nudge" },
+    { role: "assistant", content: "", thinking: "still empty" },
     { role: "assistant", content: "" },
   ]);
-  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, maxSteps: 5 });
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false, maxSteps: 8 });
   const goal =
     "Create a polyglot at polyglot/main.rs that compiles with rustc and g++.";
   const result = await loop.run(goal);
@@ -1114,6 +1153,10 @@ test("consecutive empty responses on artifact tasks fail instead of completing",
     c.messages.filter((m) => m.role === "user").map((m) => m.content),
   );
   assert.ok(nudges.some((n) => /mkdir -p polyglot|write_file polyglot\/main\.rs/i.test(n)));
+  assert.ok(
+    nudges.some((n) => /acceptance|Still required|write_file/i.test(n)),
+    "empty stalls with unmet deliverables should get an acceptance write_file nudge before hard fail",
+  );
 });
 
 test("thinking-only turns do not consume the step budget", async () => {
@@ -1273,4 +1316,95 @@ test("struggle replan is capped and refreshes the plan step", async () => {
       c.messages.some((m) => m.role === "user" && /remaining work|Progress against the plan/i.test(m.content)),
   );
   assert.ok(replanCalls.length >= 1 && replanCalls.length <= 2);
+});
+
+function ollamaError(message, status) {
+  const err = new Error(message);
+  err.name = "OllamaClientError";
+  // 4xx skips chatWithRetry backoff so the test stays fast; the run() catch
+  // only requires the error class, matching wrapped transport failures too.
+  err.status = status;
+  return err;
+}
+
+test("mid-run model-call failure without escalation ends as a failed run, not a crash", async () => {
+  let calls = 0;
+  const client = {
+    async chat() {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
+          raw: {},
+        };
+      }
+      throw ollamaError("Ollama stream failed mid-response: body timeout", 404);
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+
+  const result = await loop.run("say hi");
+
+  assert.equal(result.stopReason, "failed");
+  const failStep = result.steps.find((s) => s.kind === "failed");
+  assert.ok(failStep, "the failure must be recorded as a step, not thrown");
+  assert.match(String(failStep.diagnostic ?? ""), /model call failed/i);
+  assert.ok(
+    result.steps.some((s) => s.kind === "tool-calls"),
+    "completed work must survive in the trajectory",
+  );
+});
+
+test("startup model-call failure still propagates for exit-code mapping", async () => {
+  const client = {
+    async chat() {
+      throw ollamaError("Ollama /api/chat returned 404: model missing", 404);
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), planning: false });
+
+  await assert.rejects(loop.run("say hi"), /model missing/);
+});
+
+test("model-call failure escalates to the next rung and continues the run", async () => {
+  const { EscalationController } = await import("../src/escalation.mjs");
+  const client = {
+    model: "qwen3:8b",
+    calls: [],
+    async chat({ messages }) {
+      this.calls.push(this.model);
+      if (this.model === "qwen3:8b") {
+        throw ollamaError("Ollama stream failed mid-response: body timeout", 404);
+      }
+      return { message: { role: "assistant", content: "recovered" }, raw: {} };
+    },
+    async show() {
+      return { capabilities: ["tools"] };
+    },
+  };
+  const escalation = new EscalationController({
+    client,
+    ladder: [
+      { name: "qwen3:8b", paramsB: 8, cloud: false },
+      { name: "qwen3:14b", paramsB: 14, cloud: false },
+    ],
+  });
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    escalation,
+  });
+
+  const result = await loop.run("say hi");
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.text, "recovered");
+  assert.ok(
+    result.steps.some(
+      (s) => s.kind === "escalation" && /transport failure/i.test(s.content),
+    ),
+    "the swap must be visible in the step log",
+  );
+  assert.deepEqual(client.calls, ["qwen3:8b", "qwen3:14b"]);
 });

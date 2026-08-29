@@ -194,6 +194,28 @@ export function buildAcceptanceContract(goal, planText = "") {
 }
 
 /**
+ * Union a replacement contract with the checks already in force. Replans and
+ * critiques may rewrite the plan text; acceptance is monotone — a check named
+ * once stays named, so a later plan cannot shrink the contract down to
+ * file-exists while behavioral checks quietly disappear.
+ * @param {AcceptanceContract|null|undefined} previous
+ * @param {AcceptanceContract} next
+ * @returns {AcceptanceContract}
+ */
+export function mergeAcceptanceContracts(previous, next) {
+  if (!previous?.checks?.length) return next;
+  const seen = new Set((next.checks ?? []).map((c) => `${c.kind}:${c.target}`));
+  const carried = previous.checks.filter((c) => !seen.has(`${c.kind}:${c.target}`));
+  if (!carried.length) return next;
+  return {
+    ...next,
+    checks: [...(next.checks ?? []), ...carried],
+    outputShape: next.outputShape || previous.outputShape || "",
+    source: "merged",
+  };
+}
+
+/**
  * Format contract for injection into the user message.
  * @param {AcceptanceContract} contract
  * @returns {string}
@@ -310,6 +332,23 @@ function isVacuousAcceptanceCommand(target, goal = "") {
 
 function isVacuousDeliverable(target) {
   return isWorkspaceInputPath(target);
+}
+
+/**
+ * Whether the contract carries at least one real (non-vacuous) check. Such a
+ * contract is enforceable: an instruction that names deliverables or verify
+ * commands is work, even when goal-text heuristics misclassify it — hollow
+ * finishes on these goals must not be accepted as completed.
+ * @param {AcceptanceContract|null|undefined} contract
+ * @param {string} [goal]
+ * @returns {boolean}
+ */
+export function contractHasEnforceableChecks(contract, goal = "") {
+  return (contract?.checks ?? []).some((check) => {
+    if (check.kind === "deliverable") return !isVacuousDeliverable(check.target);
+    if (check.kind === "command") return !isVacuousAcceptanceCommand(check.target, goal);
+    return false;
+  });
 }
 
 function commandCheckPassed(calls, target, goal = "") {
@@ -479,6 +518,29 @@ export function isVerifyOutstandingOnly(verification) {
 }
 
 /**
+ * True when every outstanding item is a named deliverable (`create PATH`).
+ * A stronger model will not invent the write_file call — the acceptance nudge
+ * should force it. Escalating on hollow/budget signals wastes the ladder.
+ * @param {VerificationResult|null|undefined} verification
+ * @returns {boolean}
+ */
+export function isDeliverableOutstandingOnly(verification) {
+  if (!verification || verification.passed) return false;
+  const missing = verification.missing ?? [];
+  if (!missing.length) return false;
+  if (
+    missing.some((m) =>
+      /empty acceptance contract|always-true acceptance contract|no deliverable work happened/i.test(
+        m,
+      ),
+    )
+  ) {
+    return false;
+  }
+  return missing.every((m) => /^create\s+\S+/i.test(m));
+}
+
+/**
  * Build a consolidated nudge when verification fails.
  * @param {VerificationResult} verification
  * @returns {string|null}
@@ -502,6 +564,19 @@ export function acceptanceFailureNudge(verification) {
       "Do not finish yet — acceptance checks are not satisfied:",
       ...failed.map((c) => `- ${c.kind} \`${c.target}\`: ${c.detail}`),
       "Complete the missing work, then give your final answer.",
+    ].join(" ");
+  }
+  if (isDeliverableOutstandingOnly(verification)) {
+    const paths = items
+      .map((m) => m.replace(/^create\s+/i, "").trim())
+      .filter(Boolean);
+    return [
+      "Do not finish yet — named deliverable(s) still missing.",
+      `Still required: ${items.join("; ")}.`,
+      paths.length
+        ? `Next tool call must be write_file for ${paths.map((p) => `\`${p}\``).join(", ")} (non-empty content), then verify.`
+        : "Next tool call must be write_file for each missing path (non-empty content), then verify.",
+      "Do not reply with another empty or plan-only turn.",
     ].join(" ");
   }
   return [

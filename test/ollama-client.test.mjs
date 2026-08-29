@@ -198,6 +198,44 @@ test("chatStream sends stream:true and accumulates content deltas", async () => 
   assert.equal(raw.eval_count, 2);
 });
 
+test("chatStream wraps mid-stream transport failures as OllamaClientError", async () => {
+  const bodyTimeout = new Error("Body Timeout Error");
+  bodyTimeout.name = "BodyTimeoutError";
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        let sent = false;
+        return {
+          read: async () => {
+            if (sent) throw bodyTimeout;
+            sent = true;
+            return {
+              done: false,
+              value: new TextEncoder().encode(
+                `${JSON.stringify({ message: { role: "assistant", content: "par" }, done: false })}\n`,
+              ),
+            };
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  });
+  const client = new OllamaClient({ fetchImpl });
+
+  await assert.rejects(
+    client.chatStream({ messages: [{ role: "user", content: "hi" }] }),
+    (err) => {
+      assert.equal(err.name, "OllamaClientError", "must be retryable by chatWithRetry");
+      assert.match(err.message, /stream failed mid-response/i);
+      assert.equal(err.cause, bodyTimeout);
+      return true;
+    },
+  );
+});
+
 test("chatStream merges streamed tool_calls", async () => {
   const { fetchImpl } = makeStreamFetch([
     [

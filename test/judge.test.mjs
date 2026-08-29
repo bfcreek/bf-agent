@@ -18,5 +18,13 @@ test("inferAgentStopReason marks empty crash sessions as error", () => {
     inferAgentStopReason({ steps: [{ index: 1 }], stopReason: "completed" }),
     "completed",
   );
-  assert.equal(inferAgentStopReason(null, { stdout: "" }), "completed");
+  assert.equal(
+    inferAgentStopReason(null, { stdout: "" }),
+    "error",
+    "a missing session is a killed/crashed agent, never a completed run",
+  );
+  assert.equal(
+    inferAgentStopReason(null, { stdout: "AgentTimeoutError: agent timed out" }),
+    "timeout",
+  );
 });

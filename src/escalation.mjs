@@ -50,6 +50,9 @@ export const BUDGET_CRITICAL_RATIO = 0.85;
  * @property {number} [paidSteps] Paid model turns so far.
  * @property {number} [consecutiveFailedRuns] Trailing non-diagnostic command failures.
  * @property {boolean} [verifyOutstandingOnly] Only named verify/work commands remain.
+ * @property {boolean} [deliverableOutstandingOnly] Only named create PATH items remain.
+ * @property {boolean} [acceptanceNudgesSpent] The loop already spent its
+ *   acceptance nudges on this gap — the cheap lever failed.
  */
 
 /**
@@ -66,11 +69,19 @@ export function computeStruggleScore(state) {
   if (state.editMissLoop) score += SIGNAL_WEIGHTS.editMiss;
   if (state.searchLoop) score += SIGNAL_WEIGHTS.searchLoop;
 
+  // When the only gap is a named verify or create PATH, climbing the ladder
+  // pays for intelligence the loop never gets to use — the acceptance nudge
+  // must force that tool call first. Once those nudges are spent and the gap
+  // persists, the cheap lever has demonstrably failed: stop suppressing
+  // budget-pressure escalation, or the run fails calmly with no escalation.
+  const stopConditionGap =
+    (state.verifyOutstandingOnly || state.deliverableOutstandingOnly) &&
+    !state.acceptanceNudgesSpent;
+
   // Burning through the step budget with contract work still outstanding is the
   // clearest sign the current model will not finish. Skip when the only gap is
-  // a missing verify step — climbing the ladder will not invent that tool call;
-  // the acceptance nudge is the right lever.
-  if (state.workOutstanding && !state.verifyOutstandingOnly) {
+  // a missing verify/write step — the acceptance nudge is the right lever.
+  if (state.workOutstanding && !stopConditionGap) {
     const pressure = state.budgetPressure ?? 0;
     if (pressure >= BUDGET_CRITICAL_RATIO) score += SIGNAL_WEIGHTS.budgetCritical;
     else if (pressure >= BUDGET_PRESSURE_RATIO) score += SIGNAL_WEIGHTS.budgetPressure;
@@ -79,8 +90,10 @@ export function computeStruggleScore(state) {
   // Wait for at least one empty reply or two paid steps so turn 1 can still try.
   // Do not require workOutstanding: a plan that authorizes checks (or that
   // treats an existing input as done) can still be a hollow run.
+  // Skip when deliverables are already named — nudge write_file instead.
   if (
     state.hollowCompletion &&
+    !(state.deliverableOutstandingOnly && !state.acceptanceNudgesSpent) &&
     ((state.paidSteps ?? 0) >= 2 || (state.consecutiveEmpty ?? 0) >= 1)
   ) {
     score += SIGNAL_WEIGHTS.hollowCompletion;
@@ -269,6 +282,35 @@ export class EscalationController {
   /** @returns {number} */
   get escalationCount() {
     return this._escalationCount;
+  }
+
+  /**
+   * Escalate after a transport/model failure that survived retries. A dead or
+   * hung model cannot benefit from thinking harder, so this skips the
+   * intensify tier and swaps rungs directly. Bounded by the same escalation
+   * budget as struggle-based escalation.
+   * @param {string} reason
+   * @returns {Promise<{escalated: boolean, kind: string, from?: string, to?: string, reason?: string}|null>}
+   */
+  async escalateOnFailure(reason) {
+    if (this._escalationCount >= this.maxEscalations) return null;
+    const model = this.client?.model;
+    const next = this.nextRung();
+    if (!next) {
+      this.lastBlockedReason = `${reason}, but no stronger model is available`;
+      return null;
+    }
+    await configureClientModel(this.client, next.name);
+    this.currentParamsB = next.paramsB;
+    this._escalationCount += 1;
+    this.lastBlockedReason = null;
+    return {
+      escalated: true,
+      kind: "swap",
+      from: model,
+      to: next.name,
+      reason: `${reason} — swapping models after transport failure`,
+    };
   }
 
   /**

@@ -133,6 +133,61 @@ test("budget pressure does not escalate when only verify commands remain", () =>
   assert.ok(computeStruggleScore(stillBuilding) >= DEFAULT_ESCALATION_THRESHOLD);
 });
 
+test("hollow completion does not escalate when only named deliverables remain", () => {
+  const deliverableOnly = {
+    ...CALM,
+    hollowCompletion: true,
+    paidSteps: 4,
+    workOutstanding: true,
+    deliverableOutstandingOnly: true,
+  };
+  const hollowUnknown = {
+    ...CALM,
+    hollowCompletion: true,
+    paidSteps: 4,
+    workOutstanding: true,
+    deliverableOutstandingOnly: false,
+  };
+  assert.equal(
+    computeStruggleScore(deliverableOnly),
+    0,
+    "named create PATH gaps must use write_file nudge, not the model ladder",
+  );
+  assert.ok(computeStruggleScore(hollowUnknown) >= DEFAULT_ESCALATION_THRESHOLD);
+});
+
+test("budget pressure does not escalate when only deliverables remain", () => {
+  const deliverableOnly = {
+    ...CALM,
+    budgetPressure: 0.9,
+    workOutstanding: true,
+    deliverableOutstandingOnly: true,
+  };
+  assert.equal(computeStruggleScore(deliverableOnly), 0);
+});
+
+test("spent acceptance nudges unlock escalation on verify/deliverable-only gaps", () => {
+  const verifyOnly = {
+    ...CALM,
+    budgetPressure: 0.9,
+    workOutstanding: true,
+    verifyOutstandingOnly: true,
+    acceptanceNudgesSpent: true,
+  };
+  const deliverableOnly = {
+    ...CALM,
+    budgetPressure: 0.9,
+    workOutstanding: true,
+    deliverableOutstandingOnly: true,
+    acceptanceNudgesSpent: true,
+  };
+  assert.ok(
+    computeStruggleScore(verifyOnly) >= DEFAULT_ESCALATION_THRESHOLD,
+    "when the cheap nudge lever failed, budget pressure must escalate again",
+  );
+  assert.ok(computeStruggleScore(deliverableOnly) >= DEFAULT_ESCALATION_THRESHOLD);
+});
+
 test("paramsBOf reads the size out of a model tag", () => {
   assert.equal(paramsBOf("qwen3:14b"), 14);
   assert.equal(paramsBOf("gpt-oss:120b-cloud"), 120);

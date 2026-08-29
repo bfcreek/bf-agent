@@ -211,17 +211,28 @@ export class OllamaClient {
     let raw = {};
     let sawMessage = false;
 
-    for await (const chunk of readNdjson(response.body, signal)) {
-      if (chunk?.message && typeof chunk.message === "object") {
-        sawMessage = true;
-        mergeStreamMessage(accumulated, chunk.message, onDelta);
+    try {
+      for await (const chunk of readNdjson(response.body, signal)) {
+        if (chunk?.message && typeof chunk.message === "object") {
+          sawMessage = true;
+          mergeStreamMessage(accumulated, chunk.message, onDelta);
+        }
+        if (chunk?.done) {
+          raw = chunk;
+        } else if (chunk && typeof chunk === "object") {
+          // Keep latest non-done meta (model, created_at) until done arrives.
+          raw = { ...raw, ...chunk };
+        }
       }
-      if (chunk?.done) {
-        raw = chunk;
-      } else if (chunk && typeof chunk === "object") {
-        // Keep latest non-done meta (model, created_at) until done arrives.
-        raw = { ...raw, ...chunk };
-      }
+    } catch (err) {
+      if (err?.name === "AbortError" || err?.name === "OllamaClientError") throw err;
+      // Mid-stream transport failures (undici BodyTimeoutError, connection
+      // resets) otherwise propagate raw and skip the caller's transient-error
+      // retry, killing the run on a hiccup a retry would absorb.
+      throw new OllamaClientError(
+        `Ollama stream failed mid-response: ${err?.message ?? err}`,
+        { cause: err },
+      );
     }
 
     if (!sawMessage) {
