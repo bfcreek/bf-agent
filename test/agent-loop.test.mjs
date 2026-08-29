@@ -1408,3 +1408,68 @@ test("model-call failure escalates to the next rung and continues the run", asyn
   );
   assert.deepEqual(client.calls, ["qwen3:8b", "qwen3:14b"]);
 });
+
+test("model swap re-opens the acceptance contract for the stronger model", async () => {
+  const { EscalationController } = await import("../src/escalation.mjs");
+  const client = {
+    model: "qwen3:8b",
+    thinkingCapable: true,
+    think: "high",
+    seenReopen: false,
+    async chat({ messages, tools }) {
+      const blob = JSON.stringify(messages);
+      if (/Re-open the acceptance contract/i.test(blob)) this.seenReopen = true;
+      if (this.model === "qwen3:8b" && tools) {
+        // Struggle: empty turns until escalate intensifies (noop when already high)
+        // then swaps. Force swap by leaving think high and producing empties.
+        return { message: { role: "assistant", content: "" }, raw: { eval_count: 0 } };
+      }
+      if (this.model === "qwen3:14b") {
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [toolCall("add", { a: 1, b: 1 })],
+          },
+          raw: {},
+        };
+      }
+      return { message: { role: "assistant", content: "2" }, raw: {} };
+    },
+    async show() {
+      return { capabilities: ["tools", "thinking"] };
+    },
+    async listModelsDetailed() {
+      return [
+        { name: "qwen3:8b", sizeBytes: 1, parameterSize: "8B" },
+        { name: "qwen3:14b", sizeBytes: 1, parameterSize: "14B" },
+      ];
+    },
+  };
+  // Start already intensified so the first maybeEscalate must swap models.
+  const escalation = new EscalationController({
+    client,
+    ladder: [
+      { name: "qwen3:8b", paramsB: 8, cloud: false, thinking: true },
+      { name: "qwen3:14b", paramsB: 14, cloud: false, thinking: true },
+    ],
+    threshold: 2,
+  });
+  escalation._intensified = true;
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    escalation,
+    maxSteps: 6,
+  });
+
+  await loop.run("implement feature.js and run node test.mjs");
+
+  assert.equal(client.model, "qwen3:14b");
+  assert.equal(
+    client.seenReopen,
+    true,
+    "after a model swap the next turn must see the re-opened contract",
+  );
+});

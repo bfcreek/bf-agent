@@ -106,7 +106,7 @@ const MIN_ACCEPTANCE_NUDGES = 2;
  * Fraction of the step budget after which unmet acceptance forces a mid-run
  * course correction (write/verify nudge), not waiting until a hollow finish.
  */
-const MID_RUN_ACCEPTANCE_PRESSURE = 0.4;
+const MID_RUN_ACCEPTANCE_PRESSURE = 0.25;
 
 /**
  * How many times to recover when Ollama rejects a malformed tool call
@@ -929,6 +929,26 @@ export class AgentLoop {
           };
           steps.push(escStep);
           this.onStep?.(escStep);
+          // A stronger model inherits the transcript, including wrong early
+          // deliverables. Re-open the live contract so it cannot polish a stub
+          // that already fails the unmet checks.
+          if (escalated.kind === "swap" && this.acceptance) {
+            const progress = await verifyAcceptanceContract({
+              contract: acceptanceContract,
+              steps,
+              goal,
+              workspaceRoot,
+            });
+            const contractBlock = formatAcceptanceContract(acceptanceContract);
+            const still = (progress.missing ?? []).slice(0, 6);
+            const lines = [
+              "Model escalated. Re-open the acceptance contract — do not polish wrong deliverables.",
+            ];
+            if (contractBlock) lines.push(contractBlock);
+            if (still.length) lines.push(`Still required: ${still.join("; ")}.`);
+            lines.push("Next tool call must advance an unmet check.");
+            messages.push({ role: "user", content: lines.join("\n") });
+          }
         } else if (this.escalation.lastBlockedReason && !escalationBlockReported) {
           escalationBlockReported = true;
           const blockStep = {

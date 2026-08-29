@@ -885,14 +885,67 @@ async function main() {
     registry.setApprovalHandler(approval.handler);
   }
 
+  let store;
+  let priorSession = null;
+  /** Steps accumulated during the current non-interactive run for live flush. */
+  const liveRunSteps = [];
+  let liveFlushBusy = Promise.resolve();
+
+  if (options.session) {
+    store = new SessionStore({ workspaceRoot: options.cwd });
+    priorSession = await store.load(options.session);
+    if (priorSession && !options.quiet) {
+      console.error(
+        `[session ${options.session}] resuming: ${priorSession.messages.length} messages, ${priorSession.steps.length} steps so far`,
+      );
+    }
+  }
+
+  /**
+   * Persist a mid-run snapshot so Harbor AgentTimeoutError / SIGTERM still
+   * leaves a usable trajectory instead of an empty session.json.
+   * @param {object} [partial]
+   */
+  const flushLiveSession = (partial = {}) => {
+    if (!store || !options.session) return Promise.resolve();
+    liveFlushBusy = liveFlushBusy
+      .then(async () => {
+        const draft = store.merge(options.session, priorSession, {
+          messages: partial.messages ?? priorSession?.messages ?? [],
+          steps: liveRunSteps,
+          stopReason: partial.stopReason ?? "running",
+          escalationCount: partial.escalationCount,
+          cloudUsed: partial.cloudUsed,
+          verification: partial.verification,
+          verificationPassed: partial.verificationPassed,
+          error: partial.error,
+        });
+        await store.save(options.session, draft);
+      })
+      .catch(() => {
+        // Best-effort: a flush failure must not kill the agent loop.
+      });
+    return liveFlushBusy;
+  };
+
+  const describe = options.quiet
+    ? undefined
+    : (step) => describeStep(step, { showPlan: options.showPlan === true });
+
+  const onStep = (step) => {
+    if (store && options.session && !options.interactive) {
+      liveRunSteps.push(step);
+      void flushLiveSession();
+    }
+    describe?.(step);
+  };
+
   const loop = new AgentLoop({
     client,
     registry,
     systemPrompt,
     maxSteps: options.maxSteps,
-    onStep: options.quiet
-      ? undefined
-      : (step) => describeStep(step, { showPlan: options.showPlan === true }),
+    onStep,
     compaction: {},
     planning: !options.noPlan,
     replan: !options.noPlan && !options.noReplan,
@@ -914,16 +967,14 @@ async function main() {
         },
   });
 
-  let store;
-  let priorSession = null;
-  if (options.session) {
-    store = new SessionStore({ workspaceRoot: options.cwd });
-    priorSession = await store.load(options.session);
-    if (priorSession && !options.quiet) {
-      console.error(
-        `[session ${options.session}] resuming: ${priorSession.messages.length} messages, ${priorSession.steps.length} steps so far`,
-      );
-    }
+  const onKillSignal = () => {
+    void flushLiveSession({ stopReason: "timeout", error: "process received SIGTERM/SIGINT" }).finally(
+      () => process.exit(1),
+    );
+  };
+  if (store && options.session && !options.interactive) {
+    process.once("SIGTERM", onKillSignal);
+    process.once("SIGINT", onKillSignal);
   }
 
   try {
@@ -944,6 +995,7 @@ async function main() {
     });
 
     if (store) {
+      await flushLiveSession();
       const saved = store.merge(options.session, priorSession, result);
       await store.save(options.session, saved);
       if (!options.quiet && saved.changedFiles.length > 0) {
@@ -975,10 +1027,17 @@ async function main() {
       const failed = {
         text: "",
         stopReason: "error",
-        steps: [],
+        // Keep any steps already flushed mid-run — an empty steps array here
+        // would wipe the trajectory Harbor needs after a crash.
+        steps: liveRunSteps,
         messages: priorSession?.messages ?? [],
         error: err instanceof OllamaClientError ? err.message : String(err?.message ?? err),
       };
+      await flushLiveSession({
+        stopReason: "error",
+        error: failed.error,
+        messages: failed.messages,
+      });
       const saved = store.merge(options.session, priorSession, failed);
       await store.save(options.session, saved);
     }
@@ -989,6 +1048,8 @@ async function main() {
     }
     throw err;
   } finally {
+    process.off("SIGTERM", onKillSignal);
+    process.off("SIGINT", onKillSignal);
     approval?.close();
     interactivePrompt?.close();
     for (const mcp of mcpClients) await mcp.close();

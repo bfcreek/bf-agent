@@ -127,6 +127,29 @@ test("merge persists closed-loop telemetry from a run", () => {
   assert.equal(merged.verification.passed, false);
 });
 
+test("mid-run flush keeps growing steps under stopReason running", async () => {
+  const store = new SessionStore({ dir: path.join(root, "live-flush") });
+  const prior = null;
+  const liveSteps = [];
+  liveSteps.push({ index: 1, kind: "tool-calls", content: "", toolCalls: [] });
+  let snap = store.merge("harbor", prior, {
+    messages: [],
+    steps: liveSteps,
+    stopReason: "running",
+  });
+  await store.save("harbor", snap);
+  liveSteps.push({ index: 2, kind: "tool-calls", content: "", toolCalls: [] });
+  snap = store.merge("harbor", prior, {
+    messages: [],
+    steps: liveSteps,
+    stopReason: "running",
+  });
+  await store.save("harbor", snap);
+  const loaded = await store.load("harbor");
+  assert.equal(loaded.stopReason, "running");
+  assert.equal(loaded.steps.length, 2, "each flush replaces this-run steps, not doubles them");
+});
+
 test("list returns saved session names", async () => {
   const store = new SessionStore({ dir: path.join(root, "list-test") });
   assert.deepEqual(await store.list(), []);
