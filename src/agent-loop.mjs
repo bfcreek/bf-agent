@@ -72,6 +72,7 @@ import {
   substantiveToolsUsed,
   synthesizeFinalAnswer,
   TOOL_NUDGE_NEAR_LIMIT,
+  TOOL_NUDGE_TIME_NEAR_LIMIT,
   verificationCompleteOutcome,
 } from "./prompt-enhancements.mjs";
 
@@ -107,6 +108,30 @@ const MIN_ACCEPTANCE_NUDGES = 2;
  * course correction (write/verify nudge), not waiting until a hollow finish.
  */
 const MID_RUN_ACCEPTANCE_PRESSURE = 0.25;
+
+/**
+ * Wall-clock budget policy (only when `wallClockMs` is set).
+ *
+ * - Reserve: stop the loop this long before the deadline so the wrap-up and
+ *   session save happen instead of an external kill mid-turn.
+ * - Critique skip: a second front-loaded planning turn is not worth it once the
+ *   first plan alone has consumed this share of the budget.
+ * - Near limit: once this share of time is gone, tell the model to stop
+ *   installing/exploring and land the deliverable.
+ */
+export const WALL_CLOCK_RESERVE_RATIO = 0.05;
+export const WALL_CLOCK_RESERVE_MIN_MS = 15_000;
+export const WALL_CLOCK_RESERVE_MAX_MS = 60_000;
+export const CRITIQUE_SKIP_TIME_PRESSURE = 0.1;
+export const NEAR_LIMIT_TIME_PRESSURE = 0.85;
+/**
+ * Optional model turns priced in turns: a remaining-step replan runs no tool,
+ * so it is only worth a turn while this many typical turns still fit before
+ * the deadline. The wrap-up chat is skipped (answer synthesized) unless this
+ * multiple of a typical turn remains, so the session save always lands.
+ */
+export const REPLAN_MIN_AFFORDABLE_TURNS = 6;
+export const WRAP_UP_TURN_MARGIN = 1.2;
 
 /**
  * How many times to recover when Ollama rejects a malformed tool call
@@ -383,6 +408,8 @@ export const DEFAULT_SYSTEM_PROMPT = [
  * @property {number} [escalationCount]
  * @property {boolean} [cloudUsed]
  * @property {string[]} [memoryLessonIds]
+ * @property {boolean} [wallClockExhausted] The loop stopped itself at the
+ *   wall-clock deadline (reported under stopReason "max-steps"/"failed").
  */
 
 export class AgentLoop {
@@ -419,6 +446,11 @@ export class AgentLoop {
    * @param {boolean} [options.critique] Self-critique pass after planning (default true).
    * @param {import("./escalation.mjs").EscalationController|false} [options.escalation]
    * @param {(info: {plan: string, hints: Array<{id: string, constraint: string}>}) => void} [options.onPlan]
+   * @param {number} [options.wallClockMs] Wall-clock budget for one run (0 = none).
+   *   Time consumed counts toward budget pressure alongside steps, command
+   *   timeouts are clamped to what remains, and the loop stops itself just
+   *   before the deadline so the session is saved instead of being killed.
+   * @param {() => number} [options.now] Clock for the wall-clock budget (tests).
    */
   constructor({
     client,
@@ -440,6 +472,8 @@ export class AgentLoop {
     critique = true,
     escalation = false,
     onPlan,
+    wallClockMs = 0,
+    now = Date.now,
   } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
     if (!registry) throw new Error("AgentLoop requires a tool registry.");
@@ -462,6 +496,8 @@ export class AgentLoop {
     this.critique = critique;
     this.escalation = escalation instanceof EscalationController ? escalation : false;
     this.onPlan = onPlan;
+    this.wallClockMs = Number.isFinite(wallClockMs) && wallClockMs > 0 ? wallClockMs : 0;
+    this.now = typeof now === "function" ? now : Date.now;
   }
 
   /**
@@ -478,9 +514,47 @@ export class AgentLoop {
    * @returns {Promise<AgentRunResult>}
    */
   async run(goal, { history, signal, images } = {}) {
+    // Wall-clock budget: planning turns count too, so start before them.
+    const wallStarted = this.now();
+    const deadlineAt = this.wallClockMs > 0 ? wallStarted + this.wallClockMs : null;
+    const timePressure = () =>
+      deadlineAt === null ? 0 : Math.min(1, (this.now() - wallStarted) / this.wallClockMs);
+    // Stop just before the deadline so the final answer and session save land
+    // instead of the process being killed mid-turn.
+    const deadlineReserveMs =
+      deadlineAt === null
+        ? 0
+        : Math.min(
+            WALL_CLOCK_RESERVE_MAX_MS,
+            Math.max(WALL_CLOCK_RESERVE_MIN_MS, this.wallClockMs * WALL_CLOCK_RESERVE_RATIO),
+          );
+    // Model turns are the unit of spend under a wall clock (a cloud thinking
+    // turn can be ~100s of a 900s trial). Measure them so the reserve and the
+    // optional-turn gates are priced in turns, not a fixed number of seconds.
+    const turnDurations = [];
+    const meanTurnMs = () =>
+      turnDurations.length
+        ? turnDurations.reduce((a, b) => a + b, 0) / turnDurations.length
+        : 0;
+    const timedTurn = async (fn) => {
+      const t0 = this.now();
+      try {
+        return await fn();
+      } finally {
+        turnDurations.push(Math.max(0, this.now() - t0));
+      }
+    };
+    const remainingMs = () => (deadlineAt === null ? Infinity : deadlineAt - this.now());
+    /** How many typical model turns still fit before the deadline. */
+    const affordableTurns = () =>
+      deadlineAt === null || meanTurnMs() <= 0 ? Infinity : remainingMs() / meanTurnMs();
+    // Out of time when the next turn could not finish before the reserve.
+    const outOfTime = () =>
+      deadlineAt !== null && remainingMs() <= Math.max(deadlineReserveMs, meanTurnMs());
     // Give tools the user's own words for safety decisions (e.g. the shell
-    // tool only deletes files the goal explicitly names).
-    this.registry.setRunContext?.({ goal });
+    // tool only deletes files the goal explicitly names) and the deadline so
+    // command timeouts cannot outlive the run.
+    this.registry.setRunContext?.({ goal, deadlineAt });
     const freshTurn = isFreshTurn(history);
     let messages =
       history && history.length > 0
@@ -573,10 +647,12 @@ export class AgentLoop {
           ...messages,
           { role: "user", content: PLANNING_USER_MESSAGE },
         ];
-        const { message } = await chatWithRetry(this.client, {
-          messages: planMessages,
-          signal,
-        });
+        const { message } = await timedTurn(() =>
+          chatWithRetry(this.client, {
+            messages: planMessages,
+            signal,
+          }),
+        );
         const firstPlan = textOf(message.content).trim();
         if (firstPlan) {
           messages.push({ role: "user", content: PLANNING_USER_MESSAGE });
@@ -586,16 +662,21 @@ export class AgentLoop {
           this.onStep?.(planStep);
           applyPlanText(firstPlan);
 
-          if (this.critique && !signal?.aborted) {
+          // Critique is a second silent model turn before any tool runs. When
+          // the first plan alone already ate a real share of the wall clock,
+          // the run needs a tool call, not more front-loaded prose.
+          if (this.critique && !signal?.aborted && timePressure() < CRITIQUE_SKIP_TIME_PRESSURE) {
             try {
               const critiqueMessages = [
                 ...messages,
                 { role: "user", content: CRITIQUE_USER_MESSAGE },
               ];
-              const { message: critiqueMsg } = await chatWithRetry(this.client, {
-                messages: critiqueMessages,
-                signal,
-              });
+              const { message: critiqueMsg } = await timedTurn(() =>
+                chatWithRetry(this.client, {
+                  messages: critiqueMessages,
+                  signal,
+                }),
+              );
               const critiqueText = textOf(critiqueMsg.content).trim();
               if (critiqueText) {
                 messages.push({ role: "user", content: CRITIQUE_USER_MESSAGE });
@@ -669,6 +750,7 @@ export class AgentLoop {
     let repeatedCount = 0;
     let toolNudgeCount = 0;
     let nearLimitNudged = false;
+    let timeNearLimitNudged = false;
     let consecutiveEmpty = 0;
     let totalEvalCount = 0;
     let parseRecoveries = 0;
@@ -752,13 +834,24 @@ export class AgentLoop {
     };
 
     let paidSteps = 0;
+    let wallClockExhausted = false;
     while (paidSteps < this.maxSteps) {
       const index = paidSteps + 1;
       if (signal?.aborted) {
         return finalizeRun({ text: "", stopReason: "aborted", steps, messages });
       }
+      if (outOfTime()) {
+        wallClockExhausted = true;
+        break;
+      }
 
-      budgetPressure = this.maxSteps > 0 ? paidSteps / this.maxSteps : 0;
+      // Budget pressure is whichever budget is closer to running out. A run
+      // killed by the wall clock at step 12 of 80 never felt step pressure, so
+      // the mid-run acceptance nudge, checkpoint, and escalation never fired.
+      budgetPressure = Math.max(
+        this.maxSteps > 0 ? paidSteps / this.maxSteps : 0,
+        timePressure(),
+      );
       justInjectedContractCritique = false;
 
       if (this.acceptance) {
@@ -849,6 +942,9 @@ export class AgentLoop {
         replanCount < MAX_REMAINING_REPLANS &&
         paidSteps >= 1 &&
         paidSteps - lastReplanPaidSteps >= 2 &&
+        // A replan is a full model turn that runs no tool. When only a handful
+        // of turns still fit in the wall clock, spend them on execution.
+        affordableTurns() >= REPLAN_MIN_AFFORDABLE_TURNS &&
         !signal?.aborted
       ) {
         const state = struggleState();
@@ -869,10 +965,12 @@ export class AgentLoop {
               replanMessages.push({ role: "user", content: checkpoint });
             }
             replanMessages.push({ role: "user", content: REPLAN_REMAINING_MESSAGE });
-            const { message } = await chatWithRetry(this.client, {
-              messages: replanMessages,
-              signal,
-            });
+            const { message } = await timedTurn(() =>
+              chatWithRetry(this.client, {
+                messages: replanMessages,
+                signal,
+              }),
+            );
             const revised = textOf(message.content).trim();
             if (revised && isUsablePlanText(revised)) {
               if (checkpoint && !checkpointInjected) {
@@ -977,32 +1075,37 @@ export class AgentLoop {
       if (!nearLimitNudged && paidSteps + 1 >= this.maxSteps) {
         nearLimitNudged = true;
         messages.push({ role: "user", content: TOOL_NUDGE_NEAR_LIMIT });
+      } else if (!timeNearLimitNudged && timePressure() >= NEAR_LIMIT_TIME_PRESSURE) {
+        timeNearLimitNudged = true;
+        messages.push({ role: "user", content: TOOL_NUDGE_TIME_NEAR_LIMIT });
       }
 
       let chatResult;
       try {
-        chatResult = await chatWithParseRecovery(
-          this.client,
-          {
-            messages,
-            tools,
-            signal,
-            onDelta: this.onDelta,
-          },
-          {
-            onParseError: ({ recovery, error }) => {
-              parseRecoveries += 1;
-              const parseStep = {
-                index,
-                kind: "tool-parse-error",
-                content: String(error?.message ?? "error parsing tool call"),
-                toolCalls: [],
-                recoveries: recovery,
-              };
-              steps.push(parseStep);
-              this.onStep?.(parseStep);
+        chatResult = await timedTurn(() =>
+          chatWithParseRecovery(
+            this.client,
+            {
+              messages,
+              tools,
+              signal,
+              onDelta: this.onDelta,
             },
-          },
+            {
+              onParseError: ({ recovery, error }) => {
+                parseRecoveries += 1;
+                const parseStep = {
+                  index,
+                  kind: "tool-parse-error",
+                  content: String(error?.message ?? "error parsing tool call"),
+                  toolCalls: [],
+                  recoveries: recovery,
+                };
+                steps.push(parseStep);
+                this.onStep?.(parseStep);
+              },
+            },
+          ),
         );
       } catch (err) {
         if (signal?.aborted || err?.name === "AbortError") throw err;
@@ -1086,6 +1189,25 @@ export class AgentLoop {
                 continue;
               }
             }
+            if (this.escalation) {
+              const escalated = await this.escalation.maybeEscalate(struggleState());
+              if (escalated?.escalated) {
+                const escStep = {
+                  index,
+                  kind: "escalation",
+                  content:
+                    escalated.kind === "intensify"
+                      ? `Escalated effort on ${escalated.to} (${escalated.reason})`
+                      : `Escalated model ${escalated.from} → ${escalated.to} (${escalated.reason})`,
+                  toolCalls: [],
+                };
+                steps.push(escStep);
+                this.onStep?.(escStep);
+                consecutiveEmpty = 0;
+                if (!thinkingOnly) paidSteps += 1;
+                continue;
+              }
+            }
             const diagnostic = formatZeroTokenDiagnostic({
               totalEvalCount,
               elapsedMs: Date.now() - runStarted,
@@ -1158,6 +1280,25 @@ export class AgentLoop {
               acceptanceNudgeCount += 1;
               consecutiveEmpty = 0;
               messages.push({ role: "user", content: acceptNudge });
+              if (!thinkingOnly) paidSteps += 1;
+              continue;
+            }
+          }
+          if (this.escalation) {
+            const escalated = await this.escalation.maybeEscalate(struggleState());
+            if (escalated?.escalated) {
+              const escStep = {
+                index,
+                kind: "escalation",
+                content:
+                  escalated.kind === "intensify"
+                    ? `Escalated effort on ${escalated.to} (${escalated.reason})`
+                    : `Escalated model ${escalated.from} → ${escalated.to} (${escalated.reason})`,
+                toolCalls: [],
+              };
+              steps.push(escStep);
+              this.onStep?.(escStep);
+              consecutiveEmpty = 0;
               if (!thinkingOnly) paidSteps += 1;
               continue;
             }
@@ -1263,7 +1404,7 @@ export class AgentLoop {
         const commandText = String(args?.command ?? args?.cmd ?? "");
         const pretestBlock = refuseRepeat
           ? null
-          : mutationBlockedUntilPretest({ goal, toolName: name, steps });
+          : mutationBlockedUntilPretest({ goal, toolName: name, steps, args });
         const heredocBlock =
           refuseRepeat || pretestBlock ? null : heredocRetryBlock({ toolName: name, args, steps });
         const verifyBlock =
@@ -1330,13 +1471,23 @@ export class AgentLoop {
     // caller gets a best-effort answer instead of empty text. Best-effort —
     // any failure here must not mask the max-steps outcome.
     let text = "";
-    if (!signal?.aborted) {
+    const wrapUpPrompt = wallClockExhausted
+      ? WRAP_UP_PROMPT.replace(
+          "You have used all available tool steps for this task.",
+          "The wall-clock budget for this task is exhausted.",
+        )
+      : WRAP_UP_PROMPT;
+    // A wrap-up turn that the deadline would cut off loses the session save
+    // for nothing; synthesize the answer from the steps instead.
+    const wrapUpFits =
+      deadlineAt === null || remainingMs() > meanTurnMs() * WRAP_UP_TURN_MARGIN;
+    if (!signal?.aborted && wrapUpFits) {
       try {
-        const wrapUp = [...messages, { role: "user", content: WRAP_UP_PROMPT }];
+        const wrapUp = [...messages, { role: "user", content: wrapUpPrompt }];
         const { message } = await chatWithRetry(this.client, { messages: wrapUp, signal });
         text = textOf(message.content).trim();
         if (text) {
-          messages.push({ role: "user", content: WRAP_UP_PROMPT });
+          messages.push({ role: "user", content: wrapUpPrompt });
           messages.push({ role: "assistant", content: text });
           const step = { index: this.maxSteps + 1, kind: "final", content: text, toolCalls: [] };
           steps.push(step);
@@ -1379,6 +1530,9 @@ export class AgentLoop {
       messages,
       diagnostic,
       verification,
+      ...(wallClockExhausted
+        ? { wallClockExhausted: true, elapsedMs: this.now() - wallStarted }
+        : {}),
     });
   }
 }

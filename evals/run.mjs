@@ -3,7 +3,7 @@
  * Eval runner: measures real task success against live Ollama models, so
  * agent-quality changes are validated instead of guessed at.
  *
- *   node evals/run.mjs                         # default model, all tasks
+ *   node evals/run.mjs                         # cloud-max hard band, all tasks
  *   node evals/run.mjs --models llama3.2,qwen3-coder:30b
  *   node evals/run.mjs --task fix-failing-test --max-steps 15
  *   node evals/run.mjs --json results.json
@@ -18,12 +18,17 @@ import os from "node:os";
 import path from "node:path";
 
 import { createAgent } from "../src/index.mjs";
+import { getTierPresetBands, resolveTierModel } from "../src/tier-models.mjs";
 import { TASKS } from "./tasks.mjs";
 import { removeWorkspaceDir } from "./workspace-cleanup.mjs";
 
+const DEFAULT_EVAL_MODELS = [
+  resolveTierModel(6, getTierPresetBands("cloud-max"), "kimi-k3:cloud"),
+];
+
 function parseArgs(argv) {
   const options = {
-    models: ["llama3.2"],
+    models: [...DEFAULT_EVAL_MODELS],
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: 12,
     timeoutSeconds: 180,
@@ -63,6 +68,10 @@ async function runTask({ task, model, options }) {
       workspaceRoot: dir,
       maxSteps: options.maxSteps,
       projectIndex: false, // no embedding-model dependency for evals
+      planning: true,
+      think: "max",
+      escalationCloud: true,
+      cloudOnly: true,
       onStep: options.verbose
         ? (step) => {
             for (const call of step.toolCalls) {

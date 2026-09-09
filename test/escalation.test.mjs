@@ -63,6 +63,19 @@ test("computeStruggleScore weights repeated steps and empty responses", () => {
   assert.ok(high >= DEFAULT_ESCALATION_THRESHOLD);
 });
 
+test("two consecutive empty turns are enough struggle to escalate", () => {
+  const one = { ...CALM, consecutiveEmpty: 1 };
+  const two = { ...CALM, consecutiveEmpty: 2 };
+  assert.ok(
+    computeStruggleScore(one) < DEFAULT_ESCALATION_THRESHOLD,
+    "a single empty turn must not climb the ladder",
+  );
+  assert.ok(
+    computeStruggleScore(two) >= DEFAULT_ESCALATION_THRESHOLD,
+    "repeated empty turns are calmly producing nothing",
+  );
+});
+
 test("computeStruggleScore ignores single nudge", () => {
   const score = computeStruggleScore({
     repeatedCount: 0,

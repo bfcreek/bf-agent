@@ -47,7 +47,7 @@ const TASK_HINT_RULES = [
   },
   {
     id: "test-fix",
-    test: /\b(failing tests?|tests?\s+fail|\bit fails?\b|fix.{0,60}\btests?\b|(?:test|spec|suite).{0,40}\b(fail|fails|broken|error)\b)\b/i,
+    test: /\b(failing tests?|tests?\s+fail|\bit fails?\b|fix.{0,60}\btests?\b)\b/i,
     constraint:
       "Mandatory first step: run_command the failing test (e.g. node test.mjs, python test.py, or dotnet run) and record exit code/output before any edit_file or write_file. If that run already exits 0, read the named implementation file, confirm it matches the tests, and finish — do not add validation, docstrings, or extra features. If it fails, fix only the broken logic, then re-run the same command. Checklist: reproduce → diagnose → fix → verify. Do not rewrite the test file. After the failing run, edit_file the named implementation immediately (often inverted operators or swapped return values), then re-run the same test command. If edit_file says old_string is ambiguous, include the enclosing def/class (e.g. def mul(a, b): plus the return line) and never set replace_all on a return/statement. If a Python test imports a function whose module has the same name (greet.py / greet()), use `from greet import greet` — `import greet` then greet() calls the module.",
   },
@@ -429,6 +429,18 @@ export const TOOL_NUDGE_NEAR_LIMIT = [
   "You are on your last tool step.",
   "If you already diagnosed a compile or test failure, apply that exact fix now.",
   "Then give a non-empty final answer. Do not explore or re-run passing commands.",
+].join(" ");
+
+/**
+ * Injected once when most of the run's wall-clock budget is gone but steps
+ * remain. Unlike TOOL_NUDGE_NEAR_LIMIT this is not the last step — it is the
+ * point to stop installing/exploring and land the deliverable.
+ */
+export const TOOL_NUDGE_TIME_NEAR_LIMIT = [
+  "Most of this run's wall-clock budget is already spent.",
+  "Do not start installs, builds, or new exploration — they cannot finish in time.",
+  "Write the required deliverable files now from what you already know, run at most one short check,",
+  "then give a non-empty final answer.",
 ].join(" ");
 
 export const TOOL_NUDGE_VERIFY = [
@@ -1056,7 +1068,7 @@ export function isExistenceCheckCommand(cmd) {
 const DATA_FILE_EXT = /\.(fasta|fa|txt|json|csv|out|md|xml|yml|yaml|html|tsv|ics)$/i;
 
 const SOURCE_OR_TEST_EXT =
-  /\.(mjs|js|ts|py|cs|sh|ps1|go|rs|c|cpp|h|java|rb|tsx|jsx|vue)$/i;
+  /\.(mjs|js|ts|py|cs|sh|ps1|go|rs|c|cpp|h|java|rb|r|tsx|jsx|vue)$/i;
 const TEST_FILE_RE = /\b(?:test|spec|suite)\./i;
 
 /**
@@ -1692,7 +1704,13 @@ export function extractNumberedDeliverablePaths(goal) {
 }
 
 export function isCreatedFileDeliverable(filePath) {
-  return DATA_FILE_EXT.test(String(filePath ?? ""));
+  const p = String(filePath ?? "").replace(/\\/g, "/");
+  if (DATA_FILE_EXT.test(p)) return true;
+  // Harbor-style "save your implementation in /app/foo.R" is an output, not an input.
+  if (/^\/(?:app|tmp)\/[\w./-]+\.\w+$/i.test(p) && !isWorkspaceInputPath(p)) {
+    return SOURCE_OR_TEST_EXT.test(p);
+  }
+  return false;
 }
 
 /**
@@ -2253,12 +2271,26 @@ export function goalRequiresTestVerify(goal) {
  * @param {Array<{toolCalls?: Array<object>}>} input.steps
  * @returns {string|null} Error message to return instead of executing, or null.
  */
-export function mutationBlockedUntilPretest({ goal, toolName, steps }) {
+export function mutationBlockedUntilPretest({ goal, toolName, steps, args }) {
   if (!MUTATING_TOOL_NAMES.has(toolName)) return null;
   const hints = detectTaskHints(goal);
   if (!hints.some((h) => h.id === "test-fix")) return null;
   const calls = flattenToolCalls(steps);
   if (hasRunCommand(calls)) return null;
+  // Named create-PATH outputs are not pretest edits — blocking write_file here
+  // leaves the contract with nothing to verify.
+  if (toolName === "write_file") {
+    const target = String(args?.path ?? "").replace(/\\/g, "/");
+    const named = extractNamedDeliverables(goal).filter(isCreatedFileDeliverable);
+    if (
+      named.some((file) => {
+        const n = String(file).replace(/\\/g, "/");
+        return target === n || target.endsWith(`/${n}`) || n.endsWith(`/${target}`);
+      })
+    ) {
+      return null;
+    }
+  }
   return MUTATION_BLOCKED_PRETEST;
 }
 

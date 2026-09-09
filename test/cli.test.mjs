@@ -164,6 +164,17 @@ test("invalid option values are rejected with specific messages", () => {
   const badPort = cli("serve", "--port", "99999");
   assert.equal(badPort.status, 1);
   assert.match(badPort.stderr, /--port needs a number from 0 to 65535/);
+
+  const badWallClock = cli("hello", "--wall-clock", "soon");
+  assert.equal(badWallClock.status, 1);
+  assert.match(badWallClock.stderr, /--wall-clock needs a positive integer \(seconds\), got 'soon'/);
+});
+
+test("--wall-clock is documented in help", () => {
+  const run = cli("--help");
+  assert.equal(run.status, 0);
+  assert.match(run.stdout, /--wall-clock <sec>/);
+  assert.match(run.stdout, /HALO_WALL_CLOCK_SECONDS/);
 });
 
 test("a flag missing its value is reported", () => {
@@ -251,6 +262,7 @@ test("--help documents config edit, models config, and tier flags", () => {
   assert.match(run.stdout, /halo-agent models config edit/);
   assert.match(run.stdout, /models\.yaml/);
   assert.match(run.stdout, /--tier-preset/);
+  assert.match(run.stdout, /cloud-max/);
   assert.match(run.stdout, /--tier/);
 });
 

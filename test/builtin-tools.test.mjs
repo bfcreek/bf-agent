@@ -25,6 +25,9 @@ import {
   interactivePasswordPromptNote,
   exitZeroWithStderrNote,
   windowsBashCommandIssue,
+  fitTimeoutToDeadline,
+  DEADLINE_COMMAND_RESERVE_MS,
+  DEADLINE_MIN_COMMAND_MS,
 } from "../src/tools/shell.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -262,6 +265,60 @@ test("run_command reports non-zero exit codes and stderr", async () => {
   assert.equal(run.result.status, "FAILED with exit code 3");
   assert.equal(run.result.exitCode, 3);
   assert.match(run.result.stderr, /bad/);
+});
+
+test("fitTimeoutToDeadline clamps a command timeout to the run's remaining wall clock", () => {
+  const now = 1_000_000;
+  // No deadline: requested timeout passes through untouched.
+  assert.deepEqual(fitTimeoutToDeadline({ requestedMs: 600_000, deadlineAt: null, now }), {
+    timeoutMs: 600_000,
+    clamped: false,
+    remainingMs: null,
+  });
+  // Plenty of budget: untouched.
+  const roomy = fitTimeoutToDeadline({ requestedMs: 60_000, deadlineAt: now + 900_000, now });
+  assert.equal(roomy.timeoutMs, 60_000);
+  assert.equal(roomy.clamped, false);
+  // A 1500s install inside a run with 300s left is cut to what remains minus the reserve.
+  const tight = fitTimeoutToDeadline({ requestedMs: 1_500_000, deadlineAt: now + 300_000, now });
+  assert.equal(tight.clamped, true);
+  assert.equal(tight.timeoutMs, 300_000 - DEADLINE_COMMAND_RESERVE_MS);
+  assert.equal(tight.remainingMs, 300_000);
+  // Nothing useful can finish: report exhaustion instead of a doomed command.
+  const gone = fitTimeoutToDeadline({
+    requestedMs: 30_000,
+    deadlineAt: now + DEADLINE_COMMAND_RESERVE_MS + DEADLINE_MIN_COMMAND_MS - 1,
+    now,
+  });
+  assert.equal(gone.exhausted, true);
+  assert.equal(fitTimeoutToDeadline({ requestedMs: 30_000, deadlineAt: now - 5_000, now }).remainingMs, 0);
+});
+
+test("run_command refuses to start when the run's wall-clock budget is spent", async () => {
+  registry.setRunContext({ goal: "build it", deadlineAt: Date.now() + 1_000 });
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.log('never')"`,
+    timeout_seconds: 120,
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /wall-clock budget remain/);
+  assert.match(run.error, /final answer now/);
+});
+
+test("run_command clamps timeout_seconds to the remaining wall clock and says so", async () => {
+  registry.setRunContext({
+    goal: "build it",
+    deadlineAt: Date.now() + DEADLINE_COMMAND_RESERVE_MS + 40_000,
+  });
+  const run = await registry.execute("run_command", {
+    command: `node -e "console.log('quick')"`,
+    timeout_seconds: 300,
+  });
+  assert.equal(run.ok, true);
+  assert.equal(run.result.status, "success");
+  assert.match(run.result.note, /clamped from 300s to (39|40)s/);
+  assert.match(run.result.note, /cannot complete in this run/);
+  registry.setRunContext(null);
 });
 
 test("run_command executes in the workspace root", async () => {
@@ -716,7 +773,7 @@ test("agent loop hands the goal to tools via run context", async () => {
   };
   const loop = new AgentLoop({ client, registry: fakeRegistry, planning: false, taskHints: false });
   await loop.run("delete junk.txt");
-  assert.deepEqual(captured, [{ goal: "delete junk.txt" }]);
+  assert.deepEqual(captured, [{ goal: "delete junk.txt", deadlineAt: null }]);
 });
 
 test("runCommandSchemaIssue rejects conflated write_file fields", () => {

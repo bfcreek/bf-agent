@@ -81,7 +81,11 @@ if ($Language) {
 }
 if ($ExtraArgs) { $argsList.AddRange($ExtraArgs) }
 
-$modelList = @($defaults.models) -join ", "
+$modelList = if ($defaults.tierPreset) {
+    "tier-preset $($defaults.tierPreset) ($((@($defaults.models) -join ', ')))"
+} else {
+    @($defaults.models) -join ", "
+}
 $judge = if ($SkipJudge -or $defaults.skipJudge) { "precheck/integrity only" } else { "Cursor CLI ($($defaults.judgeModel))" }
 
 Write-Host "Starting local development bench (no Harbor, no extra Compose)" -ForegroundColor Cyan

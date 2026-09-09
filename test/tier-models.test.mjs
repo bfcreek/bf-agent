@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  applyTierPresetPolicy,
+  coerceTierPresetModel,
   detectAutoTierPreset,
   getTierPresetBands,
+  getTierPresetPolicy,
   normalizeTierModels,
+  parseTierPresetArg,
   resolveEffectiveTierModels,
   resolveTierModel,
   resolveTierPreset,
+  TIER_PRESET_HELP,
   TIER_PRESETS,
   uniqueTierModels,
 } from "../src/tier-models.mjs";
@@ -66,12 +71,74 @@ test("TIER_PRESETS include vision models on every band", () => {
   }
 });
 
+test("parseTierPresetArg accepts cloud-max and lists it in help", () => {
+  assert.equal(parseTierPresetArg("cloud-max"), "cloud-max");
+  assert.equal(parseTierPresetArg("CLOUD-MAX"), "cloud-max");
+  assert.match(TIER_PRESET_HELP, /cloud-max/);
+  assert.throws(() => parseTierPresetArg("yolo"), /cloud-max/);
+});
+
 test("getTierPresetBands returns cloud-first routing without local models", () => {
   const cloud = getTierPresetBands("cloud");
   assert.ok(cloud.every((band) => band.model.includes(":cloud")));
   assert.deepEqual(
     cloud.map((band) => band.model),
     TIER_PRESETS.cloud.map((band) => band.model),
+  );
+});
+
+test("cloud-max policy enables max think, planning, and cloud-only routing", () => {
+  const policy = getTierPresetPolicy("cloud-max");
+  assert.equal(policy.think, "max");
+  assert.equal(policy.planning, true);
+  assert.equal(policy.escalationCloud, true);
+  assert.equal(policy.cloudOnly, true);
+  assert.equal(getTierPresetPolicy("cloud").cloudOnly, false);
+
+  const applied = applyTierPresetPolicy({ think: "auto", planning: false, escalationCloud: false }, "cloud-max");
+  assert.equal(applied.think, "max");
+  assert.equal(applied.planning, true);
+  assert.equal(applied.escalationCloud, true);
+  assert.equal(applied.cloudOnly, true);
+
+  const kept = applyTierPresetPolicy(
+    { think: "low", planning: false, noPlan: true, escalationCloud: false },
+    "cloud-max",
+    { thinkExplicit: true, planningExplicit: true, escalationCloudExplicit: true },
+  );
+  assert.equal(kept.think, "low");
+  assert.equal(kept.planning, false);
+  assert.equal(kept.escalationCloud, false);
+});
+
+test("coerceTierPresetModel treats Harbor's model string as a preset", () => {
+  const options = { model: "tier-preset cloud-max" };
+  coerceTierPresetModel(options);
+  assert.equal(options.model, "auto");
+  assert.equal(options.tierPreset, "cloud-max");
+
+  const kept = { model: "tier-preset cloud-max", tierPreset: "hybrid" };
+  coerceTierPresetModel(kept);
+  assert.equal(kept.model, "auto");
+  assert.equal(kept.tierPreset, "hybrid", "an explicit --tier-preset must win");
+
+  const ordinary = { model: "gpt-oss:20b" };
+  coerceTierPresetModel(ordinary);
+  assert.equal(ordinary.model, "gpt-oss:20b");
+});
+
+test("cloud-max preset uses flagship cloud models at every band", () => {
+  const bands = getTierPresetBands("cloud-max");
+  assert.ok(bands.length >= 1);
+  assert.ok(bands.every((band) => band.model.includes(":cloud")));
+  assert.ok(bands.every((band) => band.vision.includes(":cloud")));
+  assert.equal(resolveTierModel(0, bands, "fallback"), "glm-5.3:cloud");
+  assert.equal(resolveTierModel(3, bands, "fallback"), "glm-5.3:cloud");
+  assert.equal(resolveTierModel(4, bands, "fallback"), "kimi-k3:cloud");
+  assert.equal(resolveTierModel(6, bands, "fallback", { requireVision: true }), "kimi-k3:cloud");
+  assert.deepEqual(
+    bands.map((band) => band.model),
+    TIER_PRESETS["cloud-max"].map((band) => band.model),
   );
 });
 

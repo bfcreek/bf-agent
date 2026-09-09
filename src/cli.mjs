@@ -53,7 +53,27 @@ import {
   openConfigInEditor as openModelsConfigInEditor,
   resolveCliModel,
 } from "./models-config.mjs";
-import { parseTierPresetArg, resolveEffectiveTierModels } from "./tier-models.mjs";
+import { parseTierPresetArg, resolveEffectiveTierModels, applyTierPresetPolicy, coerceTierPresetModel, getTierPresetPolicy, TIER_PRESET_HELP } from "./tier-models.mjs";
+
+/**
+ * Wall-clock budget for the agent loop, in ms. `--wall-clock` wins over
+ * HALO_WALL_CLOCK_SECONDS. The budget is measured from process start (an
+ * external supervisor's timer already started), so startup time is subtracted.
+ * @param {{wallClockSeconds?: number}} options
+ * @param {{env?: NodeJS.ProcessEnv, uptimeMs?: number}} [runtime]
+ * @returns {number} 0 when no budget applies.
+ */
+export function resolveWallClockMs(options, { env = process.env, uptimeMs = process.uptime() * 1000 } = {}) {
+  let seconds = options.wallClockSeconds;
+  if (!(Number.isFinite(seconds) && seconds > 0)) {
+    const raw = env.HALO_WALL_CLOCK_SECONDS;
+    const n = Number.parseInt(String(raw ?? ""), 10);
+    seconds = Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  if (!seconds) return 0;
+  // Never hand the loop a zero/negative budget; a tiny one still makes it wrap up.
+  return Math.max(1_000, seconds * 1000 - uptimeMs);
+}
 
 function parseArgs(argv, initial = getBuiltinDefaults()) {
   const options = {
@@ -109,6 +129,13 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         const n = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(n) && n > 0) options.numCtx = n;
         else if (raw !== undefined) options.errors.push(`--num-ctx needs a positive integer, got '${raw}'.`);
+        break;
+      }
+      case "--wall-clock": {
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(raw ?? "", 10);
+        if (Number.isFinite(n) && n > 0) options.wallClockSeconds = n;
+        else if (raw !== undefined) options.errors.push(`--wall-clock needs a positive integer (seconds), got '${raw}'.`);
         break;
       }
       case "--quiet":
@@ -173,10 +200,12 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
             `--think must be auto, true, false, off, or low|medium|high|max, got '${level}'.`,
           );
         }
+        options.thinkExplicit = true;
         break;
       }
       case "--no-plan":
         options.noPlan = true;
+        options.noPlanExplicit = true;
         break;
       case "--no-replan":
         options.noReplan = true;
@@ -201,6 +230,7 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         break;
       case "--escalation-cloud":
         options.escalationCloud = true;
+        options.escalationCloudExplicit = true;
         break;
       case "--escalation-max": {
         const raw = value(arg, ++i);
@@ -261,6 +291,7 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
     }
   }
   options.goal = positional.join(" ").trim();
+  coerceTierPresetModel(options);
   return options;
 }
 
@@ -289,11 +320,14 @@ Options:
   --model <name|auto|tier>  Ollama model. Default auto: with models.yaml, picks the band
                        for --tier (default from models.yaml); without models.yaml, strongest
                        installed model with thinking + tools that fits in memory
-  --tier-preset <name> Preset for model routing: auto, cloud, hybrid, or local
+  --tier-preset <name> Preset for model routing: ${TIER_PRESET_HELP}
   --tier <n>           Task difficulty 0–6 for model routing (default from models.yaml)
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
   --max-steps <n>      Max model round-trips (default 10)
   --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
+  --wall-clock <sec>   Wall-clock budget for the run (also HALO_WALL_CLOCK_SECONDS). Time spent
+                       counts toward budget pressure, command timeouts are clamped to what
+                       remains, and the loop wraps up before the deadline instead of being killed
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
                        agent: run them unattended (default when not a TTY, and in serve mode)
@@ -331,6 +365,7 @@ Examples:
   halo-agent models config edit
   halo-agent models --json --base-url http://127.0.0.1:11434
   halo-agent "hard refactor" --tier 4 --tier-preset hybrid
+  halo-agent "frontier coding" --tier 5 --tier-preset cloud-max
   halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
   halo-agent "what is the latest Node.js LTS version?"
 
@@ -715,6 +750,14 @@ async function main() {
     return;
   }
 
+  const effectivePreset = options.tierPreset ?? modelsConfigValues.tierPreset;
+  applyTierPresetPolicy(options, effectivePreset, {
+    thinkExplicit: options.thinkExplicit === true,
+    planningExplicit: options.noPlanExplicit === true,
+    escalationCloudExplicit: options.escalationCloudExplicit === true,
+  });
+  const presetPolicy = getTierPresetPolicy(effectivePreset);
+
   const client = new OllamaClient({
     baseUrl: options.baseUrl,
     model: options.model,
@@ -732,7 +775,13 @@ async function main() {
   // Route to an installed, suitable model up front; skip silently when Ollama is
   // unreachable — the run itself will surface that error clearly.
   try {
-    if (options.escalation !== false && options.model === "auto" && !modelsConfigExists) {
+    if (
+      options.escalation !== false &&
+      options.model === "auto" &&
+      !modelsConfigExists &&
+      !options.tierPreset &&
+      !presetPolicy.cloudOnly
+    ) {
       const routed = await resolveModelWithEscalation({
         requested: options.model,
         client,
@@ -752,6 +801,7 @@ async function main() {
           requested: "auto",
           client,
           escalationEnabled: false,
+          cloudOnly: presetPolicy.cloudOnly,
         });
         modelLadder = esc.ladder ?? [];
       }
@@ -822,7 +872,7 @@ async function main() {
           client,
           ladder: modelLadder,
           maxEscalations: options.escalationMax ?? 2,
-          allowCloud: options.escalationCloud === true,
+          allowCloud: options.escalationCloud === true || presetPolicy.cloudOnly,
         })
       : false;
 
@@ -914,8 +964,9 @@ async function main() {
           messages: partial.messages ?? priorSession?.messages ?? [],
           steps: liveRunSteps,
           stopReason: partial.stopReason ?? "running",
-          escalationCount: partial.escalationCount,
-          cloudUsed: partial.cloudUsed,
+          // Escalations happen mid-run; a killed process must not report 0.
+          escalationCount: partial.escalationCount ?? escalationController?.escalationCount,
+          cloudUsed: partial.cloudUsed ?? escalationController?.cloudUsed,
           verification: partial.verification,
           verificationPassed: partial.verificationPassed,
           error: partial.error,
@@ -956,6 +1007,7 @@ async function main() {
     acceptance: !options.noAcceptance,
     critique: !options.noCritique,
     escalation: escalationController,
+    wallClockMs: resolveWallClockMs(options),
     projectBootstrap: makeProjectBootstrap(options, client),
     onBootstrap: options.quiet
       ? undefined
@@ -1005,7 +1057,9 @@ async function main() {
 
     if (result.stopReason === "max-steps") {
       console.error(
-        `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
+        result.wallClockExhausted
+          ? `Stopped at the wall-clock budget (${Math.round((result.elapsedMs ?? 0) / 1000)}s); the answer below may be incomplete (raise --wall-clock to allow more).`
+          : `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
       );
       maybeDescribeAcceptance(options, result);
       if (result.text) console.log(result.text);
@@ -1014,6 +1068,8 @@ async function main() {
     }
     if (result.stopReason === "failed") {
       if (result.diagnostic) console.error(result.diagnostic);
+      else if (result.wallClockExhausted)
+        console.error("Agent stopped: wall-clock budget exhausted with required work incomplete.");
       else console.error("Agent stopped: required work incomplete after empty model responses.");
       maybeDescribeAcceptance(options, result);
       if (result.text) console.log(result.text);

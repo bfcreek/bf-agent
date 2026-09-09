@@ -6,6 +6,7 @@
  *   npm run bench
  *   node evals/dev-bench.mjs --tier 3          # auto-loads bench.config.json if present
  *   node evals/dev-bench.mjs --tier-preset cloud   # cloud-only models (no GPU)
+ *   node evals/dev-bench.mjs --tier-preset cloud-max  # flagship cloud models
  *   node evals/dev-bench.mjs --scenario greet-module
  *   node evals/dev-bench.mjs --language csharp --flat
  *   node evals/dev-bench.mjs --list-scenarios
@@ -26,6 +27,7 @@ import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
 import { resolveModelWithEscalation } from "../src/escalation.mjs";
 import { loadBenchOptions, resolveTierModel, uniqueTierModels } from "./config.mjs";
+import { getTierPresetPolicy } from "../src/tier-models.mjs";
 import {
   DEFAULT_CHECKPOINT_REL,
   buildCheckpointRecord,
@@ -97,6 +99,7 @@ function tierAverage(results) {
 }
 
 async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSteps, signal }) {
+  const policy = getTierPresetPolicy(options.tierPreset);
   const agent = await createAgent({
     model,
     baseUrl: options.baseUrl,
@@ -104,13 +107,15 @@ async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSte
     maxSteps,
     projectIndex: false,
     planning: options.planning,
+    think: options.think ?? undefined,
     taskHints: options.taskHints,
     memory: options.memory !== false,
     memoryReadonly: options.memoryReadonly === true,
     acceptance: options.noAcceptance !== true,
     critique: options.noCritique !== true,
     escalation: options.escalation !== false,
-    escalationCloud: options.escalationCloud === true,
+    escalationCloud: options.escalationCloud === true || policy.cloudOnly,
+    cloudOnly: policy.cloudOnly,
     onStep: options.verbose
       ? (step) => {
           for (const call of step.toolCalls) {

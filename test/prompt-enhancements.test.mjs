@@ -22,6 +22,7 @@ import {
   shouldFailOnEmptyResponses,
   extractCompilerDiagnostics,
   extractNamedDeliverables,
+  isCreatedFileDeliverable,
   extractNumberedDeliverablePaths,
   hasInstallAndRunSuccess,
   extractNamedNodeCommands,
@@ -394,6 +395,50 @@ test("mutationBlockedUntilPretest blocks edits before a test run", () => {
   );
   assert.equal(
     mutationBlockedUntilPretest({ goal, toolName: "read_file", steps: [] }),
+    null,
+  );
+});
+
+test("PASS/FAIL output format is not a test-fix pretest block", () => {
+  const goal = [
+    "Save your implementation in a file named /app/ars.R.",
+    'Your test function should output "TEST_NAME: PASS" or "TEST_NAME: FAIL".',
+  ].join(" ");
+  assert.equal(
+    detectTaskHints(goal).some((h) => h.id === "test-fix"),
+    false,
+    "authoring PASS/FAIL tests is not 'fix the failing tests'",
+  );
+  assert.equal(
+    mutationBlockedUntilPretest({
+      goal,
+      toolName: "write_file",
+      args: { path: "/app/ars.R" },
+      steps: [],
+    }),
+    null,
+  );
+  assert.equal(isCreatedFileDeliverable("/app/ars.R"), true);
+});
+
+test("named deliverable writes are not blocked by the pretest gate", () => {
+  const goal = "Run node test.mjs — it fails. Also save output titled /app/report.txt.";
+  assert.match(
+    mutationBlockedUntilPretest({
+      goal,
+      toolName: "edit_file",
+      args: { path: "lib.mjs" },
+      steps: [],
+    }) ?? "",
+    /Blocked/,
+  );
+  assert.equal(
+    mutationBlockedUntilPretest({
+      goal,
+      toolName: "write_file",
+      args: { path: "/app/report.txt" },
+      steps: [],
+    }),
     null,
   );
 });

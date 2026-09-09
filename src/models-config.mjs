@@ -7,9 +7,11 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { resolveModelAuto } from "./model-routing.mjs";
+import { resolveModelAuto, isCloudModel } from "./model-routing.mjs";
 import {
   DEFAULT_TIER_PRESET,
+  coerceTierPresetModel,
+  getTierPresetPolicy,
   normalizeTierModels,
   parseTierPresetArg,
   resolveEffectiveTierModels,
@@ -24,7 +26,7 @@ const MODELS_CONFIG_TEMPLATE = `# halo-agent model routing
 # Used by the CLI and dev-bench to pick easy / medium / hard models.
 # Run: halo-agent models config edit
 
-# Preset: auto (detect local models), cloud (no GPU), hybrid, local
+# Preset: auto (detect local models), cloud (no GPU), cloud-max (flagship cloud, max think, planning on), hybrid, local
 preset: auto
 
 # Default task difficulty for a single CLI run (0=safety … 6=hardest).
@@ -166,6 +168,7 @@ export async function resolveCliModel(
   modelsConfig = normalizeModelsConfigValues({}).values,
   modelsConfigExists = false,
 ) {
+  coerceTierPresetModel(options);
   const requireVision = options.requireVision === true;
 
   if (options.model && options.model !== "auto" && options.model !== "tier") {
@@ -191,7 +194,46 @@ export async function resolveCliModel(
 
   const taskTier = options.taskTier ?? modelsConfig.defaultTier ?? DEFAULT_TASK_TIER;
   const bandModel = resolveTierModel(taskTier, tierModels, "auto", { requireVision });
-  return resolveModelAuto({ requested: bandModel, client, requireVision });
+  const routed = await resolveModelAuto({ requested: bandModel, client, requireVision });
+  return maybePreferInstalledCloud(options, client, routed, requireVision);
+}
+
+/**
+ * Cloud-only presets must not silently hop to a local model when any cloud
+ * rung is installed. Local fallback is last-resort and warned.
+ *
+ * @param {object} options
+ * @param {object} client
+ * @param {{model: string, warnings: string[]}} routed
+ * @param {boolean} requireVision
+ */
+async function maybePreferInstalledCloud(options, client, routed, requireVision) {
+  const cloudOnly = getTierPresetPolicy(options.tierPreset).cloudOnly === true;
+  if (!cloudOnly || isCloudModel(routed.model)) return routed;
+  const { resolveModelWithEscalation } = await import("./escalation.mjs");
+  const cloud = await resolveModelWithEscalation({
+    requested: "auto",
+    client,
+    cloudOnly: true,
+    requireVision,
+  });
+  const pick = (cloud.ladder ?? []).filter((m) => m.cloud).at(-1);
+  if (pick) {
+    return {
+      model: pick.name,
+      warnings: [
+        ...(routed.warnings ?? []),
+        `Using '${pick.name}': strongest installed cloud model for cloud-only preset '${options.tierPreset}'.`,
+      ],
+    };
+  }
+  return {
+    ...routed,
+    warnings: [
+      ...(routed.warnings ?? []),
+      `Tier preset '${options.tierPreset}' is cloud-only but no cloud model is installed; using '${routed.model}'.`,
+    ],
+  };
 }
 
 export { openConfigInEditor };

@@ -7,6 +7,8 @@ import {
   buildHeuristicContract,
   contractHasEnforceableChecks,
   isDeliverableOutstandingOnly,
+  isPlaceholderCommandOutput,
+  isStubDeliverableContent,
   isVerifyOutstandingOnly,
   parseAcceptanceBlock,
   verifyAcceptanceContract,
@@ -447,4 +449,67 @@ test("contractHasEnforceableChecks separates real checks from vacuous ones", () 
     }),
     true,
   );
+});
+
+test("stub deliverable content is not a passing contract", async () => {
+  const contract = { checks: [{ kind: "deliverable", target: "main.c" }] };
+  const result = await verifyAcceptanceContract({
+    contract,
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "write_file",
+            ok: true,
+            args: {
+              path: "main.c",
+              content: "/* this does NOT implement the required behavior */\nint main() { return 0; }\n",
+            },
+            result: { path: "main.c" },
+          },
+        ],
+      },
+    ],
+    goal: "Write main.c that produces the instruction's required output.",
+    workspaceRoot: process.cwd(),
+  });
+  assert.equal(result.passed, false);
+  assert.ok(result.checks.some((c) => /stub|placeholder/i.test(c.detail)));
+});
+
+test("placeholder-heavy command stdout is not a passing check", async () => {
+  const contract = { checks: [{ kind: "command", target: "./app prompt" }] };
+  const tokens = Array.from({ length: 20 }, () => "<token>").join(" ");
+  const result = await verifyAcceptanceContract({
+    contract,
+    steps: [
+      {
+        toolCalls: [
+          {
+            name: "write_file",
+            ok: true,
+            args: { path: "app.c", content: "int main(){return 0;}" },
+            result: { path: "app.c" },
+          },
+          {
+            name: "run_command",
+            ok: true,
+            args: { command: "./app prompt" },
+            result: { exitCode: 0, stdout: `${tokens}\n`, stderr: "" },
+          },
+        ],
+      },
+    ],
+    goal: "",
+  });
+  assert.equal(result.passed, false);
+  assert.match(result.checks[0].detail, /placeholder/i);
+});
+
+test("isStubDeliverableContent and isPlaceholderCommandOutput stay conservative", () => {
+  assert.equal(isStubDeliverableContent("int add(int a, int b) { return a + b; }"), false);
+  assert.equal(isStubDeliverableContent("TODO: tune the learning rate"), false);
+  assert.equal(isStubDeliverableContent("TODO: implement the forward pass"), true);
+  assert.equal(isPlaceholderCommandOutput("hello world from gpt2"), false);
+  assert.equal(isPlaceholderCommandOutput("<token> ".repeat(12)), true);
 });

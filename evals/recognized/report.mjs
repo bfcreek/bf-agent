@@ -17,7 +17,7 @@ export const HARBOR_RUN_FLAGS = {
   acceptance: true,
   critique: true,
   escalation: true,
-  escalationCloud: false,
+  escalationCloud: true,
 };
 
 /**

@@ -126,6 +126,9 @@ export function buildHarborEnv(input) {
   env.HALO_AGENT_VERSION = input.agentVersion ?? "0.1.0";
   env.HALO_AGENT_MODEL = input.model;
   env.HALO_AGENT_BASE_URL = input.containerBaseUrl;
+  // The adapter derives the agent's wall-clock budget from the task's
+  // [agent] timeout_sec; Harbor scales that by the multiplier, so must we.
+  env.HALO_AGENT_TIMEOUT_MULTIPLIER = String(input.timeoutMultiplier ?? 1);
   env.PYTHONUTF8 = "1";
   env.PYTHONIOENCODING = "utf-8";
   return env;

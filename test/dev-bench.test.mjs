@@ -72,6 +72,30 @@ test("parseCliArgs accepts --tier-preset", () => {
   assert.equal(opts.tierPreset, "hybrid");
 });
 
+test("parseCliArgs accepts --tier-preset cloud-max", () => {
+  const opts = parseCliArgs(["--tier-preset", "cloud-max"], defaultConfig());
+  assert.equal(opts.tierPreset, "cloud-max");
+});
+
+test("parseCliArgs accepts --think max", () => {
+  const opts = parseCliArgs(["--think", "max"], defaultConfig());
+  assert.equal(opts.think, "max");
+});
+
+test("parseCliArgs inherits tierPreset from bench config", () => {
+  const file = defaultConfig();
+  file.tierPreset = "cloud-max";
+  const opts = parseCliArgs([], file);
+  assert.equal(opts.tierPreset, "cloud-max");
+});
+
+test("parseCliArgs --tier-preset overrides bench config preset", () => {
+  const file = defaultConfig();
+  file.tierPreset = "cloud-max";
+  const opts = parseCliArgs(["--tier-preset", "local"], file);
+  assert.equal(opts.tierPreset, "local");
+});
+
 test("parseCliArgs rejects unknown --tier-preset", () => {
   assert.throws(
     () => parseCliArgs(["--tier-preset", "yolo"], defaultConfig()),
@@ -139,6 +163,29 @@ test("loadBenchOptions --tier-preset overrides models config bands", async () =>
   }
 });
 
+test("loadBenchOptions file tierPreset overrides user models.yaml", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "halo-bench-file-preset-"));
+  const modelsConfigPath = path.join(dir, "models.yaml");
+  const benchConfigPath = path.join(dir, "bench.config.json");
+  const previous = { ...process.env };
+  process.env.HALO_MODELS_CONFIG = modelsConfigPath;
+  try {
+    await writeFile(modelsConfigPath, "preset: local\n", "utf8");
+    await writeFile(
+      benchConfigPath,
+      JSON.stringify({ models: ["auto"], tierPreset: "cloud-max" }),
+      "utf8",
+    );
+    const { options } = await loadBenchOptions(["--config", benchConfigPath, "--flat"]);
+    assert.equal(options.tierPreset, "cloud-max");
+    assert.ok(options.tierModels?.every((band) => band.model.includes(":cloud")));
+    assert.equal(options.tierModels.at(-1).model, "kimi-k3:cloud");
+  } finally {
+    process.env = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseCliArgs enables progression from config by default", () => {
   const file = defaultConfig();
   const opts = parseCliArgs([], file);
@@ -185,6 +232,12 @@ test("loadBenchOptions uses evals/bench.config.json when cwd has no local config
   assert.equal(options.planning, file.planning);
   assert.equal(options.judgeRetries, file.judgeRetries);
   assert.deepEqual(options.models, file.models);
+  assert.equal(options.tierPreset, "cloud-max");
+  assert.equal(options.planning, true);
+  assert.equal(options.think, "max");
+  assert.equal(options.escalationCloud, true);
+  assert.ok(options.tierModels?.length);
+  assert.ok(options.tierModels.every((band) => band.model.includes(":cloud")));
   assert.equal(options.gates.safety.integrityMinPassRate, file.gates.safety.integrityMinPassRate);
 });
 

@@ -90,3 +90,30 @@ test("the ladder drops a local model that cannot fit in VRAM", async () => {
     ["qwen3:14b", "qwen3:72b"],
   );
 });
+
+test("cloudOnly ladder keeps only Ollama cloud models", async () => {
+  const client = {
+    async listModelsDetailed() {
+      return [
+        { name: "qwen3:14b", parameterSize: "14.8B", sizeBytes: 9 * GB },
+        { name: "glm-5.3:cloud", parameterSize: "753B", sizeBytes: 400 },
+        { name: "kimi-k3:cloud", parameterSize: "2810B", sizeBytes: 400 },
+      ];
+    },
+    async show() {
+      return { capabilities: ["tools", "thinking"] };
+    },
+  };
+
+  const ladder = await buildModelLadder({
+    client,
+    totalMemBytes: 64 * GB,
+    vramBytes: 24 * GB,
+    cloudOnly: true,
+  });
+  assert.deepEqual(
+    ladder.map((m) => m.name),
+    ["glm-5.3:cloud", "kimi-k3:cloud"],
+  );
+  assert.ok(ladder.every((m) => m.cloud));
+});

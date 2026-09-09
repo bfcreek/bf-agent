@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { parseRecognizedArgs, defaultRecognizedConfig } from "../evals/recognized/config.mjs";
+import { parseRecognizedArgs, defaultRecognizedConfig, loadRecognizedOptions } from "../evals/recognized/config.mjs";
 import { buildHarborArgs, buildHarborEnv, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
 import { findInstructionField, loadTrialAgentMetrics, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
 import { latestReportPaths, recognizedRoot, runDirectory, timestampRunId } from "../evals/recognized/layout.mjs";
@@ -43,6 +43,24 @@ test("parseRecognizedArgs keeps judging on by default and accepts includes", () 
   assert.equal(opts.skipJudge, false);
   assert.deepEqual(opts.includeTaskNames, ["openssl-selfsigned-cert", "hello-world"]);
   assert.equal(opts.model, "gpt-oss:20b");
+});
+
+test("parseRecognizedArgs inherits cloud-max tier preset", () => {
+  const opts = parseRecognizedArgs(["terminal-bench"], defaultRecognizedConfig());
+  assert.equal(opts.tierPreset, "cloud-max");
+  assert.equal(opts.model, "auto");
+});
+
+test("loadRecognizedOptions resolves auto + cloud-max to the hard-band model", async () => {
+  const { options } = await loadRecognizedOptions(["terminal-bench"]);
+  assert.equal(options.tierPreset, "cloud-max");
+  assert.equal(options.model, "kimi-k3:cloud");
+});
+
+test("loadRecognizedOptions honors explicit --model over the preset", async () => {
+  const { options } = await loadRecognizedOptions(["terminal-bench", "--model", "gpt-oss:20b"]);
+  assert.equal(options.model, "gpt-oss:20b");
+  assert.equal(options.tierPreset, "cloud-max");
 });
 
 test("parseRecognizedArgs --skip-judge and --from-job", () => {

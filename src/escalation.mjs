@@ -21,6 +21,7 @@ export const DEFAULT_ESCALATION_THRESHOLD = 4;
 const SIGNAL_WEIGHTS = {
   repeatedStep: 2,
   consecutiveEmpty: 2,
+  repeatedEmpty: 2,
   toolNudge: 1,
   parseRecovery: 2,
   editMiss: 1,
@@ -64,6 +65,9 @@ export function computeStruggleScore(state) {
   let score = 0;
   if (state.repeatedCount >= 2) score += SIGNAL_WEIGHTS.repeatedStep;
   if (state.consecutiveEmpty >= 1) score += SIGNAL_WEIGHTS.consecutiveEmpty;
+  // Two empty turns is "calmly producing nothing" — escalate rather than
+  // hard-failing the run with the same model still loaded.
+  if (state.consecutiveEmpty >= 2) score += SIGNAL_WEIGHTS.repeatedEmpty;
   if (state.toolNudgeCount >= 2) score += SIGNAL_WEIGHTS.toolNudge;
   if (state.parseRecoveries >= 1) score += SIGNAL_WEIGHTS.parseRecovery;
   if (state.editMissLoop) score += SIGNAL_WEIGHTS.editMiss;
@@ -132,9 +136,10 @@ export function paramsBOf(modelName) {
  * @param {{show?: Function, listModelsDetailed: Function}} options.client
  * @param {number} [options.totalMemBytes]
  * @param {number} [options.vramBytes] Pass 0 to ignore the GPU, omit to probe.
+ * @param {boolean} [options.cloudOnly] Installed Ollama cloud models only.
  * @returns {Promise<Array<{name: string, paramsB: number, cloud: boolean, thinking: boolean}>>}
  */
-export async function buildModelLadder({ client, totalMemBytes = os.totalmem(), vramBytes }) {
+export async function buildModelLadder({ client, totalMemBytes = os.totalmem(), vramBytes, cloudOnly = false }) {
   const { budgetBytes: memoryBudget } = await resolveModelFitBudget({ totalMemBytes, vramBytes });
   const models = await client.listModelsDetailed();
   const locals = [];
@@ -148,7 +153,7 @@ export async function buildModelLadder({ client, totalMemBytes = os.totalmem(), 
     const rung = { name: entry.name, paramsB, cloud: isCloudModel(entry.name), thinking: thinking === true };
     if (rung.cloud) {
       clouds.push(rung);
-    } else if (!entry.sizeBytes || entry.sizeBytes <= memoryBudget) {
+    } else if (!cloudOnly && (!entry.sizeBytes || entry.sizeBytes <= memoryBudget)) {
       locals.push(rung);
     }
   }
@@ -372,6 +377,7 @@ export class EscalationController {
  * @param {{show?: Function, listModelsDetailed: Function}} options.client
  * @param {boolean} [options.escalationEnabled]
  * @param {boolean} [options.requireVision]
+ * @param {boolean} [options.cloudOnly] Build a cloud-only ladder (no local rungs).
  * @returns {Promise<{model: string, warnings: string[], ladder: Array<{name: string, paramsB: number, cloud: boolean}>}>}
  */
 export async function resolveModelWithEscalation({
@@ -381,9 +387,18 @@ export async function resolveModelWithEscalation({
   totalMemBytes,
   vramBytes,
   requireVision = false,
+  cloudOnly = false,
 }) {
   const warnings = [];
-  const ladder = await buildModelLadder({ client, totalMemBytes, vramBytes });
+  const ladder = await buildModelLadder({ client, totalMemBytes, vramBytes, cloudOnly });
+
+  if (cloudOnly && requested === "auto") {
+    const pick = ladder.filter((m) => m.cloud).at(-1) ?? ladder.at(-1);
+    if (pick) {
+      warnings.push(`Using '${pick.name}': strongest installed Ollama cloud model.`);
+      return { model: pick.name, warnings, ladder };
+    }
+  }
 
   if (!escalationEnabled || requested !== "auto" || requireVision) {
     // Image turns need a vision model up front — do not start on a text-only

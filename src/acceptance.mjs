@@ -297,7 +297,22 @@ function wroteDeliverable(calls, relPath) {
     if (!(written === wanted || written.endsWith(`/${wanted}`))) return false;
     const content = call.args?.content ?? call.args?.text;
     if (content !== undefined && String(content).trim().length === 0) return false;
+    if (content !== undefined && isStubDeliverableContent(content)) return false;
     return true;
+  });
+}
+
+function wroteStubDeliverable(calls, relPath) {
+  const wanted = relPath.replace(/^\.\//, "").replace(/\\/g, "/").toLowerCase();
+  return (calls ?? []).some((call) => {
+    if (!call?.ok || !MUTATING_TOOL_NAMES.has(call.name)) return false;
+    const written = String(call.result?.path ?? call.args?.path ?? "")
+      .replace(/\\/g, "/")
+      .toLowerCase();
+    if (!written) return false;
+    if (!(written === wanted || written.endsWith(`/${wanted}`))) return false;
+    const content = call.args?.content ?? call.args?.text;
+    return content !== undefined && isStubDeliverableContent(content);
   });
 }
 
@@ -335,6 +350,40 @@ function isVacuousDeliverable(target) {
 }
 
 /**
+ * Admitted stubs and placeholder dumps are not deliverables. Exit 0 on a
+ * compile/run of placeholder output is an always-true contract, not a pass.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isStubDeliverableContent(text) {
+  const s = String(text ?? "");
+  if (!s.trim()) return false;
+  if (/\bdoes\s+not\s+implement\b/i.test(s)) return true;
+  if (/\bnotimplemented(?:error|exception)\b/i.test(s)) return true;
+  if (/#\s*placeholder\b|\/\/\s*placeholder\b/i.test(s)) return true;
+  if (/TODO:\s*(implement|fill in|stub)\b/i.test(s)) return true;
+  return (s.match(/<token>/gi) ?? []).length >= 8;
+}
+
+/**
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isPlaceholderCommandOutput(text) {
+  const tokens = String(text ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length < 8) return false;
+  const counts = new Map();
+  for (const token of tokens) counts.set(token, (counts.get(token) ?? 0) + 1);
+  const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["", 0];
+  if (n / tokens.length < 0.7) return false;
+  return /^<[^>]+>$/.test(top) || /^(token|placeholder|todo)$/i.test(top);
+}
+
+/**
  * Whether the contract carries at least one real (non-vacuous) check. Such a
  * contract is enforceable: an instruction that names deliverables or verify
  * commands is work, even when goal-text heuristics misclassify it — hollow
@@ -366,6 +415,12 @@ function commandCheckPassed(calls, target, goal = "") {
     if (!producedOutput(call.result)) continue;
     const cmd = runCommandText(call);
     if (cmd.includes(normalized) || normalized.includes(cmd)) {
+      if (isPlaceholderCommandOutput(`${call.result?.stdout ?? ""}${call.result?.stderr ?? ""}`)) {
+        return {
+          passed: false,
+          detail: "command exited 0 but stdout looks like placeholders — keep iterating",
+        };
+      }
       return { passed: true, detail: "matching command exited 0 with output" };
     }
   }
@@ -412,6 +467,16 @@ export async function verifyAcceptanceContract({
           passed: false,
           detail: "input/vendor path is not an acceptance deliverable",
         });
+        continue;
+      }
+      if (wroteStubDeliverable(calls, check.target)) {
+        results.push({
+          kind: "deliverable",
+          target: check.target,
+          passed: false,
+          detail: "deliverable is a stub/placeholder, not a real implementation",
+        });
+        missing.push(`create ${check.target}`);
         continue;
       }
       let result = await deliverableExists(workspaceRoot, check.target);

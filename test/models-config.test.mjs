@@ -28,6 +28,12 @@ test("normalizeModelsConfigValues accepts preset, default-tier, and bands", () =
   assert.equal(values.tierModels[0].vision, "kimi-k2.6:cloud");
 });
 
+test("normalizeModelsConfigValues accepts cloud-max preset", () => {
+  const { values, errors } = normalizeModelsConfigValues({ preset: "cloud-max" });
+  assert.deepEqual(errors, []);
+  assert.equal(values.tierPreset, "cloud-max");
+});
+
 test("ensureModelsConfigFile creates models.yaml template", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-models-config-"));
   const configPath = path.join(dir, "models.yaml");
@@ -38,6 +44,7 @@ test("ensureModelsConfigFile creates models.yaml template", async () => {
     assert.equal(created, configPath);
     const text = await readFile(configPath, "utf8");
     assert.match(text, /preset: auto/);
+    assert.match(text, /cloud-max/);
     assert.match(text, /default-tier:/);
     assert.match(text, /vision:/);
   } finally {
@@ -153,4 +160,26 @@ test("resolveCliModel requireVision uses the band vision model", async () => {
     false,
   );
   assert.equal(routed.model, "devstral-small-2:latest");
+});
+
+test("resolveCliModel cloud-only preset prefers an installed cloud model over local auto-select", async () => {
+  const client = {
+    async listModelsDetailed() {
+      return [
+        { name: "gpt-oss:20b", sizeBytes: 14e9, parameterSize: "21B" },
+        { name: "kimi-k2.6:cloud", sizeBytes: 1, parameterSize: "1T" },
+      ];
+    },
+    async show() {
+      return { capabilities: ["tools", "thinking"] };
+    },
+  };
+  const routed = await resolveCliModel(
+    { model: "tier-preset cloud-max", baseUrl: "http://127.0.0.1:11434", taskTier: 2 },
+    client,
+    normalizeModelsConfigValues({}).values,
+    false,
+  );
+  assert.equal(routed.model, "kimi-k2.6:cloud");
+  assert.ok(routed.warnings.some((w) => /cloud-only preset|strongest installed cloud/i.test(w)));
 });

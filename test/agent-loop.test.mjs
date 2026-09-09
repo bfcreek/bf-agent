@@ -604,6 +604,140 @@ test("the critique pass revises the plan before tools are offered", async () => 
   assert.equal(client.calls[2].tools.length, 2);
 });
 
+/**
+ * FakeClient whose every chat call advances an injected clock. `perCallMs` is a
+ * number or an array (one entry per call; the last entry repeats).
+ */
+class SlowFakeClient extends FakeClient {
+  constructor(script, { clock, perCallMs }) {
+    super(script);
+    this.clock = clock;
+    this.perCallMs = Array.isArray(perCallMs) ? perCallMs : [perCallMs];
+  }
+
+  async chat(input) {
+    const i = Math.min(this.calls.length, this.perCallMs.length - 1);
+    this.clock.t += this.perCallMs[i];
+    return super.chat(input);
+  }
+}
+
+test("wall-clock budget: a slow first plan skips the critique turn and time pressure nudges the wrap-up", async () => {
+  const clock = { t: 1_000_000 };
+  // 1000s budget; the plan turn costs 150s (15% — past the critique-skip
+  // share), every later turn 50s.
+  const toolTurns = Array.from({ length: 14 }, (_, i) => ({
+    role: "assistant",
+    content: "",
+    tool_calls: [toolCall("add", { a: i, b: 1 })],
+  }));
+  const client = new SlowFakeClient(
+    [
+      { role: "assistant", content: "1. read the module\n2. edit it\n3. run tests" },
+      ...toolTurns,
+      { role: "assistant", content: "Feature implemented; sums computed." },
+    ],
+    { clock, perCallMs: [150_000, 50_000] },
+  );
+  const registry = makeRegistry();
+  const loop = new AgentLoop({
+    client,
+    registry,
+    // Keep the budget-critical struggle score from also triggering a replan
+    // chat here; this test isolates critique timing and the time nudge.
+    acceptance: false,
+    replan: false,
+    maxSteps: 50,
+    wallClockMs: 1_000_000,
+    now: () => clock.t,
+  });
+
+  const result = await loop.run("implement a new feature and then run the tests to verify");
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.wallClockExhausted, undefined);
+  // Plan took 15% of the budget: the critique pre-pass is skipped.
+  assert.equal(result.steps.filter((s) => s.kind === "plan").length, 1);
+  assert.ok(!client.calls.some((c) => /failure modes/i.test(c.messages.at(-1)?.content ?? "")));
+  // The deadline is handed to tools so command timeouts cannot outlive the run.
+  assert.equal(registry.runContext.deadlineAt, 1_000_000 + 1_000_000);
+  // At 90% elapsed (before the final turn) the time near-limit nudge fires once.
+  const timeNudges = client.calls.at(-1).messages.filter((m) =>
+    /wall-clock budget is already spent/i.test(m.content ?? ""),
+  );
+  assert.equal(timeNudges.length, 1);
+  assert.ok(
+    !client.calls.at(-1).messages.some((m) => /last tool step/i.test(m.content ?? "")),
+    "step near-limit nudge must not fire on time pressure",
+  );
+});
+
+test("wall-clock budget: the loop stops itself at the deadline reserve and wraps up", async () => {
+  const clock = { t: 5_000 };
+  const toolTurns = Array.from({ length: 8 }, (_, i) => ({
+    role: "assistant",
+    content: "",
+    tool_calls: [toolCall("add", { a: i, b: 2 })],
+  }));
+  const client = new SlowFakeClient(
+    [...toolTurns, { role: "assistant", content: "Partial: computed sums before time ran out." }],
+    { clock, perCallMs: 10_000 },
+  );
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    acceptance: false,
+    maxSteps: 50,
+    wallClockMs: 95_000,
+    now: () => clock.t,
+  });
+
+  const result = await loop.run("add some numbers");
+
+  // 95s budget, 15s minimum reserve, 10s turns: the loop stops once 15s remain
+  // (t=85s), and a 10s wrap-up still fits inside that reserve.
+  assert.equal(result.wallClockExhausted, true);
+  assert.equal(result.stopReason, "max-steps");
+  assert.equal(result.steps.filter((s) => s.kind === "tool-calls").length, 8);
+  assert.equal(result.elapsedMs, 90_000);
+  const wrapUp = client.calls.at(-1).messages.at(-1).content;
+  assert.match(wrapUp, /wall-clock budget for this task is exhausted/);
+  assert.equal(result.text, "Partial: computed sums before time ran out.");
+});
+
+test("wall-clock budget: turns are priced by their measured cost; a wrap-up that cannot fit is synthesized", async () => {
+  const clock = { t: 5_000 };
+  const client = new SlowFakeClient(
+    [
+      { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 2 })] },
+      { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 3, b: 4 })] },
+      { role: "assistant", content: "never reached" },
+    ],
+    { clock, perCallMs: 40_000 },
+  );
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    planning: false,
+    acceptance: false,
+    maxSteps: 50,
+    wallClockMs: 95_000,
+    now: () => clock.t,
+  });
+
+  const result = await loop.run("add some numbers");
+
+  // 40s turns: after two turns 15s remain — less than one more turn, so the
+  // loop stops; a 40s wrap-up chat would be killed mid-turn, so it is skipped.
+  assert.equal(result.wallClockExhausted, true);
+  assert.equal(result.steps.filter((s) => s.kind === "tool-calls").length, 2);
+  assert.equal(client.calls.length, 2, "no wrap-up chat when it cannot finish before the deadline");
+  assert.equal(result.elapsedMs, 80_000);
+  assert.ok(result.text.length > 0, "final answer is synthesized from the steps");
+  assert.notEqual(result.text, "never reached");
+});
+
 test("an acceptance command from the plan blocks completion until it runs", async () => {
   const ran = [];
   const registry = new ToolRegistry();

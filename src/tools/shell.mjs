@@ -47,6 +47,41 @@ const DEFAULT_TIMEOUT_SECONDS = positiveIntEnv("HALO_COMMAND_TIMEOUT", 30);
 const MAX_TIMEOUT_SECONDS = positiveIntEnv("HALO_MAX_COMMAND_TIMEOUT", 300);
 
 /**
+ * Wall-clock the run keeps for itself after the last command: a model turn to
+ * read the result and write the deliverable, plus the session save.
+ */
+export const DEADLINE_COMMAND_RESERVE_MS = 20_000;
+/** Below this much remaining budget a command cannot finish and be acted on. */
+export const DEADLINE_MIN_COMMAND_MS = 5_000;
+
+/**
+ * Fit a requested command timeout inside the run's remaining wall-clock budget.
+ *
+ * One install or build with a generous `timeout_seconds` can outlive the whole
+ * run (a 1500s apt retry inside a 900s trial). The run owns the budget, not the
+ * command, so the timeout is clamped to what is left after a reserve for the
+ * final turn. Returns `{ timeoutMs, clamped, remainingMs }`, or
+ * `{ exhausted: true, remainingMs }` when there is no room for another command.
+ *
+ * @param {object} input
+ * @param {number} input.requestedMs
+ * @param {number|null|undefined} input.deadlineAt Epoch ms; falsy = no budget.
+ * @param {number} [input.now]
+ */
+export function fitTimeoutToDeadline({ requestedMs, deadlineAt, now = Date.now() }) {
+  if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) {
+    return { timeoutMs: requestedMs, clamped: false, remainingMs: null };
+  }
+  const remainingMs = deadlineAt - now;
+  const usable = remainingMs - DEADLINE_COMMAND_RESERVE_MS;
+  if (usable < DEADLINE_MIN_COMMAND_MS) {
+    return { exhausted: true, remainingMs: Math.max(0, remainingMs) };
+  }
+  if (requestedMs <= usable) return { timeoutMs: requestedMs, clamped: false, remainingMs };
+  return { timeoutMs: usable, clamped: true, remainingMs };
+}
+
+/**
  * Interpreters and shells that open an interactive REPL when launched with
  * no script or inline code. The tool runs commands with no TTY input, so a
  * REPL can never receive input — it just hangs until the timeout.
@@ -536,10 +571,30 @@ export function registerShellTools(registry, { workspaceRoot }) {
           dir = workspaceRoot;
         }
       }
-      const timeoutMs =
+      const requestedMs =
         Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) *
         1000;
-      return runCommand(shellCommand, { cwd: dir, timeoutMs, adaptNote: adapted ? adaptNote : null });
+      const fit = fitTimeoutToDeadline({
+        requestedMs,
+        deadlineAt: registry.runContext?.deadlineAt,
+      });
+      if (fit.exhausted) {
+        throw new Error(
+          `Only ${Math.round(fit.remainingMs / 1000)}s of this run's wall-clock budget remain — ` +
+            "there is no time for another command to finish and be acted on. Do not start installs " +
+            "or builds. Write the final deliverable with what you already have and give your final answer now.",
+        );
+      }
+      const clampNote = fit.clamped
+        ? `timeout_seconds was clamped from ${Math.round(requestedMs / 1000)}s to ${Math.round(fit.timeoutMs / 1000)}s: ` +
+          `only ${Math.round(fit.remainingMs / 1000)}s of the run's wall-clock budget remain. ` +
+          "Prefer commands that finish well within that; a longer install/build cannot complete in this run."
+        : null;
+      return runCommand(shellCommand, {
+        cwd: dir,
+        timeoutMs: fit.timeoutMs,
+        adaptNote: [adapted ? adaptNote : null, clampNote].filter(Boolean).join(" ") || null,
+      });
     },
   });
 

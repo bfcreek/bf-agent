@@ -12,6 +12,7 @@ import os
 import shlex
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, override
 
@@ -32,6 +33,7 @@ class HaloAgent(BaseInstalledAgent):
         num_ctx: int = 16384,
         command_timeout: int = 120,
         max_command_timeout: int = 1800,
+        wall_clock: int = 0,
         base_url: str | None = None,
         repo_root: str | None = None,
         **kwargs: Any,
@@ -41,6 +43,9 @@ class HaloAgent(BaseInstalledAgent):
         self._num_ctx = int(num_ctx)
         self._command_timeout = int(command_timeout)
         self._max_command_timeout = int(max_command_timeout)
+        # 0 = derive from the task's [agent] timeout_sec (Harbor kills the agent
+        # at that point, so the loop should know it and wrap up first).
+        self._wall_clock = int(wall_clock)
         self._base_url = (
             base_url
             or os.environ.get("HALO_AGENT_BASE_URL")
@@ -104,19 +109,34 @@ class HaloAgent(BaseInstalledAgent):
         model = self.model_name or os.environ.get("HALO_AGENT_MODEL") or "auto"
         if "/" in model:
             model = model.split("/", 1)[1]
+        preset = "cloud-max"
+        lowered = model.strip().lower()
+        if lowered.startswith("tier-preset "):
+            token = lowered.split(None, 1)[1].strip()
+            if token:
+                preset = token
+            model = "auto"
+        elif lowered in ("cloud", "cloud-max", "hybrid", "local"):
+            preset = lowered
+            model = "auto"
         env = {
             "HALO_COMMAND_TIMEOUT": str(self._command_timeout),
             "HALO_MAX_COMMAND_TIMEOUT": str(self._max_command_timeout),
         }
+        wall_clock = self._resolve_wall_clock_seconds()
+        wall_clock_flag = f"--wall-clock {wall_clock} " if wall_clock > 0 else ""
         cmd = (
             "set -uo pipefail; "
             f"node {shlex.quote(CLI_PATH)} "
             f"--mode agent --quiet --no-index "
             f"--session harbor --cwd \"$PWD\" "
             f"--model {shlex.quote(model)} "
+            f"--tier-preset {shlex.quote(preset)} "
+            f"--think max --escalation-cloud "
             f"--base-url {shlex.quote(self._base_url)} "
             f"--max-steps {self._max_steps} "
             f"--num-ctx {self._num_ctx} "
+            f"{wall_clock_flag}"
             f"-- \"$(cat {shlex.quote(remote_instruction)})\"; "
             "agent_code=$?; "
             "cp -f .halo-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || true; "
@@ -141,6 +161,43 @@ class HaloAgent(BaseInstalledAgent):
         extra = getattr(context, "extra", None)
         if isinstance(extra, dict):
             extra["halo_steps"] = len(steps)
+
+    def _resolve_wall_clock_seconds(self) -> int:
+        """Seconds until Harbor kills the agent, or 0 when unknown.
+
+        Harbor only hands ``agent_timeout_sec`` to its oracle agent, so read it
+        the way Harbor does: the trial's ``config.json`` names the task and its
+        content hash, which locate ``task.toml`` in Harbor's task cache.
+        """
+        if self._wall_clock > 0:
+            return self._wall_clock
+        try:
+            trial_dir = Path(self.logs_dir).parent
+            config = json.loads((trial_dir / "config.json").read_text(encoding="utf8"))
+            task = config.get("task") or {}
+            name = str(task.get("name") or "")
+            ref = str(task.get("ref") or "")
+            digest = ref.split(":", 1)[1] if ":" in ref else ref
+            if not name or not digest:
+                return 0
+            cache_root = Path(
+                os.environ.get("HARBOR_CACHE_DIR") or Path.home() / ".cache" / "harbor"
+            ) / "tasks"
+            candidates = [cache_root / "packages" / name / digest / "task.toml"]
+            candidates.extend(cache_root.glob(f"**/{Path(name).name}/{digest}/task.toml"))
+            for toml_path in candidates:
+                if not toml_path.is_file():
+                    continue
+                with toml_path.open("rb") as handle:
+                    data = tomllib.load(handle)
+                timeout = (data.get("agent") or {}).get("timeout_sec")
+                if timeout is None:
+                    return 0
+                multiplier = float(os.environ.get("HALO_AGENT_TIMEOUT_MULTIPLIER") or 1.0)
+                return max(0, int(float(timeout) * multiplier))
+        except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError):
+            return 0
+        return 0
 
     def _make_bundle(self) -> Path:
         src = self._repo_root / "src"

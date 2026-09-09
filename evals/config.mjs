@@ -7,10 +7,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  applyTierPresetPolicy,
   normalizeTierModels,
   parseTierPresetArg,
   resolveEffectiveTierModels,
   resolveTierModel,
+  TIER_PRESET_HELP,
   uniqueTierModels,
 } from "../src/tier-models.mjs";
 import { loadModelsConfig } from "../src/models-config.mjs";
@@ -22,6 +24,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @typedef {{throughTier?: number, model: string}} TierModelBand
  * @typedef {object} BenchConfig
  * @property {string[]} models
+ * @property {string|null} [tierPreset] Named routing preset (e.g. cloud-max). CLI --tier-preset overrides.
  * @property {TierModelBand[]|null} tierModels Route scenario tiers to different Ollama models.
  * @property {string} baseUrl
  * @property {number} maxSteps
@@ -37,6 +40,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @property {string|null} [benchmarkRoot]
  * @property {boolean} verbose
  * @property {boolean} planning
+ * @property {boolean|string|null} [think] Ollama native thinking mode.
  * @property {boolean} taskHints
  * @property {boolean} memory
  * @property {boolean} memoryReadonly
@@ -89,6 +93,7 @@ export { resolveTierModel, uniqueTierModels };
 export function defaultConfig() {
   return {
     models: ["auto"],
+    tierPreset: null,
     tierModels: null,
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: 15,
@@ -104,6 +109,7 @@ export function defaultConfig() {
     benchmarkRoot: null,
     verbose: false,
     planning: false,
+    think: null,
     taskHints: true,
     memory: true,
     memoryReadonly: true,
@@ -163,6 +169,7 @@ export async function loadBenchConfig(configPath) {
     const raw = JSON.parse(await readFile(configPath, "utf8"));
     const merged = mergeConfig(base, raw);
     merged._benchTierModelsExplicit = Object.hasOwn(raw, "tierModels");
+    if (merged.tierPreset) merged.tierPreset = parseTierPresetArg(merged.tierPreset);
     return merged;
   } catch (err) {
     if (err.code === "ENOENT") return base;
@@ -181,6 +188,11 @@ export async function loadBenchOptions(argv, cwd = process.cwd()) {
   const fileConfig = resolved.path ? await loadBenchConfig(resolved.path) : defaultConfig();
   const { values: modelsValues, errors: modelsErrors } = await loadModelsConfig();
   const options = parseCliArgs(argv, fileConfig);
+  applyTierPresetPolicy(options, options.tierPreset, {
+    thinkExplicit: argv.includes("--think"),
+    planningExplicit: argv.includes("--planning") || argv.includes("--no-planning"),
+    escalationCloudExplicit: argv.includes("--escalation-cloud") || argv.includes("--no-escalation-cloud"),
+  });
   if (modelsErrors.length > 0) {
     throw new Error(modelsErrors.join("\n"));
   }
@@ -217,6 +229,7 @@ function mergeConfig(base, patch) {
   return {
     ...base,
     ...patch,
+    tierPreset: patch.tierPreset !== undefined ? patch.tierPreset : base.tierPreset,
     tierModels: patch.tierModels !== undefined ? normalizeTierModels(patch.tierModels) : base.tierModels,
     progression: { ...base.progression, ...patch.progression },
     gates: { ...base.gates, ...patch.gates },
@@ -254,6 +267,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeTimeoutSeconds: null,
     judgeRetries: null,
     planning: null,
+    think: null,
     taskHints: null,
     label: null,
     memory: null,
@@ -319,6 +333,17 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     else if (arg === "--judge-retries") cli.judgeRetries = Number.parseInt(argv[++i], 10);
     else if (arg === "--planning") cli.planning = true;
     else if (arg === "--no-planning") cli.planning = false;
+    else if (arg === "--think") {
+      const level = argv[++i];
+      if (!level) throw new Error("--think requires auto, true, false, off, or low|medium|high|max.");
+      if (level === "auto" || level === "true" || level === "false" || level === "off") {
+        cli.think = level === "false" || level === "off" ? false : level;
+      } else if (level === "low" || level === "medium" || level === "high" || level === "max") {
+        cli.think = level;
+      } else {
+        throw new Error(`--think must be auto, true, false, off, or low|medium|high|max, got '${level}'.`);
+      }
+    }
     else if (arg === "--no-hints") cli.taskHints = false;
     else if (arg === "--label") cli.label = argv[++i];
     else if (arg === "--memory") cli.memory = true;
@@ -343,7 +368,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
       cli.enforceGates = true;
     } else if (arg === "--tier-preset") {
       const raw = argv[++i];
-      if (!raw) throw new Error("--tier-preset requires auto, cloud, hybrid, or local.");
+      if (!raw) throw new Error(`--tier-preset requires ${TIER_PRESET_HELP}.`);
       cli.tierPreset = parseTierPresetArg(raw);
     } else if (arg === "--capability-json") cli.capabilityJson = argv[++i];
     else if (arg === "--public-json") cli.publicJson = argv[++i];
@@ -390,6 +415,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeTimeoutSeconds: cli.judgeTimeoutSeconds ?? fileConfig.judgeTimeoutSeconds,
     judgeRetries: cli.judgeRetries ?? fileConfig.judgeRetries,
     planning: cli.planning ?? fileConfig.planning,
+    think: cli.think ?? fileConfig.think ?? null,
     taskHints: cli.taskHints ?? fileConfig.taskHints,
     label: cli.label ?? null,
     memory: cli.memory ?? fileConfig.memory,
@@ -401,7 +427,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     gates: fileConfig.gates,
     enforceGates: cli.enforceGates ?? fileConfig.enforceGates,
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,
-    tierPreset: cli.tierPreset ?? null,
+    tierPreset: cli.tierPreset ?? fileConfig.tierPreset ?? null,
     capabilityJson: cli.noReport ? null : cli.capabilityJson ?? fileConfig.report.capability,
     publicJson: cli.noReport ? null : cli.publicJson ?? fileConfig.report.public,
     checkpointPath,

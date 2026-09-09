@@ -147,6 +147,10 @@ export async function agentResultFromTrial(trialDir) {
   const sessionRaw = await readFirstExisting(trialDir, [
     "agent/session.json",
     "agent/halo-agent/session.json",
+    // The adapter copies the session into /logs/agent only after the CLI
+    // exits. When Harbor kills the agent (AgentTimeoutError) that never runs,
+    // but the live-flushed session survives in the collected /app artifact.
+    "artifacts/app/.halo-agent/sessions/harbor.json",
   ]);
   const stdout = await readFirstExisting(trialDir, ["agent/stdout.txt", "logs/agent/stdout.txt"]);
   if (sessionRaw) {

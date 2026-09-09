@@ -67,7 +67,7 @@ Test-NodeReady
 
 $defaults = Get-TbDefaults
 $dataset = if ($Dataset) { $Dataset } else { $defaults.dataset }
-$model = if ($Model) { $Model } else { $defaults.model }
+$model = if ($Model) { $Model } elseif ($defaults.tierPreset) { "tier-preset $($defaults.tierPreset)" } else { $defaults.model }
 
 $argsList = [System.Collections.Generic.List[string]]::new()
 $argsList.Add("terminal-bench")
@@ -142,10 +142,17 @@ Write-Host "Running: node evals/recognized/run.mjs $($argsList -join ' ')" -Fore
 Write-Host ""
 
 Push-Location $RepoRoot
+# run.mjs writes progress (e.g. "sample: ... (seed N)") to stderr. Under Windows PowerShell 5.1,
+# $ErrorActionPreference = "Stop" turns redirected native stderr into a terminating error before
+# Harbor starts, so relax it for the node call only and rely on the exit code.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 try {
     & node $RunScript @argsList
-    exit $LASTEXITCODE
+    $runExit = $LASTEXITCODE
 }
 finally {
+    $ErrorActionPreference = $prevEap
     Pop-Location
 }
+exit $runExit

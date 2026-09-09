@@ -70,7 +70,8 @@ ${listSuites()
 
 Options:
   --dataset <id>         2.1 (default), 2.0, 1.0, 3.0, or a raw Harbor dataset id
-  --model, -m <name>     Ollama model (default: auto)
+  --model, -m <name>     Ollama model (default: cloud-max hard band, currently kimi-k3:cloud)
+  --tier-preset <name>   Routing preset when --model is auto (default: cloud-max)
   --base-url <url>       Host Ollama URL (rewritten to host.docker.internal in Docker)
   --include, -i <glob>   Task name or glob (short names like build-pmars are ok)
   --exclude, -x <glob>   Exclude task names

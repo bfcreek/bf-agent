@@ -253,6 +253,7 @@ export {
  * @param {import("./escalation.mjs").EscalationController|false} [options.escalation]
  * @param {boolean} [options.escalationCloud] Allow escalation onto paid cloud
  *   rungs. Off by default so escalation stays within installed local models.
+ * @param {boolean} [options.cloudOnly] Restrict the escalation ladder to Ollama cloud models.
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).
  */
@@ -282,6 +283,7 @@ export async function createAgent({
   critique = true,
   escalation = false,
   escalationCloud = false,
+  cloudOnly = false,
   think,
   requireVision = false,
   client,
@@ -301,8 +303,9 @@ export async function createAgent({
       const routed = await resolveModelWithEscalation({
         requested: resolvedModel,
         client: resolvedClient,
-        escalationEnabled: escalation !== false && resolvedModel === "auto",
+        escalationEnabled: escalation !== false && resolvedModel === "auto" && !cloudOnly,
         requireVision,
+        cloudOnly,
       });
       resolvedModel = routed.model;
       modelLadder = routed.ladder ?? [];
@@ -352,7 +355,7 @@ export async function createAgent({
         ? new EscalationController({
             client: resolvedClient,
             ladder: modelLadder,
-            allowCloud: escalationCloud === true,
+            allowCloud: escalationCloud === true || cloudOnly,
           })
         : false;
   const loop = new AgentLoop({

@@ -6,12 +6,20 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  getTierPresetBands,
+  parseTierPresetArg,
+  resolveTierModel,
+  resolveTierPreset,
+} from "../../src/tier-models.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
 
 /**
  * @typedef {object} RecognizedConfig
  * @property {string} model
+ * @property {string|null} [tierPreset] Named routing preset; used when model is auto/tier.
  * @property {string} baseUrl
  * @property {string} dataset
  * @property {number} nConcurrent
@@ -37,6 +45,7 @@ export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
 export function defaultRecognizedConfig() {
   return {
     model: "auto",
+    tierPreset: "cloud-max",
     baseUrl: "http://127.0.0.1:11434",
     dataset: "2.1",
     nConcurrent: 1,
@@ -66,8 +75,15 @@ export function defaultRecognizedConfig() {
 export async function loadRecognizedOptions(argv, cwd = process.cwd()) {
   const resolved = await resolveConfigPath(argv, cwd);
   const fileConfig = resolved.path ? await loadConfigFile(resolved.path) : defaultRecognizedConfig();
+  const options = parseRecognizedArgs(argv, fileConfig);
+  if ((!options.model || options.model === "auto" || options.model === "tier") && options.tierPreset) {
+    const bands = options.tierPreset === "auto"
+      ? await resolveTierPreset("auto", { baseUrl: options.baseUrl })
+      : getTierPresetBands(options.tierPreset);
+    options.model = resolveTierModel(6, bands, options.model);
+  }
   return {
-    options: parseRecognizedArgs(argv, fileConfig),
+    options,
     configPath: resolved.path,
   };
 }
@@ -97,7 +113,14 @@ export async function resolveConfigPath(argv, cwd = process.cwd()) {
 export async function loadConfigFile(configPath) {
   const base = defaultRecognizedConfig();
   const raw = JSON.parse(await readFile(configPath, "utf8"));
-  return { ...base, ...raw, includeTaskNames: raw.includeTaskNames ?? base.includeTaskNames, excludeTaskNames: raw.excludeTaskNames ?? base.excludeTaskNames };
+  const merged = {
+    ...base,
+    ...raw,
+    includeTaskNames: raw.includeTaskNames ?? base.includeTaskNames,
+    excludeTaskNames: raw.excludeTaskNames ?? base.excludeTaskNames,
+  };
+  if (merged.tierPreset) merged.tierPreset = parseTierPresetArg(merged.tierPreset);
+  return merged;
 }
 
 /**
@@ -110,6 +133,7 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     suite: null,
     dataset: null,
     model: null,
+    tierPreset: null,
     baseUrl: null,
     nConcurrent: null,
     nAttempts: null,
@@ -153,6 +177,7 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     else if (arg === "--config") i += 1;
     else if (arg === "--dataset") cli.dataset = take();
     else if (arg === "--model" || arg === "-m") cli.model = take();
+    else if (arg === "--tier-preset") cli.tierPreset = parseTierPresetArg(take());
     else if (arg === "--base-url") cli.baseUrl = take();
     else if (arg === "--n-concurrent" || arg === "--concurrent") cli.nConcurrent = Number.parseInt(take(), 10);
     else if (arg === "--attempts" || arg === "-k") cli.nAttempts = Number.parseInt(take(), 10);
@@ -196,6 +221,7 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     suite: rest[0] ?? null,
     dataset: cli.dataset ?? fileConfig.dataset,
     model: cli.model ?? fileConfig.model,
+    tierPreset: cli.tierPreset ?? fileConfig.tierPreset ?? null,
     baseUrl: cli.baseUrl ?? fileConfig.baseUrl,
     nConcurrent: cli.nConcurrent ?? fileConfig.nConcurrent,
     nAttempts: cli.nAttempts ?? fileConfig.nAttempts,

@@ -7,7 +7,7 @@
  * the request carries image attachments (same band / tier selection rules).
  */
 
-import { OllamaClient } from "./ollama-client.mjs";
+import { DEFAULT_THINK, OllamaClient } from "./ollama-client.mjs";
 import { suggestModel } from "./model-routing.mjs";
 
 /** @typedef {{throughTier?: number, model: string, vision?: string}} TierModelBand */
@@ -21,6 +21,11 @@ export const TIER_PRESETS = {
     { throughTier: 1, model: "glm-4.6:cloud", vision: "kimi-k2.6:cloud" },
     { throughTier: 3, model: "kimi-k2.6:cloud", vision: "kimi-k2.6:cloud" },
     { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
+  ],
+  /** Flagship Ollama cloud only — planning, tools, and escalation stay remote at max think. */
+  "cloud-max": [
+    { throughTier: 3, model: "glm-5.3:cloud", vision: "kimi-k3:cloud" },
+    { model: "kimi-k3:cloud", vision: "kimi-k3:cloud" },
   ],
   /** Local models for easy/medium work; cloud for hard tiers. */
   hybrid: [
@@ -38,16 +43,97 @@ export const TIER_PRESETS = {
 
 const VALID_PRESETS = new Set(["auto", ...Object.keys(TIER_PRESETS)]);
 
+/** Human-readable list for CLI help and parse errors. */
+export const TIER_PRESET_HELP = formatPresetList(["auto", ...Object.keys(TIER_PRESETS)]);
+
+/**
+ * @param {string[]} names
+ * @returns {string}
+ */
+function formatPresetList(names) {
+  if (names.length <= 1) return names[0] ?? "";
+  if (names.length === 2) return `${names[0]} or ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`;
+}
+
 /**
  * @param {string} raw
- * @returns {"auto"|"cloud"|"hybrid"|"local"}
+ * @returns {string}
  */
 export function parseTierPresetArg(raw) {
   const name = String(raw ?? "").trim().toLowerCase();
   if (!VALID_PRESETS.has(name)) {
-    throw new Error(`Unknown tier preset '${raw}'. Use auto, cloud, hybrid, or local.`);
+    throw new Error(`Unknown tier preset '${raw}'. Use ${TIER_PRESET_HELP}.`);
   }
-  return /** @type {"auto"|"cloud"|"hybrid"|"local"} */ (name);
+  return name;
+}
+
+/**
+ * Quality / routing policy implied by a named preset.
+ * `cloud-max` keeps every agent pass (planning, critique, tools, escalation)
+ * on flagship cloud models at maximum reasoning effort.
+ *
+ * @param {string|null|undefined} preset
+ * @returns {{think: string|null, planning: boolean|null, escalationCloud: boolean|null, cloudOnly: boolean}}
+ */
+export function getTierPresetPolicy(preset) {
+  if (preset === "cloud-max") {
+    return { think: "max", planning: true, escalationCloud: true, cloudOnly: true };
+  }
+  return { think: null, planning: null, escalationCloud: null, cloudOnly: false };
+}
+
+/**
+ * Harbor (and similar wrappers) pass `--model "tier-preset cloud-max"` as if
+ * that string were an Ollama tag. Treat it as `--tier-preset` + `auto` so
+ * routing does not silently fall back to a weaker local model.
+ *
+ * @param {object} options
+ * @returns {object} The same options object.
+ */
+export function coerceTierPresetModel(options) {
+  const raw = String(options?.model ?? "").trim();
+  const match = /^tier-preset\s+(\S+)/i.exec(raw);
+  if (!match) return options;
+  try {
+    const preset = parseTierPresetArg(match[1]);
+    if (!options.tierPreset) options.tierPreset = preset;
+    options.model = "auto";
+  } catch {
+    // Unknown preset token — leave the model string for routing to report.
+  }
+  return options;
+}
+
+/**
+ * Apply preset quality defaults without clobbering explicit overrides.
+ *
+ * @param {object} options
+ * @param {string|null|undefined} preset
+ * @param {object} [flags]
+ * @param {boolean} [flags.thinkExplicit]
+ * @param {boolean} [flags.planningExplicit]
+ * @param {boolean} [flags.escalationCloudExplicit]
+ * @returns {object} The same options object.
+ */
+export function applyTierPresetPolicy(options, preset, flags = {}) {
+  const policy = getTierPresetPolicy(preset);
+  if (policy.think && !flags.thinkExplicit && (options.think == null || options.think === DEFAULT_THINK)) {
+    options.think = policy.think;
+  }
+  if (policy.planning === true && !flags.planningExplicit && options.planning !== true) {
+    if (options.noPlan === true) {
+      // `--no-plan` stays an explicit opt-out.
+    } else {
+      options.planning = true;
+      if (options.noPlan === false || options.noPlan == null) options.noPlan = false;
+    }
+  }
+  if (policy.escalationCloud === true && !flags.escalationCloudExplicit) {
+    options.escalationCloud = true;
+  }
+  options.cloudOnly = policy.cloudOnly === true;
+  return options;
 }
 
 /**
@@ -138,9 +224,7 @@ export function normalizeTierModels(raw) {
 export function getTierPresetBands(preset) {
   const bands = TIER_PRESETS[preset];
   if (!bands) {
-    throw new Error(
-      `Unknown tier preset '${preset}'. Use auto, cloud, hybrid, or local.`,
-    );
+    throw new Error(`Unknown tier preset '${preset}'. Use ${TIER_PRESET_HELP}.`);
   }
   return bands.map((band) => ({ ...band }));
 }
@@ -175,7 +259,7 @@ export async function detectAutoTierPreset({ client, baseUrl = "http://127.0.0.1
 export async function resolveTierPreset(preset, options = {}) {
   const name = parseTierPresetArg(preset || DEFAULT_TIER_PRESET);
   if (!VALID_PRESETS.has(name)) {
-    throw new Error(`Unknown tier preset '${preset}'. Use auto, cloud, hybrid, or local.`);
+    throw new Error(`Unknown tier preset '${preset}'. Use ${TIER_PRESET_HELP}.`);
   }
   const resolved = name === "auto" ? await detectAutoTierPreset(options) : name;
   return getTierPresetBands(resolved);
