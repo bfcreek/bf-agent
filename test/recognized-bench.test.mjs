@@ -321,7 +321,7 @@ test("loadTrialJudgeInput uses Harbor reward in the rubric and session steps", a
     preamble: packed.preamble,
   });
   assert.match(prompt, /hidden tests/);
-  assert.match(prompt, /You are grading halo-agent on a Terminal-Bench task/);
+  assert.match(prompt, /You are grading Bitfield Agent on a Terminal-Bench task/);
 });
 
 test("findInstructionField walks nested Harbor config", () => {

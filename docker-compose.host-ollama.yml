@@ -6,7 +6,7 @@
 name: halo-agent
 
 services:
-  halo-agent:
+  bf-agent:
     build:
       context: .
       dockerfile: Dockerfile

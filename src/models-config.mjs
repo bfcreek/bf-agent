@@ -22,9 +22,9 @@ import { getConfigDir, openConfigInEditor, parseSimpleYaml } from "./user-config
 export const MODELS_CONFIG_FILE_NAME = "models.yaml";
 export const DEFAULT_TASK_TIER = 2;
 
-const MODELS_CONFIG_TEMPLATE = `# halo-agent model routing
+const MODELS_CONFIG_TEMPLATE = `# Bitfield Agent model routing
 # Used by the CLI and dev-bench to pick easy / medium / hard models.
-# Run: halo-agent models config edit
+# Run: bf-agent models config edit
 
 # Preset: auto (detect local models), cloud (no GPU), cloud-max (flagship cloud, max think, planning on), hybrid, local
 preset: auto

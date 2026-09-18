@@ -1,4 +1,4 @@
-# halo-agent
+# Bitfield Agent (`bf-agent`)
 
 Local agent runtime that turns Ollama's completion API into a multi-step agent:
 the model plans, calls tools, observes results, and repeats until the task is done —
@@ -18,7 +18,7 @@ Product shape:
 | --- | --- |
 | **CLI + SDK** | Two first-class surfaces: a command line for humans and scripts, an SDK for embedding the loop in other software |
 | **Compatible at every angle** | OpenAI-compatible API façade, standard tool schemas, MCP for external tools, any Ollama model — integrate with what already exists rather than inventing formats |
-| **IDE integration via Wire** | halo-agent ships no IDE extensions. Editors reach it through Aura Wire's `/v1` door and routing rules — Wire owns the IDE story |
+| **IDE integration via Wire** | Bitfield Agent ships no IDE extensions. Editors reach it through Aura Wire's `/v1` door and routing rules — Wire owns the IDE story |
 | **Local-first, private** | Prompts, tools, and files stay on this machine unless you explicitly route elsewhere |
 
 ## Requirements
@@ -34,20 +34,20 @@ No npm dependencies — the runtime uses only Node built-ins.
 Published releases:
 
 ```powershell
-npm install -g @halosoftworks/halo-agent
-halo-agent models
-halo-agent "what time is it right now?"
+npm install -g @bitfieldcreek/bf-agent
+bf-agent models
+bf-agent "what time is it right now?"
 ```
 
 Try without installing:
 
 ```powershell
-npx @halosoftworks/halo-agent "summarize README.md"
+npx @bitfieldcreek/bf-agent "summarize README.md"
 ```
 
-Or download the zip from [Explore](https://www.halosoftworks.com/explore#halo-agent) and use the `bin/` launchers below.
+Or download the zip from [Explore](https://www.bitfieldcreek.com/explore#halo-agent) and use the `bin/` launchers below.
 
-halo-agent is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Halo Softworks EULA](https://halosoftworks.com/eula).
+**Bitfield Agent** (`bf-agent`) is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Bitfield Creek EULA](https://www.bitfieldcreek.com/eula).
 
 From a git checkout, use `node src/cli.mjs` or the launchers in `bin/`.
 
@@ -62,9 +62,9 @@ Or use the launchers in `bin/`, which check that Node.js 20+ is installed
 the CLI:
 
 ```powershell
-.\bin\halo-agent.ps1 "what time is it right now?"   # PowerShell
-bin\halo-agent.cmd "what time is it right now?"      # cmd
-./bin/halo-agent.sh "what time is it right now?"     # macOS / Linux
+.\bin\bf-agent.ps1 "what time is it right now?"   # PowerShell
+bin\bf-agent.cmd "what time is it right now?"      # cmd
+./bin/bf-agent.sh "what time is it right now?"     # macOS / Linux
 ```
 
 Options:
@@ -87,7 +87,7 @@ Options:
 | `--no-hints` | off | Skip task-type constraint hints in the user message |
 
 The model is resolved against Ollama's installed list at startup. With
-`auto` (the default), halo-agent picks the strongest installed model that
+`auto` (the default), Bitfield Agent picks the strongest installed model that
 supports both tool calling and thinking, has at least 7B parameters, and
 fits comfortably in this machine's memory — a model too weak to finish agent
 tasks wastes more than it saves. When no local model qualifies, an installed
@@ -97,7 +97,7 @@ cloud only when we must. Explicit `--model` names are always honored
 with a warning when the choice looks too weak; missing names fall back to
 auto-selection. Capabilities are asked of Ollama itself (`/api/show`), so
 new models classify correctly; a family-name list is the fallback for older
-Ollama versions. `halo-agent models` shows the classification and what
+Ollama versions. `bf-agent models` shows the classification and what
 `auto` would pick.
 
 Sessions store the full transcript, an accumulated step log, and the list of
@@ -111,7 +111,7 @@ node src/cli.mjs serve --port 11435
 ```
 
 Exposes the agent loop behind the standard OpenAI API so any existing client
-(or Aura Wire routing rule) can use it with no halo-agent awareness:
+(or Aura Wire routing rule) can use it with no Bitfield Agent awareness:
 
 - `POST /v1/chat/completions` — messages in, agent loop (with tools) runs,
   `chat.completion` out. `stream: true` forwards content tokens live from
@@ -124,7 +124,7 @@ prompt for approvals. Put Wire's guardrails in front if you need policy.
 
 ## Docker Compose
 
-Ollama + `halo-agent serve` (`/v1` on port 11435). The agent workspace is
+Ollama + `bf-agent serve` (`/v1` on port 11435). The agent workspace is
 `./workspace` → `/workspace`. Bench and test output use the sibling
 `halo-agent-benchmark` folder → `/halo-agent-benchmark` (same tree as
 `npm run bench` and `.\bin\bench-tb.ps1`). Copy `.env.example` to `.env` to
@@ -134,8 +134,8 @@ change model, ports, or those paths.
 docker compose up --build
 docker compose --profile pull up ollama-pull
 docker compose exec ollama ollama pull llama3.2
-docker compose run --rm halo-agent models
-docker compose run --rm halo-agent "what time is it right now?"
+docker compose run --rm bf-agent models
+docker compose run --rm bf-agent "what time is it right now?"
 ```
 
 NVIDIA GPU for Ollama:
@@ -157,7 +157,7 @@ The same machinery is embeddable — `createAgent()` wires up the client,
 builtin tools, context-built system prompt, and compaction in one call:
 
 ```js
-import { createAgent } from "@halosoftworks/halo-agent";
+import { createAgent } from "@bitfieldcreek/bf-agent";
 
 const agent = await createAgent({
   model: "qwen3-coder:30b",
@@ -249,7 +249,7 @@ Staging (R2 zip upload only — no npm):
 .\scripts\release\publish-release.ps1 -BumpPatch
 ```
 
-Production (after [admin promote](https://www.halosoftworks.com/admin/releases)):
+Production (after [admin promote](https://www.bitfieldcreek.com/admin/releases)):
 
 ```powershell
 .\scripts\release\publish-production.ps1
@@ -294,7 +294,7 @@ node evals/dev-bench.mjs --scenario greet-module --keep-workspace
 
 Development benchmarks with **increasing complexity tiers** (simple module →
 multi-file fixes → small CLI → HTTP API → refactor → log/CSV tools). Each
-scenario runs halo-agent in a fresh temp workspace, then grades the outcome with
+scenario runs Bitfield Agent in a fresh temp workspace, then grades the outcome with
 the **Cursor CLI** (`agent --model auto`) in read-only ask mode.
 
 **Config:** `bench.config.json` in the project root, or `evals/bench.config.json`
@@ -327,7 +327,7 @@ npm run bench:patterns -- --scoreboard evals/scoreboard-history.jsonl
 | `--stop-below <score>` | Halt progression when tier average is below *score* |
 | `--scenario <name>` | Run one scenario |
 | `--scenarios a,b,c` | Run a subset |
-| `--model <name\|auto>` | Ollama model for halo-agent |
+| `--model <name\|auto>` | Ollama model for Bitfield Agent |
 | `--skip-judge` | Run agent only (no Cursor CLI) |
 | `--judge-model auto` | Judge model (default `auto`) |
 | `--keep-workspace` | Leave temp dir for inspection |
@@ -394,16 +394,16 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/tools/fetch-url.mjs` | `fetch_url` with HTML extract + micro-RAG |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
-| `Dockerfile` | Image for `halo-agent serve` (and one-shot CLI via `compose run`) |
-| `docker-compose.yml` | Ollama + halo-agent; see `docker-compose.gpu.yml` and `docker-compose.host-ollama.yml` |
+| `Dockerfile` | Image for `bf-agent serve` (and one-shot CLI via `compose run`) |
+| `docker-compose.yml` | Ollama + Bitfield Agent; see `docker-compose.gpu.yml` and `docker-compose.host-ollama.yml` |
 | `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), recognized benches (`evals/recognized/`) |
 
 ## Relationship to Aura Wire
 
-halo-agent is a standalone product, but **Wire is the pairing that completes it**:
+Bitfield Agent is a standalone product, but **Wire is the pairing that completes it**:
 Wire provides the OpenAI `/v1` front door, routing rules, cost observability,
-compression, and guardrails; halo-agent provides the loop and local tool execution.
+compression, and guardrails; Bitfield Agent provides the loop and local tool execution.
 IDE integration is deliberately Wire's job — editors point at Wire, and Wire
-routes to halo-agent as a custom provider via `halo-agent serve` (the
+routes to Bitfield Agent as a custom provider via `bf-agent serve` (the
 OpenAI-compatible door, roadmap item 10). Composition is HTTP only, no shared
 code. Details from the Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.

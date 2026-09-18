@@ -1,4 +1,4 @@
-# halo-agent + Ollama. From the repo root:
+# bf-agent + Ollama. From the repo root:
 #   docker compose up --build
 #   docker compose exec ollama ollama pull llama3.2
 # GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
@@ -36,7 +36,7 @@ services:
     entrypoint: ["/bin/ollama"]
     command: ["pull", "${HALO_PULL_MODEL:-llama3.2}"]
 
-  halo-agent:
+  bf-agent:
     build:
       context: .
       dockerfile: Dockerfile

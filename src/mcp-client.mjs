@@ -41,7 +41,7 @@ export class McpClient {
     const result = await client.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: "halo-agent", version: "0.1.0" },
+      clientInfo: { name: "bitfield-agent", version: "0.1.0" },
     });
     client.serverInfo = result?.serverInfo ?? null;
     client.notify("notifications/initialized", {});
@@ -117,7 +117,7 @@ export class McpClient {
         this.#write({
           jsonrpc: "2.0",
           id: message.id,
-          error: { code: -32601, message: `halo-agent does not handle '${message.method}'.` },
+          error: { code: -32601, message: `Bitfield Agent does not handle '${message.method}'.` },
         });
       }
       return;

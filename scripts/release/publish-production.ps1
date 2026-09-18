@@ -1,6 +1,6 @@
-# Publish halo-agent to npm after production CDN promotion.
+# Publish @bitfieldcreek/bf-agent to npm after production CDN promotion.
 #
-# Prerequisite: halo-site admin promote for halo-agent (staging → production on R2).
+# Prerequisite: halo-site admin promote for the staging zip (staging → production on R2).
 #
 # Usage:
 #   .\scripts\release\publish-production.ps1

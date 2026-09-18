@@ -153,7 +153,7 @@ function Append-TrainLog {
 }
 
 $endAt = $StartFrom + $Iterations - 1
-Write-Host "halo-agent /ha-train - $Iterations iteration(s), $Count TB task(s) each, indices $StartFrom..$endAt" -ForegroundColor Cyan
+Write-Host "bf-agent /ha-train - $Iterations iteration(s), $Count TB task(s) each, indices $StartFrom..$endAt" -ForegroundColor Cyan
 Write-Host "  failures (bench, judge, plan) do not stop the loop - only missing prerequisites throw" -ForegroundColor DarkGray
 Write-Host ""
 

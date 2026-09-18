@@ -42,7 +42,7 @@ export function registerProjectSearchTool(
         return { error: "search_project requires an embedding client; index may be unavailable." };
       }
       if (results.length === 0) {
-        return "No indexed project passages matched. Try read_file on README.md or rebuild by restarting halo-agent.";
+        return "No indexed project passages matched. Try read_file on README.md or rebuild by restarting Bitfield Agent.";
       }
       return results
         .map(

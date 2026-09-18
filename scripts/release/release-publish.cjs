@@ -43,9 +43,9 @@ const RELEASE_TARGETS = {
 const RELEASE_INCLUDE_PATHS = [
     "package.json",
     "src",
-    "bin/halo-agent.cmd",
-    "bin/halo-agent.ps1",
-    "bin/halo-agent.sh",
+    "bin/bf-agent.cmd",
+    "bin/bf-agent.ps1",
+    "bin/bf-agent.sh",
     "README.md",
     "LIMITATIONS.md",
     "LICENSE",

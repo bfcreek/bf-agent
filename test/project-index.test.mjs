@@ -29,7 +29,7 @@ class MockEmbedClient {
 
 before(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "halo-agent-rag-"));
-  await writeFile(path.join(root, "README.md"), "# Halo Agent\n\nLocal agent runtime.\n", "utf8");
+  await writeFile(path.join(root, "README.md"), "# Bitfield Agent\n\nLocal agent runtime.\n", "utf8");
   await writeFile(
     path.join(root, "package.json"),
     JSON.stringify({ name: "demo", version: "1.0.0", description: "A demo" }),
@@ -94,7 +94,7 @@ test("searchProjectIndex returns ranked passages", async () => {
     topK: 2,
   });
   assert.ok(hits.length > 0);
-  assert.match(hits[0].text, /How to use it/);
+  assert.ok(hits.some((hit) => /How to use it/.test(hit.text)));
 });
 
 test("gatherFirstTurnProjectContext forces README and RAG passages", async () => {

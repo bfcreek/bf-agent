@@ -103,7 +103,7 @@ const JUDGE_RESPONSE_SCHEMA = {
   agentImprovements: [
     {
       area: "system prompt | tools | planning | compaction | other",
-      suggestion: "concrete change to halo-agent runtime",
+      suggestion: "concrete change to the Bitfield Agent runtime",
       priority: "low|medium|high",
     },
   ],
@@ -199,7 +199,7 @@ export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRa
 export function buildJudgePrompt({ scenario, agentResult, snapshot, preamble }) {
   return [
     ...(preamble ? [preamble, ""] : []),
-    "You are grading an AI coding agent (halo-agent) that ran against a task in a temp workspace.",
+    "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
     "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
     `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering and process criteria.`,
     "",
@@ -290,7 +290,7 @@ function clampScore(value) {
 /** Short CLI prompt — full grading context lives in {@link ARTIFACTS_JUDGE_PROMPT}. */
 export function buildJudgeInvocationPrompt() {
   return [
-    "You are grading an AI coding agent (halo-agent) that ran against a task in a temp workspace.",
+    "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
     `Read the full grading instructions, rubric, agent trace, and workspace snapshot from ${ARTIFACTS_JUDGE_PROMPT} in this workspace.`,
     `For detailed tool-call traces, also read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT}.`,
     "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",

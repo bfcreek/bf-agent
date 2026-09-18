@@ -27,7 +27,7 @@ test("assertProductionVersionMatch requires package and CDN alignment", () => {
 });
 
 test("npmRegistryPackagePath encodes scoped package names", () => {
-    assert.equal(npmRegistryPackagePath("@halosoftworks/halo-agent"), "@halosoftworks%2Fhalo-agent");
+    assert.equal(npmRegistryPackagePath("@bitfieldcreek/bf-agent"), "@bitfieldcreek%2Fbf-agent");
 });
 
 test("verifyReadyForNpmPublish checks CDN and npm registry", async () => {
@@ -55,7 +55,7 @@ test("verifyReadyForNpmPublish checks CDN and npm registry", async () => {
     };
 
     const status = await verifyReadyForNpmPublish({
-        packageName: "@halosoftworks/halo-agent",
+        packageName: "@bitfieldcreek/bf-agent",
         packageVersion: "0.2.0",
         fetchImpl,
     });
@@ -86,7 +86,7 @@ test("verifyReadyForNpmPublish rejects when npm already has this version", async
 
     await assert.rejects(
         () => verifyReadyForNpmPublish({
-            packageName: "@halosoftworks/halo-agent",
+            packageName: "@bitfieldcreek/bf-agent",
             packageVersion: "0.2.0",
             fetchImpl,
         }),

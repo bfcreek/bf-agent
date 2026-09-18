@@ -71,7 +71,7 @@ export async function loadTrialJudgeInput(task) {
       "- Outcome (40): does the workspace/artifacts look like a real attempt to satisfy the instruction? Align with Harbor's pass/fail — a Harbor pass with a messy process can still score well on outcome; a Harbor fail should not get a high outcome score unless tests look flaky.",
       "- Process (30): sensible tool use, reading before writing, recovering from errors, not spinning on the same failing command.",
       "- Instruction following (20): stayed on the requested files/paths; did not ignore constraints.",
-      "- Runtime quality (10): anything halo-agent itself should change (timeouts, tools, prompt, compaction).",
+      "- Runtime quality (10): anything Bitfield Agent itself should change (timeouts, tools, prompt, compaction).",
       "",
       "Verifier output (truncated):",
       (verifierLog ?? "(none)").slice(0, 4000),
@@ -79,10 +79,10 @@ export async function loadTrialJudgeInput(task) {
   };
 
   const preamble = [
-    "You are grading halo-agent on a Terminal-Bench task that already ran inside Harbor/Docker.",
+    "You are grading Bitfield Agent on a Terminal-Bench task that already ran inside Harbor/Docker.",
     "The workspace is the Harbor trial directory: instruction, agent logs, verifier output, and any downloaded /app artifacts.",
     "Harbor's hidden tests already produced a mechanical pass/fail (reward). Use that as ground truth for whether tests passed.",
-    "Your job is qualitative: how the agent worked, whether the artifacts match the instruction, and what to change in the halo-agent runtime.",
+    "Your job is qualitative: how the agent worked, whether the artifacts match the instruction, and what to change in the Bitfield Agent runtime.",
   ].join(" ");
 
   return { scenario, agentResult, preamble };

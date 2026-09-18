@@ -156,7 +156,7 @@ export function formatRecognizedMarkdown(report) {
   lines.push("");
 
   if (report.recommendations.length > 0) {
-    lines.push("## Recommendations for halo-agent", "");
+    lines.push("## Recommendations for Bitfield Agent", "");
     for (const rec of report.recommendations) {
       const seen = rec.count > 1 ? ` (${rec.count}x: ${rec.tasks.join(", ")})` : "";
       lines.push(`- **[${rec.priority}] ${rec.area}:** ${rec.suggestion}${seen}`);

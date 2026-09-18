@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * halo-agent CLI.
+ * bf-agent CLI.
  *
  * Run one goal:   node src/cli.mjs "what time is it?" [--model llama3.2] [...]
  * Interactive:    node src/cli.mjs   (TTY, no arguments — prompt until /quit)
@@ -300,16 +300,16 @@ const VERSION = JSON.parse(
 ).version;
 
 function printHelp() {
-  console.log(`halo-agent v${VERSION} - local agent loop on Ollama
+  console.log(`Bitfield Agent (bf-agent) v${VERSION} - local agent loop on Ollama
 
 Usage:
-  halo-agent                        Interactive terminal mode (TTY only)
-  halo-agent "<goal>" [options]     Run one goal and print the answer
-  halo-agent serve [options]        OpenAI-compatible server (/v1/chat/completions)
-  halo-agent models [options]       List installed Ollama models and tool compliance
-  halo-agent models config edit       Create or open the model-routing config (models.yaml)
-  halo-agent config edit              Create or open the general user config (config.yaml)
-  halo-agent memory list|stats|consolidate|clear|seed  Episodic memory store
+  bf-agent                        Interactive terminal mode (TTY only)
+  bf-agent "<goal>" [options]     Run one goal and print the answer
+  bf-agent serve [options]        OpenAI-compatible server (/v1/chat/completions)
+  bf-agent models [options]       List installed Ollama models and tool compliance
+  bf-agent models config edit       Create or open the model-routing config (models.yaml)
+  bf-agent config edit              Create or open the general user config (config.yaml)
+  bf-agent memory list|stats|consolidate|clear|seed  Episodic memory store
 
 Config:
   General defaults: ${getConfigPath()} (YAML)
@@ -356,18 +356,18 @@ Options:
   -h, --help           Show this help
 
 Examples:
-  halo-agent
-  halo-agent "what time is it?"
-  halo-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
-  halo-agent "fix the failing test" --session fix-tests --mode agent
-  halo-agent serve --port 11435
-  halo-agent models
-  halo-agent models config edit
-  halo-agent models --json --base-url http://127.0.0.1:11434
-  halo-agent "hard refactor" --tier 4 --tier-preset hybrid
-  halo-agent "frontier coding" --tier 5 --tier-preset cloud-max
-  halo-agent "search my notes for X" --mcp "npx -y some-mcp-server"
-  halo-agent "what is the latest Node.js LTS version?"
+  bf-agent
+  bf-agent "what time is it?"
+  bf-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
+  bf-agent "fix the failing test" --session fix-tests --mode agent
+  bf-agent serve --port 11435
+  bf-agent models
+  bf-agent models config edit
+  bf-agent models --json --base-url http://127.0.0.1:11434
+  bf-agent "hard refactor" --tier 4 --tier-preset hybrid
+  bf-agent "frontier coding" --tier 5 --tier-preset cloud-max
+  bf-agent "search my notes for X" --mcp "npx -y some-mcp-server"
+  bf-agent "what is the latest Node.js LTS version?"
 
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
@@ -458,7 +458,7 @@ async function runInteractiveSession({
 
   const sessionLabel = sessionName ? ` | session: ${sessionName}` : "";
   console.error(
-    `Halo Softworks halo-agent v${VERSION} | interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
+    `Bitfield Agent (bf-agent) v${VERSION} | interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
   );
   console.error("Enter a prompt, or /help for commands. /quit to exit.");
   if (priorSession && !options.quiet) {
@@ -718,18 +718,18 @@ async function main() {
     return;
   }
   if (options.modelsConfigCommand) {
-    console.error("Unknown models config subcommand. Use: halo-agent models config edit");
+    console.error("Unknown models config subcommand. Use: bf-agent models config edit");
     process.exitCode = 1;
     return;
   }
   if (options.configCommand) {
-    console.error("Unknown config subcommand. Use: halo-agent config edit");
+    console.error("Unknown config subcommand. Use: bf-agent config edit");
     process.exitCode = 1;
     return;
   }
   if (options.errors.length > 0) {
     for (const error of options.errors) console.error(error);
-    console.error("Run 'halo-agent --help' for usage.");
+    console.error("Run 'bf-agent --help' for usage.");
     process.exitCode = 1;
     return;
   }
@@ -917,7 +917,7 @@ async function main() {
     });
     server.listen(options.port, () => {
       const { port } = server.address();
-      console.error(`halo-agent serving OpenAI-compatible API on http://127.0.0.1:${port}/v1`);
+      console.error(`Bitfield Agent serving OpenAI-compatible API on http://127.0.0.1:${port}/v1`);
       console.error(`workspace: ${options.cwd} | model: ${options.model} | ollama: ${options.baseUrl}`);
     });
     return;

@@ -20,7 +20,7 @@ if (-not (Test-Path $PublishScript)) {
     throw "Missing release publisher: $PublishScript"
 }
 
-Write-Host "halo-agent /ha-release - bump patch, test, build, upload staging" -ForegroundColor Cyan
+Write-Host "bf-agent /ha-release - bump patch, test, build, upload staging" -ForegroundColor Cyan
 Write-Host ""
 
 $argsList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PublishScript, '-BumpPatch')

@@ -1,4 +1,4 @@
-# halo-agent bench, gates & safety — implementation plan
+# Bitfield Agent bench, gates & safety — implementation plan
 
 Recorded: 2026-08-23. Reference model for all gates and public benchmarks: **`gpt-oss:20b`** (Ollama).
 
@@ -10,11 +10,11 @@ This plan covers benchmark hardening, minimum score gates, file-integrity (anti-
 
 | Piece | Role |
 | --- | --- |
-| **halo-agent** | Free local agent runtime (CLI + SDK + `serve`) |
+| **Bitfield Agent** | Free local agent runtime (CLI + SDK + `serve`) |
 | **Aura Wire** | Paid `/v1` door, routing, guardrails, IDE integration |
-| **Terran** | Paid/usage RAG via Aura Wire / MCP (not embedded in halo-agent) |
+| **Terran** | Paid/usage RAG via Aura Wire / MCP (not embedded in Bitfield Agent) |
 
-halo-agent is the **built-in local agent** for simple tasks. Wire routes complex or frontier work to cloud providers. halo-agent must not be marketed or routed as "ready" until bench gates pass on the reference model.
+Bitfield Agent is the **built-in local agent** for simple tasks. Wire routes complex or frontier work to cloud providers. Bitfield Agent must not be marketed or routed as "ready" until bench gates pass on the reference model.
 
 ---
 
@@ -164,7 +164,7 @@ CI: weekly or per-release job runs `npm run bench -- --enforce-gates --gate publ
 
 halo-agent stays provider-agnostic. Wire adds nodes in this order:
 
-1. **Availability** — `halo-agent serve` healthy, Ollama up, model resolves
+1. **Availability** — `bf-agent serve` healthy, Ollama up, model resolves
 2. **Privacy** — local-only rules, sensitive paths
 3. **Task class** — read/explain vs write/run
 4. **Capability profile** — `localDefaultMaxTier` from last bench

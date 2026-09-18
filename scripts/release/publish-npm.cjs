@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * Publish @halosoftworks/halo-agent to npm after production CDN promotion.
+ * Publish @bitfieldcreek/bf-agent to npm after production CDN promotion.
  *
  * Required env: NPM_TOKEN (Automation token with publish access)
  * Optional: HALO_AGENT_UPDATES_BASE_URL

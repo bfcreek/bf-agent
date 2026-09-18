@@ -1,11 +1,11 @@
 {
-  "name": "@halosoftworks/halo-agent",
+  "name": "@bitfieldcreek/bf-agent",
   "version": "0.1.3",
   "description": "Local agent runtime for Ollama: plan/act/observe loop, tools, and an OpenAI-compatible facade.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
-  "author": "Halo Softworks",
-  "homepage": "https://www.halosoftworks.com/explore#halo-agent",
+  "author": "Bitfield Creek",
+  "homepage": "https://www.bitfieldcreek.com/explore#halo-agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/froggy523/halo-agent.git"
@@ -29,13 +29,13 @@
     ".": "./src/index.mjs"
   },
   "bin": {
-    "halo-agent": "src/cli.mjs"
+    "bf-agent": "src/cli.mjs"
   },
   "files": [
     "src/",
-    "bin/halo-agent.cmd",
-    "bin/halo-agent.ps1",
-    "bin/halo-agent.sh",
+    "bin/bf-agent.cmd",
+    "bin/bf-agent.ps1",
+    "bin/bf-agent.sh",
     "README.md",
     "LIMITATIONS.md",
     "LICENSE"

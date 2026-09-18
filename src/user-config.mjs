@@ -13,7 +13,7 @@ import { DEFAULT_NUM_CTX, DEFAULT_THINK } from "./ollama-client.mjs";
 
 export const CONFIG_FILE_NAME = "config.yaml";
 
-const CONFIG_TEMPLATE = `# halo-agent user configuration
+const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # Keys match CLI flag names (without --). Command-line flags override these values.
 # Remove or comment out a line to use the built-in default.
 

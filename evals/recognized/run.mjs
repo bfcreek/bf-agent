@@ -52,7 +52,7 @@ const PACKAGE_VERSION = JSON.parse(
 ).version;
 
 function printHelp() {
-  console.log(`halo-agent recognized benchmarks
+  console.log(`bf-agent recognized benchmarks
 
 Usage:
   node evals/recognized/run.mjs --list
@@ -79,7 +79,7 @@ Options:
   --seed <int>           Reproducible RNG seed for --sample
   --n-concurrent <n>     Parallel Harbor trials (default 1)
   --attempts, -k <n>     Attempts per task (default 1)
-  --max-steps <n>        halo-agent loop cap (default 80)
+  --max-steps <n>        bf-agent loop cap (default 80)
   --skip-judge           Harbor tests only; skip Cursor CLI grading
   --judge-model <name>   Cursor CLI model (default auto)
   --from-job <dir>       Parse an existing Harbor job and (re)judge; do not run Harbor
@@ -313,7 +313,7 @@ async function main() {
       "Cursor judge scores are qualitative (process + artifacts), same schema as the development bench.",
       "Architecture patterns are telemetry-backed approach signals, not task-specific tips.",
       "Ollama must be reachable from Docker (host.docker.internal). On Linux, bind Ollama to 0.0.0.0 if the container cannot connect.",
-      "halo-agent command timeouts are raised for this suite via HALO_COMMAND_TIMEOUT / HALO_MAX_COMMAND_TIMEOUT.",
+      "bf-agent command timeouts are raised for this suite via HALO_COMMAND_TIMEOUT / HALO_MAX_COMMAND_TIMEOUT.",
       ...(sampled
         ? [
             `Random subset: ${sampled.count} of ${sampled.poolSize} tasks (seed ${sampled.seed}): ${sampled.tasks.join(", ")}. Re-run with --sample ${sampled.requested} --seed ${sampled.seed}.`,

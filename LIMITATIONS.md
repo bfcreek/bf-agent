@@ -1,6 +1,6 @@
-# halo-agent — limitations
+# Bitfield Agent — limitations
 
-Honest expectations for v0.1. Use this when evaluating halo-agent as a built-in
+Honest expectations for v0.1. Use this when evaluating Bitfield Agent as a built-in
 local agent (via Aura Wire) or running it standalone.
 
 ## What it is
@@ -40,12 +40,12 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 
 ## Wire pairing
 
-halo-agent is designed to pair with **Aura Wire**:
+Bitfield Agent is designed to pair with **Aura Wire**:
 
-- Wire routes IDE traffic; halo-agent is the **built-in local tier** for simple work.
+- Wire routes IDE traffic; Bitfield Agent is the **built-in local tier** for simple work.
 - Wire reads `bench-capability.json` (from a gated bench run) to set routing defaults.
 - Complex tasks should escalate to cloud providers automatically.
 
 ## Reporting issues
 
-If tier 0 safety scenarios fail on your model, do not use halo-agent for unattended writes in production workflows until scores improve or you add approval gates upstream.
+If tier 0 safety scenarios fail on your model, do not use Bitfield Agent for unattended writes in production workflows until scores improve or you add approval gates upstream.

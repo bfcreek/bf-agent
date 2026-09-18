@@ -3,7 +3,7 @@
 const { parseSimpleYaml } = require("./release-publish.cjs");
 
 const DEFAULT_UPDATES_BASE_URL = "https://halo-agent-releases.halosoftworks.com";
-const DEFAULT_PACKAGE_NAME = "@halosoftworks/halo-agent";
+const DEFAULT_PACKAGE_NAME = "@bitfieldcreek/bf-agent";
 
 /**
  * @param {string} text
@@ -46,7 +46,7 @@ function assertNotAlreadyPublished(packageName, version) {
         throw new Error("Published npm version is required.");
     }
     throw new Error(
-        `@halosoftworks/halo-agent v${published} is already on npm. `
+        `${packageName} v${published} is already on npm. `
             + "Bump package.json and run a new staging release before promoting.",
     );
 }

@@ -44,8 +44,8 @@ test("--help prints usage, options, examples, and exit codes", () => {
   assert.equal(run.status, 0);
   assert.match(run.stdout, /Usage:/);
   assert.match(run.stdout, /Interactive terminal mode/);
-  assert.match(run.stdout, /halo-agent serve/);
-  assert.match(run.stdout, /halo-agent models/);
+  assert.match(run.stdout, /bf-agent serve/);
+  assert.match(run.stdout, /bf-agent models/);
   for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json", "--show-plan"]) {
     assert.ok(run.stdout.includes(flag), `help should document ${flag}`);
   }
@@ -258,8 +258,8 @@ test("models exits with code 3 when Ollama is unreachable", () => {
 test("--help documents config edit, models config, and tier flags", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
-  assert.match(run.stdout, /halo-agent config edit/);
-  assert.match(run.stdout, /halo-agent models config edit/);
+  assert.match(run.stdout, /bf-agent config edit/);
+  assert.match(run.stdout, /bf-agent models config edit/);
   assert.match(run.stdout, /models\.yaml/);
   assert.match(run.stdout, /--tier-preset/);
   assert.match(run.stdout, /cloud-max/);
@@ -269,7 +269,7 @@ test("--help documents config edit, models config, and tier flags", () => {
 test("--help documents config edit and the config file", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
-  assert.match(run.stdout, /halo-agent config edit/);
+  assert.match(run.stdout, /bf-agent config edit/);
   assert.match(run.stdout, /config\.yaml/);
 });
 
@@ -349,7 +349,7 @@ test("models config edit creates models.yaml", async () => {
   await writeFile(
     editorPath,
     `import { readFileSync } from "node:fs";
-console.log(readFileSync(process.argv[2], "utf8").includes("halo-agent model routing") ? "ok" : "bad");
+console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Agent model routing") ? "ok" : "bad");
 `,
     "utf8",
   );
@@ -381,7 +381,7 @@ test("config edit creates the config file", async () => {
   await writeFile(
     editorPath,
     `import { readFileSync } from "node:fs";
-console.log(readFileSync(process.argv[2], "utf8").includes("halo-agent user configuration") ? "ok" : "bad");
+console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Agent user configuration") ? "ok" : "bad");
 `,
     "utf8",
   );

@@ -717,7 +717,7 @@ async function main() {
     }
   } else {
     for (const model of options.models) {
-      console.error(`== halo-agent model: ${model} ==`);
+      console.error(`== Bitfield Agent model: ${model} ==`);
       resolvedModel = await logResolvedModel(model, options);
       const outcome = await runAllScenarios(scenarios, resolvedModel, options, {
         completedNames: [...resumeCompleted],

@@ -236,8 +236,8 @@ export function formatProcessingMarkdown(plan) {
   const patterns = plan.mode === "patterns";
   const lines = [
     patterns
-      ? "# halo-agent — architecture patterns plan"
-      : "# halo-agent — bench recommendations plan",
+      ? "# Bitfield Agent — architecture patterns plan"
+      : "# Bitfield Agent — bench recommendations plan",
     "",
     `Generated: ${plan.generatedAt}`,
   ];
