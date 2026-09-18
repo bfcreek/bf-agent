@@ -28,8 +28,11 @@ const STAGING_RETAIN_COUNT = 5;
 /** Default Cloudflare R2 bucket (override via R2_BUCKET env). */
 const DEFAULT_R2_BUCKET = "halo-agent-releases";
 
-/** Zip filename prefix — must match halo-site halo-agent.release config. */
-const UPDATE_ARTIFACT_PREFIX = "halo-agent-";
+/** Zip filename prefix — must match halo-site setupFilename (`bf-agent-<version>.zip`). */
+const UPDATE_ARTIFACT_PREFIX = "bf-agent-";
+
+/** Pre-rename zip prefix still present in R2 (`halo-agent-<version>.zip`). */
+const LEGACY_ARTIFACT_PREFIXES = ["halo-agent-"];
 
 /** @type {Record<string, { keyPrefix: string, updatesBaseUrl: string }>} */
 const RELEASE_TARGETS = {
@@ -183,8 +186,12 @@ function objectKeyForReleaseArtifact(filename, targetName) {
  */
 function releaseVersionFromObjectKey(keyOrName) {
     const base = String(keyOrName || "").split("/").pop() || "";
-    if (!base.startsWith(UPDATE_ARTIFACT_PREFIX) || !base.endsWith(".zip")) return null;
-    const rest = base.slice(UPDATE_ARTIFACT_PREFIX.length, -".zip".length);
+    if (!base.endsWith(".zip")) return null;
+    const prefix = [UPDATE_ARTIFACT_PREFIX, ...LEGACY_ARTIFACT_PREFIXES].find((candidate) =>
+        base.startsWith(candidate),
+    );
+    if (!prefix) return null;
+    const rest = base.slice(prefix.length, -".zip".length);
     return rest || null;
 }
 

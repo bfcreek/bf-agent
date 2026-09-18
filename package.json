@@ -5,7 +5,7 @@
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Bitfield Creek",
-  "homepage": "https://www.bitfieldcreek.com/explore#halo-agent",
+  "homepage": "https://www.bitfieldcreek.com/explore#bf-agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/froggy523/halo-agent.git"

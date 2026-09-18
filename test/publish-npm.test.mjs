@@ -13,7 +13,7 @@ const {
 test("parseProductionVersionFromLatestYml reads version", () => {
     const version = parseProductionVersionFromLatestYml([
         "version: 0.1.0",
-        "path: halo-agent-0.1.0.zip",
+        "path: bf-agent-0.1.0.zip",
     ].join("\n"));
     assert.equal(version, "0.1.0");
 });
@@ -38,7 +38,7 @@ test("verifyReadyForNpmPublish checks CDN and npm registry", async () => {
             return {
                 ok: true,
                 async text() {
-                    return "version: 0.2.0\npath: halo-agent-0.2.0.zip\n";
+                    return "version: 0.2.0\npath: bf-agent-0.2.0.zip\n";
                 },
             };
         }

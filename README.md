@@ -45,7 +45,7 @@ Try without installing:
 npx @bitfieldcreek/bf-agent "summarize README.md"
 ```
 
-Or download the zip from [Explore](https://www.bitfieldcreek.com/explore#halo-agent) and use the `bin/` launchers below.
+Or download the zip from [Explore](https://www.bitfieldcreek.com/explore#bf-agent) and use the `bin/` launchers below.
 
 **Bitfield Agent** (`bf-agent`) is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Bitfield Creek EULA](https://www.bitfieldcreek.com/eula).
 
