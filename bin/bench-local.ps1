@@ -1,5 +1,5 @@
 # Local development bench — host Node + host Ollama, no Harbor.
-# Cursor CLI judges each scenario. Output: ../halo-agent-benchmark/ and bench-latest.md
+# Cursor CLI judges each scenario. Output: ../halo-agent-benchmark/local/
 #
 # Usage: .\bin\bench-local.ps1
 #        .\bin\bench-local.ps1 -SkipJudge
@@ -10,6 +10,7 @@
 # Interactive menu: .\bin\bench.ps1
 # Terminal-Bench (Harbor/Docker): .\bin\bench-tb.ps1
 # Random 5-task sample: .\bin\bench-tb-mini.ps1
+# Pattern train loop: .\scripts\commands\ha-train.ps1
 
 param(
     [switch]$SkipJudge,
@@ -92,7 +93,7 @@ Write-Host "Starting local development bench (no Harbor, no extra Compose)" -For
 Write-Host "  model:  $modelList"
 Write-Host "  grade:  $judge"
 Write-Host "  needs:  Ollama on the host, Cursor CLI unless -SkipJudge"
-Write-Host "  out:    ../halo-agent-benchmark/  and  bench-latest.md"
+Write-Host "  out:    ../halo-agent-benchmark/local/ (latest.json + latest.md)"
 Write-Host ""
 Write-Host "Running: node evals/dev-bench.mjs $($argsList -join ' ')" -ForegroundColor Cyan
 Write-Host ""

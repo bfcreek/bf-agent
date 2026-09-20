@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { resolveModelAuto, isCloudModel } from "./model-routing.mjs";
+import { isCloudModel, resolveModelAuto, suggestModel } from "./model-routing.mjs";
 import {
   DEFAULT_TIER_PRESET,
   coerceTierPresetModel,
@@ -26,7 +26,7 @@ const MODELS_CONFIG_TEMPLATE = `# Bitfield Agent model routing
 # Used by the CLI and dev-bench to pick easy / medium / hard models.
 # Run: bf-agent models config edit
 
-# Preset: auto (detect local models), cloud (no GPU), cloud-max (flagship cloud, max think, planning on), hybrid, local
+# Preset: auto (detect local models), cloud (no GPU), cloud-max (flagship cloud, max think), hybrid, local
 preset: auto
 
 # Default task difficulty for a single CLI run (0=safety … 6=hardest).
@@ -210,20 +210,19 @@ export async function resolveCliModel(
 async function maybePreferInstalledCloud(options, client, routed, requireVision) {
   const cloudOnly = getTierPresetPolicy(options.tierPreset).cloudOnly === true;
   if (!cloudOnly || isCloudModel(routed.model)) return routed;
-  const { resolveModelWithEscalation } = await import("./escalation.mjs");
-  const cloud = await resolveModelWithEscalation({
-    requested: "auto",
-    client,
-    cloudOnly: true,
-    requireVision,
-  });
-  const pick = (cloud.ladder ?? []).filter((m) => m.cloud).at(-1);
+  let pick = null;
+  try {
+    const models = await client.listModelsDetailed();
+    pick = await suggestModel({ client, models, requireVision, cloudOnly: true });
+  } catch {
+    // Fall through to the warned local fallback below.
+  }
   if (pick) {
     return {
-      model: pick.name,
+      model: pick.model,
       warnings: [
         ...(routed.warnings ?? []),
-        `Using '${pick.name}': strongest installed cloud model for cloud-only preset '${options.tierPreset}'.`,
+        `Using '${pick.model}': strongest installed cloud model for cloud-only preset '${options.tierPreset}'.`,
       ],
     };
   }

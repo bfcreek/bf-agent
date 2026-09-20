@@ -86,10 +86,14 @@ test("formatProcessingMarkdown handles empty recommendations", () => {
   assert.match(md, /Nothing to implement/);
 });
 
-test("targetsForArea maps closed-loop areas", () => {
-  assert.ok(targetsForArea("acceptance").includes("src/acceptance.mjs"));
-  assert.ok(targetsForArea("escalation").includes("src/escalation.mjs"));
-  assert.ok(targetsForArea("memory").includes("src/memory-store.mjs"));
+test("targetsForArea maps the judge schema areas to runtime modules", () => {
+  assert.ok(targetsForArea("loop").includes("src/agent-loop.mjs"));
+  assert.ok(targetsForArea("routing").includes("src/model-routing.mjs"));
+  assert.ok(targetsForArea("compaction").includes("src/compaction.mjs"));
+  assert.ok(targetsForArea("bench").includes("evals/judge.mjs"));
+  // Removed closed-loop areas no longer resolve to deleted modules.
+  assert.deepEqual(targetsForArea("acceptance"), []);
+  assert.deepEqual(targetsForArea("escalation"), []);
 });
 
 test("patterns mode turns architecture insights into pending levers", () => {
@@ -98,24 +102,24 @@ test("patterns mode turns architecture insights into pending levers", () => {
       suite: "terminal-bench",
       architectureInsights: [
         {
-          id: "tests-mostly-failed",
+          id: "spinning-on-failures",
           source: "run",
           priority: "high",
-          pattern: "Ground-truth tests failed on most of this sample.",
-          lever: "Prefer stronger deliverable + verify gating over task-specific hints.",
+          pattern: "The same failing command was repeated several times.",
+          lever: "Make run_command failures carry the exit code and stderr inline.",
           scenarios: ["a", "b"],
         },
         {
-          id: "stable-without-escalation",
+          id: "stable-and-lean",
           source: "run",
           priority: "low",
-          pattern: "Strong scores with zero escalations.",
+          pattern: "Strong outcomes with no efficiency flags.",
           lever: "Resist adding complexity here.",
           scenarios: ["c", "d"],
         },
       ],
       recommendations: [
-        { area: "planning", suggestion: "add a hint for openssl-selfsigned-cert", priority: "high" },
+        { area: "system prompt", suggestion: "add a hint for openssl-selfsigned-cert", priority: "high" },
       ],
     },
     { patterns: true },
@@ -123,23 +127,23 @@ test("patterns mode turns architecture insights into pending levers", () => {
   assert.equal(plan.mode, "patterns");
   assert.equal(plan.recommendationCount, 1);
   const pending = plan.items.find((i) => i.status === "pending");
-  assert.equal(pending.insightId, "tests-mostly-failed");
-  assert.equal(pending.area, "acceptance");
-  assert.ok(pending.targetFiles.includes("src/acceptance.mjs"));
+  assert.equal(pending.insightId, "spinning-on-failures");
+  assert.equal(pending.area, "tools");
+  assert.ok(pending.targetFiles.includes("src/tools/shell.mjs"));
   const skipped = plan.items.find((i) => i.status === "skip");
-  assert.equal(skipped.insightId, "stable-without-escalation");
+  assert.equal(skipped.insightId, "stable-and-lean");
   assert.equal(plan.judgeNotes.length, 1);
   const md = formatProcessingMarkdown(plan);
   assert.match(md, /architecture patterns plan/i);
   assert.match(md, /Pattern:/);
   assert.match(md, /Judge notes/);
-  assert.doesNotMatch(md, /### 1\. \[high\] planning/);
+  assert.doesNotMatch(md, /### 1\. \[high\] system prompt/);
 });
 
 test("itemsFromInsights skips resist levers", () => {
   const items = itemsFromInsights([
     {
-      id: "stable-without-escalation",
+      id: "stable-and-lean",
       priority: "low",
       pattern: "held",
       lever: "Resist adding complexity here.",

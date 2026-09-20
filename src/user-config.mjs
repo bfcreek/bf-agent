@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { DEFAULT_MAX_STEPS } from "./agent-loop.mjs";
 import { DEFAULT_NUM_CTX, DEFAULT_THINK } from "./ollama-client.mjs";
 
 export const CONFIG_FILE_NAME = "config.yaml";
@@ -19,7 +20,7 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 
 # model: auto
 # base-url: http://127.0.0.1:11434
-# max-steps: 10
+# max-steps: ${DEFAULT_MAX_STEPS}
 # num-ctx: ${DEFAULT_NUM_CTX}
 # cwd: .
 # mode: ask
@@ -28,18 +29,8 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # embed-model: nomic-embed-text
 # think: auto
 # quiet: false
-# show-plan: false
 # no-index: false
-# no-plan: false
-# no-replan: false
-# no-hints: false
-# no-memory: false
-# memory-readonly: false
-# no-critique: false
-# no-acceptance: false
-# escalation: true
-# escalation-max: 2
-# escalation-cloud: false
+# no-checkpoints: false
 # json: false
 #
 # mcp:
@@ -48,7 +39,8 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # Persistent user instructions (Cursor-style user rules): create
 # instructions.md in this same directory. It is prepended to every system
 # prompt. Workspace AGENTS.md, CLAUDE.md, .cursorrules, and always-apply
-# .cursor/rules/*.mdc are loaded from the project root.
+# .cursor/rules/*.mdc are loaded from the project root; other rules are
+# listed by description and fetched by the agent when relevant.
 `;
 
 /** @returns {string} */
@@ -236,27 +228,12 @@ export function normalizeConfigValues(raw) {
         break;
       }
       case "quiet":
-      case "show-plan":
       case "no-index":
+      case "no-checkpoints":
       case "json":
-      case "no-plan":
-      case "no-replan":
-      case "no-hints":
-      case "no-memory":
-      case "memory-readonly":
-      case "no-critique":
-      case "no-acceptance":
-      case "escalation":
-      case "escalation-cloud":
         if (typeof value === "boolean") values[configKeyToOption(key)] = value;
         else errors.push(`config '${key}' must be true or false.`);
         break;
-      case "escalation-max": {
-        const n = Number(value);
-        if (Number.isFinite(n) && n >= 0 && n <= 10) values.escalationMax = n;
-        else errors.push(`config 'escalation-max' needs an integer from 0 to 10, got '${value}'.`);
-        break;
-      }
       case "mcp":
         if (!Array.isArray(value)) {
           errors.push(`config 'mcp' must be a list of command strings.`);
@@ -307,26 +284,8 @@ function configKeyToOption(key) {
       return "embedModel";
     case "no-index":
       return "noIndex";
-    case "no-plan":
-      return "noPlan";
-    case "no-replan":
-      return "noReplan";
-    case "show-plan":
-      return "showPlan";
-    case "no-hints":
-      return "noHints";
-    case "no-memory":
-      return "noMemory";
-    case "memory-readonly":
-      return "memoryReadonly";
-    case "no-critique":
-      return "noCritique";
-    case "no-acceptance":
-      return "noAcceptance";
-    case "escalation-max":
-      return "escalationMax";
-    case "escalation-cloud":
-      return "escalationCloud";
+    case "no-checkpoints":
+      return "noCheckpoints";
     default:
       return key;
   }
@@ -410,28 +369,18 @@ export function getBuiltinDefaults() {
   return {
     model: "auto",
     baseUrl: "http://127.0.0.1:11434",
-    maxSteps: 10,
+    maxSteps: DEFAULT_MAX_STEPS,
     numCtx: DEFAULT_NUM_CTX,
     quiet: false,
-    showPlan: false,
     cwd: process.cwd(),
     port: 11435,
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
     mcp: [],
     embedModel: "nomic-embed-text",
     noIndex: false,
+    noCheckpoints: false,
     json: false,
     think: DEFAULT_THINK,
-    noPlan: false,
-    noReplan: false,
-    noHints: false,
-    noMemory: false,
-    memoryReadonly: false,
-    noCritique: false,
-    noAcceptance: false,
-    escalation: true,
-    escalationMax: 2,
-    escalationCloud: false,
     tierPreset: null,
     taskTier: null,
     goal: "",

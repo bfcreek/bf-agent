@@ -2,7 +2,8 @@
  * Lightweight project RAG: index README and other key docs into
  * `.halo-agent/project-index.json`, embed with Ollama, search by cosine
  * similarity. No npm dependencies — vectors stay on disk, gitignored via
- * `.halo-agent/`.
+ * `.halo-agent/`. Exposed to the model only through the `search_project`
+ * tool; nothing is injected into the prompt up front.
  */
 
 import { createHash } from "node:crypto";
@@ -38,14 +39,6 @@ const DEFAULT_CHUNK_OVERLAP = 200;
 const DEFAULT_TOP_K = 5;
 const MAX_INDEX_FILES = 40;
 const MAX_FILE_BYTES = 128_000;
-const MAX_OVERVIEW_CHARS = 6000;
-const FIRST_TURN_README_CHARS = 12_000;
-// When goal-specific passages were retrieved they carry the grounding load,
-// so the README injection shrinks to an overview instead of the full text.
-const FIRST_TURN_README_CHARS_WITH_HITS = 6000;
-// Passages scoring below this are noise from an unrelated goal — injecting
-// them distracts small models more than it helps.
-const MIN_HIT_SCORE = 0.25;
 
 /** @returns {string} Absolute path to the on-disk index file. */
 export function indexPath(workspaceRoot) {
@@ -307,181 +300,4 @@ export async function searchProjectIndex({
     .slice(0, topK);
 
   return ranked;
-}
-
-function truncateOverview(text, limit = MAX_OVERVIEW_CHARS) {
-  if (text.length <= limit) return text;
-  return `${text.slice(0, limit)}\n[overview truncated: ${text.length - limit} more characters — use read_file or search_project]`;
-}
-
-function formatSearchHits(hits) {
-  return hits
-    .map(
-      (r, i) =>
-        `[${i + 1}] ${r.path} (chunk ${r.index}, score ${r.score.toFixed(3)})\n${r.text}`,
-    )
-    .join("\n\n---\n\n");
-}
-
-/**
- * Read README.md from the workspace when present.
- *
- * @param {string} workspaceRoot
- * @param {number} [maxChars]
- * @returns {Promise<string|null>}
- */
-export async function readProjectReadme(workspaceRoot, maxChars = FIRST_TURN_README_CHARS) {
-  const root = path.resolve(workspaceRoot ?? process.cwd());
-  try {
-    const text = await readFile(path.join(root, "README.md"), "utf8");
-    return truncateOverview(text, maxChars);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Force first-turn project grounding: README content plus goal-specific RAG
- * hits (when an embedding client is available). Returns a block to append to
- * the user's first message.
- *
- * @param {object} options
- * @param {string} options.workspaceRoot
- * @param {string} options.goal User goal used as the RAG query.
- * @param {{embed: Function}} [options.client]
- * @param {string} [options.embeddingModel]
- * @param {AbortSignal} [options.signal]
- * @param {(message: string) => void} [options.onProgress]
- * @returns {Promise<{text: string, readme: boolean, ragHits: number}>}
- */
-export async function gatherFirstTurnProjectContext({
-  workspaceRoot,
-  goal,
-  client,
-  embeddingModel = DEFAULT_EMBEDDING_MODEL,
-  signal,
-  onProgress,
-} = {}) {
-  const root = path.resolve(workspaceRoot ?? process.cwd());
-  const sections = [];
-  let readme = false;
-  let ragHits = 0;
-  let ragSection = "";
-
-  if (client?.embed && goal?.trim()) {
-    try {
-      await ensureProjectIndex({
-        workspaceRoot: root,
-        client,
-        embeddingModel,
-        signal,
-        onProgress,
-      });
-      const hits = await searchProjectIndex({
-        workspaceRoot: root,
-        query: goal,
-        client,
-        embeddingModel,
-        signal,
-      });
-      const relevant = (hits ?? []).filter((h) => h.score >= MIN_HIT_SCORE);
-      if (relevant.length > 0) {
-        ragHits = relevant.length;
-        ragSection = "### Relevant passages (search_project)\n\n" + formatSearchHits(relevant);
-      }
-    } catch (err) {
-      if (err?.name === "AbortError") throw err;
-      ragSection = `### search_project\n\n(unavailable: ${err?.message ?? err} — use read_file for more detail)`;
-    }
-  }
-
-  const readmeText = await readProjectReadme(
-    root,
-    ragHits > 0 ? FIRST_TURN_README_CHARS_WITH_HITS : FIRST_TURN_README_CHARS,
-  );
-  if (readmeText) {
-    readme = true;
-    sections.push("### README.md (read_file)\n\n" + readmeText);
-  }
-  if (ragSection) sections.push(ragSection);
-
-  if (!readme && ragHits === 0) {
-    const text =
-      "## Auto-retrieved project context\n\n(no README.md and no indexed passages — use list_dir and read_file to explore)";
-    return { text, readme: false, ragHits: 0 };
-  }
-
-  const text = "## Auto-retrieved project context\n\n" + sections.join("\n\n");
-  return { text, readme, ragHits };
-}
-
-/**
- * Prepare the project index and return a short note for the system prompt.
- * README and goal-specific retrieval are injected on the first turn instead.
- *
- * @param {object} [options]
- * @param {string} [options.workspaceRoot]
- * @param {{embed: Function}} [options.client]
- * @param {string} [options.embeddingModel]
- * @param {boolean} [options.index] When true and client is set, ensure index.
- * @param {(message: string) => void} [options.onProgress]
- * @returns {Promise<string>}
- */
-export async function buildProjectContext({
-  workspaceRoot,
-  client,
-  embeddingModel = DEFAULT_EMBEDDING_MODEL,
-  index = true,
-  onProgress,
-} = {}) {
-  const root = path.resolve(workspaceRoot ?? process.cwd());
-  const sections = [];
-
-  try {
-    const raw = await readFile(path.join(root, "package.json"), "utf8");
-    const pkg = JSON.parse(raw);
-    const summary = {
-      name: pkg.name,
-      version: pkg.version,
-      description: pkg.description,
-    };
-    sections.push("### package.json\n\n" + JSON.stringify(summary, null, 2));
-  } catch {
-    // no package.json
-  }
-
-  let indexNote = "";
-  if (client?.embed && index) {
-    try {
-      const built = await ensureProjectIndex({
-        workspaceRoot: root,
-        client,
-        embeddingModel,
-        onProgress,
-      });
-      if (built?.chunkCount > 0) {
-        indexNote = `Project index: ${built.chunkCount} chunk(s) from ${built.fileCount} file(s) (embedding model: ${built.embeddingModel}). README and relevant passages are auto-retrieved on the first turn; use search_project or read_file after that.`;
-      } else if (built) {
-        indexNote =
-          "Project index: empty (no indexable docs found). README is auto-retrieved on the first turn when present.";
-      }
-    } catch (err) {
-      if (err?.name === "AbortError") throw err;
-      indexNote = `Project index: unavailable (${err?.message ?? err}). README is still auto-retrieved on the first turn when present.`;
-    }
-  } else {
-    indexNote =
-      "Project index: not built (no embedding client). README is auto-retrieved on the first turn when present.";
-  }
-
-  if (sections.length === 0 && !indexNote) return "";
-
-  const lines = ["## Project"];
-  if (sections.length > 0) {
-    lines.push("", sections.join("\n\n"));
-  }
-  if (indexNote) {
-    lines.push("", indexNote);
-  }
-  return lines.join("\n");
 }

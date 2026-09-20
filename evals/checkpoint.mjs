@@ -30,8 +30,7 @@ export function buildRunKey(scenarioNames, options) {
     minTier: options.minTier,
     languageFilter: options.languageFilter ?? null,
     judgeModel: options.judgeModel,
-    planning: options.planning,
-    taskHints: options.taskHints,
+    think: options.think ?? null,
     keepWorkspace: options.keepWorkspace,
   };
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 16);

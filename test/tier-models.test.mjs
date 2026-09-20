@@ -87,28 +87,18 @@ test("getTierPresetBands returns cloud-first routing without local models", () =
   );
 });
 
-test("cloud-max policy enables max think, planning, and cloud-only routing", () => {
+test("cloud-max policy enables max think and cloud-only routing", () => {
   const policy = getTierPresetPolicy("cloud-max");
   assert.equal(policy.think, "max");
-  assert.equal(policy.planning, true);
-  assert.equal(policy.escalationCloud, true);
   assert.equal(policy.cloudOnly, true);
   assert.equal(getTierPresetPolicy("cloud").cloudOnly, false);
 
-  const applied = applyTierPresetPolicy({ think: "auto", planning: false, escalationCloud: false }, "cloud-max");
+  const applied = applyTierPresetPolicy({ think: "auto" }, "cloud-max");
   assert.equal(applied.think, "max");
-  assert.equal(applied.planning, true);
-  assert.equal(applied.escalationCloud, true);
   assert.equal(applied.cloudOnly, true);
 
-  const kept = applyTierPresetPolicy(
-    { think: "low", planning: false, noPlan: true, escalationCloud: false },
-    "cloud-max",
-    { thinkExplicit: true, planningExplicit: true, escalationCloudExplicit: true },
-  );
+  const kept = applyTierPresetPolicy({ think: "low" }, "cloud-max", { thinkExplicit: true });
   assert.equal(kept.think, "low");
-  assert.equal(kept.planning, false);
-  assert.equal(kept.escalationCloud, false);
 });
 
 test("coerceTierPresetModel treats Harbor's model string as a preset", () => {

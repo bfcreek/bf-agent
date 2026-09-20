@@ -72,3 +72,15 @@ export function latestReportPaths(suiteId, options = {}) {
     markdown: path.join(dir, "latest.md"),
   };
 }
+
+/**
+ * Durable TB scoreboard — one JSONL across runs for a suite.
+ * @param {string} [suiteId]
+ * @param {object} [options]
+ * @param {string} [options.root]
+ * @param {string} [options.repoRoot]
+ */
+export function scoreboardPath(suiteId = "terminal-bench", options = {}) {
+  const root = options.root ?? recognizedRoot(options.repoRoot);
+  return path.join(root, suiteId, "scoreboard-history.jsonl");
+}

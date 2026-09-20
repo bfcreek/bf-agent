@@ -5,11 +5,9 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 
 import {
-  buildProjectContext,
   chunkText,
   discoverIndexFiles,
   ensureProjectIndex,
-  gatherFirstTurnProjectContext,
   indexIsStale,
   indexPath,
   searchProjectIndex,
@@ -95,27 +93,4 @@ test("searchProjectIndex returns ranked passages", async () => {
   });
   assert.ok(hits.length > 0);
   assert.ok(hits.some((hit) => /How to use it/.test(hit.text)));
-});
-
-test("gatherFirstTurnProjectContext forces README and RAG passages", async () => {
-  const client = new MockEmbedClient();
-  const gathered = await gatherFirstTurnProjectContext({
-    workspaceRoot: root,
-    goal: "How to use it",
-    client,
-  });
-  assert.match(gathered.text, /## Auto-retrieved project context/);
-  assert.match(gathered.text, /README\.md \(read_file\)/);
-  assert.match(gathered.text, /search_project\)/);
-  assert.equal(gathered.readme, true);
-  assert.ok(gathered.ragHits > 0);
-});
-
-test("buildProjectContext includes package summary and index note", async () => {
-  const client = new MockEmbedClient();
-  const context = await buildProjectContext({ workspaceRoot: root, client });
-  assert.match(context, /## Project/);
-  assert.match(context, /"name": "demo"/);
-  assert.match(context, /Project index:/);
-  assert.doesNotMatch(context, /README\.md/);
 });

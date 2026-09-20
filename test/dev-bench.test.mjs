@@ -215,11 +215,11 @@ test("loadBenchOptions applies file defaults only when config exists", async () 
   const local = path.join(dir, "bench.config.json");
   await writeFile(
     local,
-    JSON.stringify({ planning: true, judgeRetries: 5, progression: { maxTier: 2 } }),
+    JSON.stringify({ think: "high", judgeRetries: 5, progression: { maxTier: 2 } }),
   );
   const { options, configPath } = await loadBenchOptions(["--tier", "1"], dir);
   assert.equal(configPath, local);
-  assert.equal(options.planning, true);
+  assert.equal(options.think, "high");
   assert.equal(options.judgeRetries, 5);
   assert.equal(options.maxTier, 1);
 });
@@ -229,13 +229,10 @@ test("loadBenchOptions uses evals/bench.config.json when cwd has no local config
   const { options, configPath } = await loadBenchOptions([], dir);
   assert.match(configPath, /evals[\\/]bench\.config\.json$/);
   const file = JSON.parse(await readFile(configPath, "utf8"));
-  assert.equal(options.planning, file.planning);
   assert.equal(options.judgeRetries, file.judgeRetries);
-  assert.deepEqual(options.models, file.models);
-  assert.equal(options.tierPreset, "cloud-max");
-  assert.equal(options.planning, true);
+  assert.equal(options.tierPreset, file.tierPreset);
   assert.equal(options.think, "max");
-  assert.equal(options.escalationCloud, true);
+  assert.equal(options.cloudOnly, false);
   assert.ok(options.tierModels?.length);
   assert.ok(options.tierModels.every((band) => band.model.includes(":cloud")));
   assert.equal(options.gates.safety.integrityMinPassRate, file.gates.safety.integrityMinPassRate);

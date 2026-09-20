@@ -7,24 +7,14 @@ import { after, before, beforeEach, test } from "node:test";
 import { AgentLoop } from "../src/agent-loop.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { MAX_TOOL_OUTPUT_CHARS, moduleLevelPrintNote, resolveWithinRoot, containsConflictMarkers, conflictMarkerNote, writeFileSchemaIssue, weightsJsonContentIssue } from "../src/tools/fs.mjs";
-import {
-  classifyCleanupFileMutation,
-} from "../src/tools/mutation-safety.mjs";
+import { resolveWithinRoot, writeFileSchemaIssue } from "../src/tools/fs.mjs";
+import { classifyCleanupFileMutation } from "../src/tools/mutation-safety.mjs";
+import { MAX_TOOL_OUTPUT_CHARS, TOOL_OUTPUT_DIR } from "../src/tools/output.mjs";
 import {
   classifyDeleteCommand,
-  cliEmptyStdoutNote,
   extractDeleteTargets,
   findDeleteCommand,
-  findHeredocCommand,
   findInteractiveCommand,
-  sevenZipMissingPasswordFlag,
-  binaryCheckpointCopyToJsonIssue,
-  nonZeroExitStderrNote,
-  runCommandSchemaIssue,
-  interactivePasswordPromptNote,
-  exitZeroWithStderrNote,
-  windowsBashCommandIssue,
   fitTimeoutToDeadline,
   DEADLINE_COMMAND_RESERVE_MS,
   DEADLINE_MIN_COMMAND_MS,
@@ -104,33 +94,24 @@ test("read_file supports offset and limit line ranges", async () => {
   assert.deepEqual(aliased, { ok: true, result: "two\nthree" });
 });
 
-test("read_file truncates very large files with a marker", async () => {
-  await writeFile(path.join(root, "big.txt"), "x".repeat(MAX_TOOL_OUTPUT_CHARS + 500), "utf8");
+test("read_file spills very large files to disk and returns head + tail + path", async () => {
+  const body = `${"h".repeat(1000)}${"x".repeat(MAX_TOOL_OUTPUT_CHARS)}${"t".repeat(1000)}`;
+  await writeFile(path.join(root, "big.txt"), body, "utf8");
 
   const read = await registry.execute("read_file", { path: "big.txt" });
   assert.equal(read.ok, true);
-  assert.match(read.result, /\[output truncated: 500 of \d+ characters omitted\]$/);
+  assert.ok(read.result.startsWith("h".repeat(1000)), "head is kept");
+  assert.ok(read.result.endsWith("t".repeat(1000)), "tail is kept");
+  const pointer = read.result.match(/saved to (\S+) — read_file it/);
+  assert.ok(pointer, "points at the spilled file");
+  assert.ok(pointer[1].startsWith(TOOL_OUTPUT_DIR.split(path.sep).join("/")));
+  assert.equal(await readFile(path.join(root, pointer[1]), "utf8"), body);
 });
 
 test("read_file on a missing file fails gracefully", async () => {
   const read = await registry.execute("read_file", { path: "no-such-file.txt" });
   assert.equal(read.ok, false);
   assert.match(read.error, /read_file/);
-});
-
-test("read_file warns when the file still has merge conflict markers", async () => {
-  await writeFile(
-    path.join(root, "conflict.py"),
-    "<<<<<<< HEAD\ndef map():\n    return 1\n=======\ndef map():\n    return 2\n>>>>>>> feature\n",
-    "utf8",
-  );
-  const read = await registry.execute("read_file", { path: "conflict.py" });
-  assert.equal(read.ok, true);
-  assert.match(read.result, /<<<<<<< HEAD/);
-  assert.match(read.result, /unresolved merge conflict markers/);
-  assert.match(read.result, /edit_file or write_file/);
-  assert.equal(containsConflictMarkers("<<<<<<< HEAD\n"), true);
-  assert.match(conflictMarkerNote("<<<<<<< ours\nfoo\n>>>>>>> theirs\n") ?? "", /<<<<<<</);
 });
 
 test("list_dir marks directories with a trailing slash", async () => {
@@ -317,7 +298,7 @@ test("run_command clamps timeout_seconds to the remaining wall clock and says so
   assert.equal(run.ok, true);
   assert.equal(run.result.status, "success");
   assert.match(run.result.note, /clamped from 300s to (39|40)s/);
-  assert.match(run.result.note, /cannot complete in this run/);
+  assert.match(run.result.note, /wall-clock budget remain/);
   registry.setRunContext(null);
 });
 
@@ -338,8 +319,7 @@ test("run_command kills commands that exceed the timeout", async () => {
   });
   assert.equal(run.ok, true);
   assert.equal(run.result.timedOut, true);
-  assert.match(run.result.status, /TIMED OUT after 1s/);
-  assert.match(run.result.status, /treat this as a failure/);
+  assert.match(run.result.status, /TIMED OUT after 1s and was killed/);
 });
 
 test("run_command rejects a cwd outside the workspace", async () => {
@@ -379,137 +359,6 @@ test("findInteractiveCommand leaves script and inline invocations alone", () => 
   ]) {
     assert.equal(findInteractiveCommand(command), null, `should not flag: ${command}`);
   }
-});
-
-test("findHeredocCommand flags python/shell heredocs", () => {
-  assert.ok(findHeredocCommand("python - <<'EOF'\nprint(1)\nEOF"));
-  assert.ok(findHeredocCommand("cat <<EOF\nhi\nEOF"));
-  assert.equal(findHeredocCommand("python script.py"), null);
-});
-
-test("sevenZipMissingPasswordFlag blocks extract without -p", () => {
-  assert.match(sevenZipMissingPasswordFlag("7z x secret.7z") ?? "", /-p''/);
-  assert.equal(sevenZipMissingPasswordFlag("7z x secret.7z -ppass"), null);
-  assert.equal(sevenZipMissingPasswordFlag("7z l secret.7z"), null);
-});
-
-test("cliEmptyStdoutNote warns on vacuous 7z extraction", () => {
-  assert.match(
-    cliEmptyStdoutNote("7z x secret.7z -ppass", 0, "No files to process"),
-    /no files extracted/i,
-  );
-});
-
-test("interactivePasswordPromptNote flags Enter password in output", () => {
-  assert.match(
-    interactivePasswordPromptNote("", "Enter password (will not be echoed):") ?? "",
-    /-pPASSWORD|-p''/,
-  );
-  assert.equal(interactivePasswordPromptNote("ok", ""), null);
-});
-
-test("exitZeroWithStderrNote flags success with error stderr", () => {
-  assert.match(
-    exitZeroWithStderrNote(0, "./brute.sh: line 14: wordlist: No such file") ?? "",
-    /treat as failure/i,
-  );
-  assert.equal(exitZeroWithStderrNote(0, ""), null);
-});
-
-test("run_command refuses heredocs", async () => {
-  const run = await registry.execute("run_command", {
-    command: "python - <<'EOF'\nprint(1)\nEOF",
-  });
-  assert.equal(run.ok, false);
-  assert.match(run.error, /heredoc|script file/i);
-});
-
-test("run_command refuses 7z extract without password flag", async () => {
-  const run = await registry.execute("run_command", {
-    command: "7z x secret.7z",
-  });
-  assert.equal(run.ok, false);
-  assert.match(run.error, /-p''|password/i);
-});
-
-test("windowsBashCommandIssue blocks bash on Windows unless the user asked for it", () => {
-  const win = { platform: "win32" };
-  assert.match(
-    windowsBashCommandIssue("bash hello.sh", "Create a script that prints hello", win),
-    /PowerShell|\.ps1/,
-  );
-  assert.match(
-    windowsBashCommandIssue("bash -c 'echo hi'", "Create a script that prints hello", win),
-    /PowerShell|\.ps1/,
-  );
-  assert.match(
-    windowsBashCommandIssue("./hello.sh", "Create a script that prints hello", win),
-    /PowerShell|\.ps1/,
-  );
-  assert.equal(
-    windowsBashCommandIssue("bash hello.sh", "Write a bash script that prints hello", win),
-    null,
-  );
-  assert.equal(
-    windowsBashCommandIssue("bash hello.sh", "Create a script that prints hello", {
-      platform: "linux",
-    }),
-    null,
-  );
-  assert.equal(
-    windowsBashCommandIssue("Write-Output 'hello'", "Create a script that prints hello", win),
-    null,
-  );
-});
-
-test("run_command refuses bash on Windows when the user did not ask for it", async () => {
-  if (process.platform !== "win32") return;
-  registry.setRunContext({ goal: "Create a script that prints hello" });
-  const run = await registry.execute("run_command", { command: "bash hello.sh" });
-  assert.equal(run.ok, false);
-  assert.match(run.error, /PowerShell|\.ps1/);
-});
-
-test("cliEmptyStdoutNote warns on empty CLI stdout", () => {
-  assert.match(
-    cliEmptyStdoutNote("node summarize.mjs data.csv", 0, ""),
-    /empty stdout/i,
-  );
-  assert.match(
-    cliEmptyStdoutNote("dotnet run", 0, "  \n"),
-    /entry-point guard|Windows/i,
-  );
-});
-
-test("cliEmptyStdoutNote warns on empty JSON array stdout", () => {
-  assert.match(
-    cliEmptyStdoutNote("dotnet run -- data/users.json --active", 0, "[]"),
-    /empty JSON array/i,
-  );
-  assert.match(
-    cliEmptyStdoutNote("dotnet run -- data/users.json --active", 0, "[]\n"),
-    /PropertyNameCaseInsensitive/,
-  );
-  assert.equal(cliEmptyStdoutNote("dotnet run", 0, "[{\"id\":1}]"), null);
-});
-
-test("cliEmptyStdoutNote warns on qty=0 catalog stdout with no SKUs", () => {
-  assert.match(
-    cliEmptyStdoutNote("dotnet run -- list", 0, "qty=0\n"),
-    /qty=0|no SKUs|PropertyNameCaseInsensitive/i,
-  );
-  assert.equal(
-    cliEmptyStdoutNote("dotnet run -- list", 0, "WID-1  Widget  qty=10  $2.50\n"),
-    null,
-  );
-});
-
-test("cliEmptyStdoutNote stays quiet for tests, failures, and real output", () => {
-  assert.equal(cliEmptyStdoutNote("node test.mjs", 0, ""), null);
-  assert.equal(cliEmptyStdoutNote("python test.py", 0, ""), null);
-  assert.equal(cliEmptyStdoutNote("node -v", 0, ""), null);
-  assert.equal(cliEmptyStdoutNote("node summarize.mjs", 1, ""), null);
-  assert.equal(cliEmptyStdoutNote("node summarize.mjs", 0, "ok\n"), null);
 });
 
 test("run_command refuses commands that would open an interactive REPL", async () => {
@@ -771,70 +620,11 @@ test("agent loop hands the goal to tools via run context", async () => {
   const client = {
     chat: async () => ({ message: { role: "assistant", content: "done" }, raw: {} }),
   };
-  const loop = new AgentLoop({ client, registry: fakeRegistry, planning: false, taskHints: false });
+  const loop = new AgentLoop({ client, registry: fakeRegistry });
   await loop.run("delete junk.txt");
   assert.deepEqual(captured, [{ goal: "delete junk.txt", deadlineAt: null }]);
 });
 
-test("runCommandSchemaIssue rejects conflated write_file fields", () => {
-  assert.match(
-    runCommandSchemaIssue({ path: "train.py", content: "print(1)" }) ?? "",
-    /write_file/i,
-  );
-  assert.equal(runCommandSchemaIssue({ command: "python train.py" }), null);
-});
-
 test("writeFileSchemaIssue rejects conflated run_command fields", () => {
   assert.match(writeFileSchemaIssue({ path: "x.py", command: "echo hi" }) ?? "", /run_command/i);
-});
-
-test("moduleLevelPrintNote warns on import-time print", () => {
-  assert.match(
-    moduleLevelPrintNote("train.py", "print('debug')\ndef train():\n  pass") ?? "",
-    /module-level print/i,
-  );
-  assert.equal(
-    moduleLevelPrintNote(
-      "train.py",
-      "def train():\n  pass\nif __name__ == '__main__':\n  print('ok')",
-    ),
-    null,
-  );
-});
-
-test("write_file surfaces module-level print warning", async () => {
-  const write = await registry.execute("write_file", {
-    path: "train.py",
-    content: "print('boot')\ndef train():\n  return 1",
-  });
-  assert.equal(write.ok, true);
-  assert.match(write.result.note ?? "", /module-level print/i);
-});
-
-test("binaryCheckpointCopyToJsonIssue blocks cp of pth to json", () => {
-  assert.match(
-    binaryCheckpointCopyToJsonIssue("cp model.pth weights.json") ?? "",
-    /binary checkpoints/i,
-  );
-});
-
-test("nonZeroExitStderrNote surfaces ModuleNotFoundError", () => {
-  assert.match(
-    nonZeroExitStderrNote(1, "ModuleNotFoundError: No module named 'torch'") ?? "",
-    /torch/i,
-  );
-});
-
-test("weightsJsonContentIssue rejects invalid JSON", () => {
-  assert.match(weightsJsonContentIssue("weights.json", "not-json{") ?? "", /valid JSON/i);
-  assert.equal(weightsJsonContentIssue("weights.json", '{"w":1}'), null);
-});
-
-test("write_file rejects invalid weights.json content", async () => {
-  const write = await registry.execute("write_file", {
-    path: "weights.json",
-    content: "binary-bytes-not-json",
-  });
-  assert.equal(write.ok, false);
-  assert.match(write.error ?? "", /valid JSON/i);
 });

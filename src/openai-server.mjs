@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import http from "node:http";
 
-import { AgentLoop } from "./agent-loop.mjs";
+import { AgentLoop, DEFAULT_MAX_STEPS } from "./agent-loop.mjs";
 import {
   assertToolCapable,
   assertVisionCapable,
@@ -36,18 +36,18 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
  * @param {string} [options.defaultModel] Reported in responses when the request omits `model`.
  * @param {import("./tier-models.mjs").TierModelBand[]|null} [options.tierModels] Tier bands; `vision` used for image turns.
  * @param {number} [options.defaultTier] Difficulty tier when selecting a band's vision model.
- * @param {object|false} [options.projectBootstrap] First-turn README/RAG bootstrap.
+ * @param {import("./agent-loop.mjs").AgentHooks} [options.hooks]
  * @returns {http.Server}
  */
 export function createOpenAIServer({
   client,
   registry,
   systemPrompt,
-  maxSteps = 10,
+  maxSteps = DEFAULT_MAX_STEPS,
   defaultModel = "unknown",
   tierModels = null,
   defaultTier = 2,
-  projectBootstrap = false,
+  hooks,
 }) {
   return http.createServer(async (req, res) => {
     try {
@@ -65,7 +65,7 @@ export function createOpenAIServer({
             defaultModel,
             tierModels,
             defaultTier,
-            projectBootstrap,
+            hooks,
           },
           req,
           res,
@@ -162,8 +162,7 @@ async function handleChatCompletions(options, req, res) {
       systemPrompt: options.systemPrompt,
       maxSteps: options.maxSteps,
       compaction: {},
-      projectBootstrap: options.projectBootstrap,
-      planning: false,
+      hooks: options.hooks,
       onDelta: streamState
         ? (delta) => {
             streamState.streamed += delta;

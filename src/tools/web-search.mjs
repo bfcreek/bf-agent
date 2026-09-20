@@ -4,7 +4,7 @@
  * not used — it rarely returns useful organic listings for agent work.
  */
 
-import { truncateOutput } from "./fs.mjs";
+import { truncateOutput } from "./output.mjs";
 
 const SEARCH_URL = "https://html.duckduckgo.com/html/";
 const DEFAULT_MAX_RESULTS = 5;
@@ -164,13 +164,7 @@ export async function searchDuckDuckGo({
  */
 export function formatWebSearchResults(results, query) {
   if (!results?.length) {
-    return [
-      `0 web result(s) for '${query}'.`,
-      "Empty results are a real outcome — do not retry the same query.",
-      "If you were looking up an installed package or local API, inspect the",
-      "environment instead, e.g. `python -c \"import mobile_sam; print(dir(mobile_sam))\"`",
-      "or read local docs / installed package files with grep_search and read_file.",
-    ].join("\n");
+    return `0 web result(s) for '${query}'. Try different terms, or look in the workspace with grep_search instead.`;
   }
   const lines = [`${results.length} web result(s) for '${query}':`, ""];
   for (let i = 0; i < results.length; i++) {

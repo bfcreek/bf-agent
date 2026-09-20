@@ -18,11 +18,13 @@ const DEFAULT_SKIP = new Set([
  * @param {number} [options.maxFiles]
  * @param {number} [options.maxFileBytes]
  * @param {Set<string>} [options.skipDirs]
+ * @param {boolean} [options.listOnly] Paths and sizes only, no file contents.
  */
 export async function captureWorkspaceSnapshot(root, options = {}) {
   const maxFiles = options.maxFiles ?? 40;
   const maxFileBytes = options.maxFileBytes ?? 12_000;
   const skipDirs = options.skipDirs ?? DEFAULT_SKIP;
+  const listOnly = options.listOnly === true;
 
   /** @type {Array<{path: string, bytes: number, text?: string, truncated?: boolean, error?: string}>} */
   const files = [];
@@ -55,6 +57,10 @@ export async function captureWorkspaceSnapshot(root, options = {}) {
         continue;
       }
       const record = { path: childRel, bytes: info.size };
+      if (listOnly) {
+        files.push(record);
+        continue;
+      }
       try {
         const buf = await readFile(full);
         if (buf.length > maxFileBytes) {
@@ -71,7 +77,7 @@ export async function captureWorkspaceSnapshot(root, options = {}) {
   }
 
   await walk(root);
-  return { root, fileCount: files.length, files };
+  return { root, fileCount: files.length, files, listOnly };
 }
 
 /**
@@ -79,6 +85,12 @@ export async function captureWorkspaceSnapshot(root, options = {}) {
  */
 export function formatSnapshotForPrompt(snapshot) {
   const lines = [`Workspace: ${snapshot.root}`, `Files (${snapshot.fileCount}):`];
+  if (snapshot.listOnly) {
+    for (const file of snapshot.files) {
+      lines.push(`  ${file.path} (${file.bytes} bytes)${file.error ? ` [unreadable: ${file.error}]` : ""}`);
+    }
+    return lines.join("\n");
+  }
   for (const file of snapshot.files) {
     lines.push(`\n--- ${file.path} (${file.bytes} bytes) ---`);
     if (file.error) {

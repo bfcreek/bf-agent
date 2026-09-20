@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { parseRecognizedArgs, defaultRecognizedConfig, loadRecognizedOptions } from "../evals/recognized/config.mjs";
 import { buildHarborArgs, buildHarborEnv, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
 import { findInstructionField, loadTrialAgentMetrics, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
-import { latestReportPaths, recognizedRoot, runDirectory, timestampRunId } from "../evals/recognized/layout.mjs";
+import { latestReportPaths, recognizedRoot, runDirectory, scoreboardPath, timestampRunId } from "../evals/recognized/layout.mjs";
 import { parseHarborJob, summarizeTasks } from "../evals/recognized/parse.mjs";
 import { buildRecognizedReport, formatRecognizedMarkdown } from "../evals/recognized/report.mjs";
 import { listSuites, resolveDataset, resolveSuite } from "../evals/recognized/registry.mjs";
@@ -157,6 +157,11 @@ test("recognized layout sits under the sibling benchmark folder", () => {
   assert.ok(runDirectory("terminal-bench", "run-1", { repoRoot: repo }).endsWith(path.join("recognized", "terminal-bench", "run-1")));
   assert.ok(timestampRunId("2026-08-25T04:00:00.000Z").includes("2026-08-25T04-00-00"));
   assert.ok(latestReportPaths("terminal-bench", { repoRoot: repo }).json.endsWith(path.join("terminal-bench", "latest.json")));
+  assert.ok(
+    scoreboardPath("terminal-bench", { repoRoot: repo }).endsWith(
+      path.join("terminal-bench", "scoreboard-history.jsonl"),
+    ),
+  );
 });
 
 test("parseHarborJob reads trial_results and computes resolve rate", async () => {
@@ -215,29 +220,35 @@ test("markdown report includes Harbor rate and Cursor judge scores", () => {
     datasetLabel: "Terminal-Bench 2.1",
     model: "gpt-oss:20b",
     judgeModel: "auto",
-    overall: { tasks: 2, resolved: 1, errors: 0, resolveRate: 0.5, judged: 2, judgeAvg: 55, totalSeconds: 90 },
+    overall: { tasks: 2, resolved: 1, errors: 0, resolveRate: 0.5, judged: 2, judgeAvg: 55, processAvg: 62.5, totalSeconds: 90 },
     tasks: [
       {
         name: "openssl-selfsigned-cert",
         resolved: true,
         reward: 1,
         seconds: 40,
-        verdict: { score: 80, grade: "B", summary: "Tests passed; a few wasted steps." },
+        steps: 9,
+        efficiency: { toolCalls: 7, flags: ["redundant-reads"], heuristicScore: 90 },
+        verdict: { score: 80, grade: "B", process: { score: 75 }, summary: "Tests passed; a few wasted steps." },
       },
       {
         name: "hello-world",
         resolved: false,
         reward: 0,
         seconds: 50,
-        verdict: { score: 30, grade: "F", summary: "Did not write the required file." },
+        steps: 3,
+        efficiency: { toolCalls: 2, flags: [], heuristicScore: 100 },
+        verdict: { score: 30, grade: "F", process: { score: 50 }, summary: "Did not write the required file." },
       },
     ],
   });
   const md = formatRecognizedMarkdown(report);
   assert.match(md, /Harbor resolve rate:\*\* 1\/2 \(50\.0%\)/);
-  assert.match(md, /Cursor judge average:\*\* 55\.0\/100/);
+  assert.match(md, /Cursor judge — outcome:\*\* 55\.0\/100/);
+  assert.match(md, /process:\*\* 62\.5\/100/);
   assert.match(md, /openssl-selfsigned-cert/);
-  assert.match(md, /\| 80 \| B \|/);
+  assert.match(md, /\| 80 \(B\) \| 75 \|/);
+  assert.match(md, /redundant-reads/);
 });
 
 test("recognized report attaches architecture insights from task telemetry", () => {
@@ -255,7 +266,7 @@ test("recognized report attaches architecture insights from task telemetry", () 
         score: 10,
         steps: 2,
         stopReason: "completed",
-        verificationPassed: false,
+        efficiency: { toolCalls: 0, flags: ["no-tool-use"], heuristicScore: 100 },
         verdict: { score: 10, grade: "F", summary: "Hollow.", agentImprovements: [] },
       },
       {
@@ -265,7 +276,7 @@ test("recognized report attaches architecture insights from task telemetry", () 
         score: 15,
         steps: 3,
         stopReason: "completed",
-        verificationPassed: false,
+        efficiency: { toolCalls: 0, flags: ["no-tool-use"], heuristicScore: 100 },
         verdict: { score: 15, grade: "F", summary: "Hollow.", agentImprovements: [] },
       },
     ],
@@ -287,40 +298,62 @@ test("loadTrialJudgeInput uses Harbor reward in the rubric and session steps", a
     path.join(dir, "agent", "session.json"),
     JSON.stringify({
       messages: [{ role: "assistant", content: "done" }],
-      steps: [{ index: 1, kind: "tool", content: "", toolCalls: [{ name: "write_file", args: { path: "hello.txt" }, ok: true }] }],
+      steps: [
+        {
+          index: 1,
+          kind: "tool-calls",
+          content: "",
+          durationMs: 1200,
+          promptTokens: 900,
+          toolCalls: [{ name: "write_file", args: { path: "hello.txt" }, ok: true }],
+        },
+      ],
       stopReason: "completed",
-      escalationCount: 1,
-      cloudUsed: false,
-      verification: { passed: true },
+      elapsedMs: 4000,
+      compactions: 0,
     }),
     "utf8",
   );
   await writeFile(path.join(dir, "verifier", "reward.txt"), "1\n", "utf8");
 
-  const packed = await loadTrialJudgeInput({
-    name: "hello-world",
-    trialDir: dir,
-    resolved: true,
-    reward: 1,
-    exception: null,
-  });
+  const packed = await loadTrialJudgeInput(
+    {
+      name: "hello-world",
+      trialDir: dir,
+      resolved: true,
+      reward: 1,
+      exception: null,
+    },
+    { maxSteps: 40 },
+  );
   assert.match(packed.scenario.goal, /hello world/);
-  assert.match(packed.scenario.rubric, /Harbor verifier reward: 1/);
   assert.match(packed.preamble, /Terminal-Bench/);
   assert.equal(packed.agentResult.steps.length, 1);
+  // The Harbor reward is the oracle, not rubric text.
+  assert.equal(packed.oracle.pass, true);
+  assert.equal(packed.oracle.source, "harbor");
+  assert.match(packed.oracle.detail, /Harbor verifier reward: 1/);
+  assert.equal(packed.efficiency.toolCalls, 1);
+  assert.equal(packed.efficiency.mutations, 1);
+  assert.ok(packed.efficiency.flags.includes("no-verification"));
+  assert.equal(packed.changeSetRoot, dir, "no /app checkpoints collected → trial dir");
 
-  const metrics = await loadTrialAgentMetrics({ trialDir: dir });
+  const metrics = await loadTrialAgentMetrics({ trialDir: dir }, { maxSteps: 40 });
   assert.equal(metrics.stepCount, 1);
-  assert.equal(metrics.escalationCount, 1);
-  assert.equal(metrics.verificationPassed, true);
+  assert.equal(metrics.efficiency.toolCalls, 1);
+  assert.equal(metrics.efficiency.budgetUsed, 1 / 40);
 
   const prompt = buildJudgePrompt({
     scenario: packed.scenario,
     agentResult: packed.agentResult,
     snapshot: { root: dir, fileCount: 0, files: [] },
+    efficiency: packed.efficiency,
+    oracle: packed.oracle,
     preamble: packed.preamble,
   });
   assert.match(prompt, /hidden tests/);
+  assert.match(prompt, /Harbor verifier reward: 1/);
+  assert.match(prompt, /no-verification/);
   assert.match(prompt, /You are grading Bitfield Agent on a Terminal-Bench task/);
 });
 

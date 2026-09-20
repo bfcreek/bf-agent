@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { defaultConfig, parseCliArgs } from "../evals/config.mjs";
+import { LOCAL_DIRNAME, localBenchRoot, localPaths } from "../evals/local-layout.mjs";
 import {
   DEFAULT_BENCHMARK_DIRNAME,
   defaultBenchmarkRoot,
@@ -21,6 +22,18 @@ import {
 test("defaultBenchmarkRoot is a sibling named halo-agent-benchmark", () => {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   assert.equal(defaultBenchmarkRoot(), path.resolve(repoRoot, "..", DEFAULT_BENCHMARK_DIRNAME));
+});
+
+test("localPaths nest under halo-agent-benchmark/local", () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const paths = localPaths(repoRoot);
+  assert.equal(localBenchRoot(repoRoot), path.join(defaultBenchmarkRoot(repoRoot), LOCAL_DIRNAME));
+  assert.equal(path.basename(path.dirname(paths.json)), LOCAL_DIRNAME);
+  assert.equal(path.basename(paths.json), "latest.json");
+  assert.equal(path.basename(paths.recommendationsMd), "recommendations-plan.md");
+  assert.equal(path.basename(paths.scoreboard), "scoreboard-history.jsonl");
+  const cfg = defaultConfig();
+  assert.equal(cfg.report.json, paths.json);
 });
 
 test("scenarioWorkspacePath nests language / t<tier> / name", () => {

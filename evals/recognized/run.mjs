@@ -254,6 +254,7 @@ async function main() {
           model: options.judgeModel,
           timeoutSeconds: options.judgeTimeoutSeconds,
           retries: options.judgeRetries,
+          maxSteps: options.maxSteps,
         });
       } catch (err) {
         task.judgeError = err?.message ?? String(err);
@@ -264,19 +265,18 @@ async function main() {
 
   for (const task of parsed.tasks) {
     try {
-      const metrics = await loadTrialAgentMetrics(task);
+      const metrics = await loadTrialAgentMetrics(task, { maxSteps: options.maxSteps });
       task.steps = metrics.stepCount;
       task.stopReason = metrics.stopReason;
-      task.escalationCount = metrics.escalationCount;
-      task.cloudUsed = metrics.cloudUsed;
-      task.verificationPassed = metrics.verificationPassed;
+      task.efficiency = metrics.efficiency;
     } catch {
       task.steps = 0;
+      task.efficiency = null;
     }
   }
 
   const overall = summarizeTasks(parsed.tasks);
-  const scoreboardPath = path.join(REPO_ROOT, TB_SCOREBOARD);
+  const scoreboardPath = TB_SCOREBOARD;
   let history = [];
   try {
     history = await loadScoreboardHistory(scoreboardPath);
@@ -309,8 +309,9 @@ async function main() {
       containerOllama: ollamaUrlForContainer(options.baseUrl),
     },
     notes: [
-      "Harbor reward is the shareable mechanical score (hidden tests).",
-      "Cursor judge scores are qualitative (process + artifacts), same schema as the development bench.",
+      "Harbor reward is the shareable mechanical score (hidden tests). It fixes the judge's outcome band (pass 70–100, fail 0–50).",
+      "Cursor judge outcome and process scores are independent: outcome = did the deliverable satisfy the task; process = how efficiently the agent got there.",
+      "Efficiency flags (spinning, blind-edit, no-verification, …) are computed from the agent trace, not by the judge.",
       "Architecture patterns are telemetry-backed approach signals, not task-specific tips.",
       "Ollama must be reachable from Docker (host.docker.internal). On Linux, bind Ollama to 0.0.0.0 if the container cannot connect.",
       "bf-agent command timeouts are raised for this suite via HALO_COMMAND_TIMEOUT / HALO_MAX_COMMAND_TIMEOUT.",
@@ -333,10 +334,15 @@ async function main() {
         sample: sampled?.count ?? parsed.tasks.length,
         seed: sampled?.seed ?? null,
         avgScore: overall.judgeAvg,
+        avgProcessScore: overall.processAvg,
         passRate: overall.resolveRate,
-        cloudRate: overall.cloudRate,
-        avgEscalations: overall.avgEscalations,
         avgSteps: overall.avgSteps,
+        avgToolCalls: overall.avgToolCalls,
+        avgPromptTokens: overall.avgPromptTokens,
+        verifiedRate: overall.verifiedRate,
+        avgHeuristicScore: overall.avgHeuristicScore,
+        flagCounts: overall.flagCounts,
+        maxSteps: options.maxSteps,
         scenarios: overall.tasks,
         ...HARBOR_RUN_FLAGS,
       },

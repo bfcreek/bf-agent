@@ -11,61 +11,56 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildArchitectureInsights } from "./patterns.mjs";
+import { localPaths } from "./local-layout.mjs";
 import { latestReportPaths } from "./recognized/layout.mjs";
 import { TB_SCOREBOARD, loadScoreboardHistory } from "./scoreboard.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-/** Primary edit targets keyed by judge `area` (case-insensitive). */
+/**
+ * Primary edit targets keyed by judge `area` (case-insensitive). The areas
+ * match the judge schema: system prompt | tools | loop | compaction | routing | other.
+ */
 export const AREA_TARGETS = {
-  "system prompt": [
-    "src/context-builder.mjs",
-    "src/agent-loop.mjs",
-  ],
+  "system prompt": ["src/context-builder.mjs", "src/model-tuning.mjs"],
   tools: [
     "src/tools/builtin.mjs",
     "src/tools/shell.mjs",
     "src/tools/fs.mjs",
+    "src/tools/output.mjs",
     "src/tool-registry.mjs",
   ],
-  planning: [
-    "src/prompt-enhancements.mjs",
-    "src/agent-loop.mjs",
-  ],
-  acceptance: [
-    "src/acceptance.mjs",
-    "src/agent-loop.mjs",
-  ],
-  escalation: [
-    "src/escalation.mjs",
-    "src/agent-loop.mjs",
-    "src/model-routing.mjs",
-  ],
-  memory: ["src/memory-store.mjs"],
+  loop: ["src/agent-loop.mjs", "src/index.mjs"],
   compaction: ["src/compaction.mjs"],
+  routing: ["src/model-routing.mjs", "src/tier-models.mjs", "src/models-config.mjs"],
+  bench: ["evals/dev-bench.mjs", "evals/judge.mjs", "evals/scenarios"],
   other: [],
 };
 
+/** Which runtime lever each pattern id implicates. */
 const INSIGHT_AREAS = {
-  "verified-but-weak-score": "acceptance",
-  "verification-missed-precheck": "acceptance",
-  "precheck-ok-gate-fail": "acceptance",
-  "hollow-completion": "acceptance",
-  "budget-burned-unverified": "acceptance",
-  "acceptance-mostly-failing": "acceptance",
-  "tests-mostly-failed": "acceptance",
-  "costly-escalation-still-failed": "escalation",
-  "escalation-became-cloud": "escalation",
-  "failed-without-escalation": "escalation",
-  "stable-without-escalation": "escalation",
-  "expensive-passes": "planning",
+  "hollow-completion": "system prompt",
+  "budget-exhausted-failures": "tools",
+  "expensive-passes": "tools",
+  "spinning-on-failures": "tools",
+  "blind-edits": "tools",
+  "unverified-changes": "system prompt",
+  "redundant-reads": "compaction",
+  "tool-call-friction": "system prompt",
+  "context-pressure": "compaction",
+  "tests-mostly-failed": "routing",
+  "judge-oracle-disagreement": "bench",
+  "stable-and-lean": "other",
+  "history-efficiency-regression": "tools",
+  "history-efficiency-gain": "other",
+  "history-outcome-regression": "loop",
 };
 
-const SKIP_INSIGHT_IDS = new Set(["stable-without-escalation"]);
+const SKIP_INSIGHT_IDS = new Set(["stable-and-lean", "history-efficiency-gain"]);
 
 const PATTERN_GUIDANCE = [
-  "Pending items are architecture-pattern levers — change the closed loop (acceptance, escalation, memory, critique), not a specific Terminal-Bench task.",
-  "Do not add TASK_HINT_RULES or prompt text keyed to a task name from this sample.",
+  "Pending items are architecture-pattern levers — change the runtime surface the metrics implicate (tool feedback, prompt wording, compaction, routing), not a specific benchmark task.",
+  "Do not add prompt text keyed to a task name from this sample, and do not add supervisory machinery (gates, nudges, mid-run model swaps) to the loop; those belong in caller hooks if anywhere.",
   "Skip items with status `skip` — the pattern says the current approach is holding.",
   "Judge notes (if any) are corroborating color, not a punch list. Ignore advice that only fits one task.",
   "Keep changes minimal and focused. Run npm test after edits; add a focused test when the change is testable.",
@@ -74,8 +69,8 @@ const PATTERN_GUIDANCE = [
 
 const DEFAULT_GUIDANCE = [
   "Judge recommendations below are concrete runtime fixes — implement those in the mapped target files.",
-  "Architecture insights are pattern-level approach signals (acceptance, escalation, memory, critique). Use them to decide *whether* to change strategy, not as a punch list of edits.",
-  "Prefer prompt-enhancements.mjs for task-type hints; context-builder/agent-loop for system prompt.",
+  "Architecture insights are pattern-level approach signals (tool feedback, prompt, compaction, routing). Use them to decide *whether* to change strategy, not as a punch list of edits.",
+  "System-prompt changes go in context-builder.mjs (or a per-model overlay in model-tuning.mjs); tool feedback goes in src/tools; loop mechanics in agent-loop.mjs.",
   "Keep changes minimal and focused — one recommendation per logical commit when possible.",
   "Run npm test after edits; add a focused test when the change is testable.",
   "Skip recommendations that are vague, duplicate existing behavior, or conflict with LIMITATIONS.md.",
@@ -145,10 +140,11 @@ export function extractRecommendations(report) {
 export function areaForInsight(insight) {
   const id = String(insight?.id ?? "");
   if (INSIGHT_AREAS[id]) return INSIGHT_AREAS[id];
-  if (/memory/.test(id)) return "memory";
-  if (/critique|planning/.test(id)) return "planning";
-  if (/acceptance|verif|contract|hollow|budget/.test(id)) return "acceptance";
-  if (/escalation|cloud/.test(id)) return "escalation";
+  if (/compaction|context|reads/.test(id)) return "compaction";
+  if (/tool|edit|spinning|budget/.test(id)) return "tools";
+  if (/prompt|verif|hollow/.test(id)) return "system prompt";
+  if (/routing|model|tests/.test(id)) return "routing";
+  if (/judge|oracle|ablation/.test(id)) return "bench";
   return "other";
 }
 
@@ -342,7 +338,7 @@ export async function processRecommendations(options = {}) {
   if (options.patterns && (!Array.isArray(report.architectureInsights) || report.architectureInsights.length === 0)) {
     let history = [];
     try {
-      history = await loadScoreboardHistory(path.join(repoRoot, TB_SCOREBOARD));
+      history = await loadScoreboardHistory(TB_SCOREBOARD);
     } catch {
       history = [];
     }
@@ -386,8 +382,8 @@ Usage:
 
 Options:
   --report <path>   Report JSON (default: ../halo-agent-benchmark/recognized/terminal-bench/latest.json)
-  --json <path>     Write plan JSON
-  --markdown <path> Write plan markdown
+  --json <path>     Write plan JSON (default: ../halo-agent-benchmark/local/recommendations-plan.json)
+  --markdown <path> Write plan markdown (default: ../halo-agent-benchmark/local/recommendations-plan.md)
   --patterns        Plan from architecture-pattern levers, not per-task judge tips
   --help            Show this help
 `);
@@ -415,8 +411,9 @@ async function main() {
   }
 
   if (!options.json && !options.markdown) {
-    options.json = path.join(REPO_ROOT, "bench-recommendations-plan.json");
-    options.markdown = path.join(REPO_ROOT, "bench-recommendations-plan.md");
+    const paths = localPaths(REPO_ROOT);
+    options.json = paths.recommendationsJson;
+    options.markdown = paths.recommendationsMd;
   }
 
   try {

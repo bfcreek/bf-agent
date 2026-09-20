@@ -68,10 +68,7 @@ async function runTask({ task, model, options }) {
       workspaceRoot: dir,
       maxSteps: options.maxSteps,
       projectIndex: false, // no embedding-model dependency for evals
-      planning: true,
       think: "max",
-      escalationCloud: true,
-      cloudOnly: true,
       onStep: options.verbose
         ? (step) => {
             for (const call of step.toolCalls) {

@@ -132,7 +132,7 @@ class HaloAgent(BaseInstalledAgent):
             f"--session harbor --cwd \"$PWD\" "
             f"--model {shlex.quote(model)} "
             f"--tier-preset {shlex.quote(preset)} "
-            f"--think max --escalation-cloud "
+            f"--think max "
             f"--base-url {shlex.quote(self._base_url)} "
             f"--max-steps {self._max_steps} "
             f"--num-ctx {self._num_ctx} "

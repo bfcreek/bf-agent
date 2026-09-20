@@ -9,7 +9,7 @@ import {
   chunkText,
   DEFAULT_EMBEDDING_MODEL,
 } from "../project-index.mjs";
-import { truncateOutput } from "./fs.mjs";
+import { truncateOutput } from "./output.mjs";
 import { decodeHtmlEntities, stripTags } from "./web-search.mjs";
 
 const FETCH_TIMEOUT_MS = 20_000;

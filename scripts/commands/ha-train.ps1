@@ -28,9 +28,10 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TbMini = Join-Path $RepoRoot "bin\bench-tb-mini.ps1"
 $ProcessScript = Join-Path $RepoRoot "evals\process-recommendations.mjs"
-$PlanJson = Join-Path $RepoRoot "bench-recommendations-plan.json"
-$PlanMd = Join-Path $RepoRoot "bench-recommendations-plan.md"
-$TrainLog = Join-Path $RepoRoot "ha-train-log.md"
+$OutDir = Join-Path (Split-Path $RepoRoot -Parent) "halo-agent-benchmark\local"
+$PlanJson = Join-Path $OutDir "recommendations-plan.json"
+$PlanMd = Join-Path $OutDir "recommendations-plan.md"
+$TrainLog = Join-Path $OutDir "ha-train-log.md"
 
 if (-not (Test-Path $TbMini)) {
     throw "Missing bench launcher: $TbMini"
@@ -47,6 +48,8 @@ if ($Iterations -lt 1) {
 if ($StartFrom -lt 1) {
     throw "-StartFrom must be at least 1."
 }
+
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 function Invoke-TrainIteration {
     param(
@@ -177,10 +180,10 @@ for ($i = $StartFrom; $i -le $endAt; $i++) {
 
 Write-Host ""
 if ($Iterations -eq 1) {
-    Write-Host "Done (seed $iterationSeed, count $Count). Assimilate pending pattern levers in bench-recommendations-plan.md, then run the next iteration." -ForegroundColor Green
+    Write-Host "Done (seed $iterationSeed, count $Count). Assimilate pending pattern levers in $PlanMd, then run the next iteration." -ForegroundColor Green
 } else {
     Write-Host "Done - completed iterations $StartFrom..$endAt. See $TrainLog for the bench/plan log." -ForegroundColor Green
-    Write-Host "Assimilate each bench-recommendations-plan.md snapshot before the next full loop if plans changed per iteration." -ForegroundColor DarkGray
+    Write-Host "Assimilate each recommendations-plan.md snapshot before the next full loop if plans changed per iteration." -ForegroundColor DarkGray
 }
 
 # Always exit 0 so unattended loops and agents continue after bench/judge/plan failures.

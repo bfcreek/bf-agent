@@ -40,14 +40,14 @@ test("parseCliArgs loads single scenario from config file", () => {
     "base-url": "http://example:11434",
     "max-steps": 5,
     "no-index": true,
-    "show-plan": true,
+    "no-checkpoints": true,
   });
   assert.deepEqual(errors, []);
   assert.equal(values.model, "llama3.2");
   assert.equal(values.baseUrl, "http://example:11434");
   assert.equal(values.maxSteps, 5);
   assert.equal(values.noIndex, true);
-  assert.equal(values.showPlan, true);
+  assert.equal(values.noCheckpoints, true);
 });
 
 test("normalizeConfigValues reports invalid values", () => {
@@ -81,7 +81,7 @@ test("ensureConfigFile creates a commented template", async () => {
     const text = await readFile(configPath, "utf8");
     assert.match(text, /Bitfield Agent user configuration/);
     assert.match(text, /base-url:/);
-    assert.match(text, /show-plan:/);
+    assert.match(text, /no-checkpoints:/);
     assert.match(text, /instructions\.md/);
 
     await ensureConfigFile();

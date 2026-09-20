@@ -1,40 +1,19 @@
 /**
  * Shell tool: run a command through the system shell, scoped to the
- * workspace. Guardrails: workspace-bound cwd, a hard timeout, capped output,
- * and a deletion gate. Safety wins over task instructions: deletion runs
- * only when the user explicitly named the target files in their request
- * (or approved the call at the ask-mode prompt); anything broader — "clean
- * up", wildcards, files the user said to keep — is refused so the agent
- * asks the user instead.
+ * workspace. Guardrails: workspace-bound cwd, a hard timeout, output spilled
+ * to a file when long, and a deletion gate. Safety wins over task
+ * instructions: deletion runs only when the user explicitly named the target
+ * files in their request (or approved the call at the ask-mode prompt);
+ * anything broader — "clean up", wildcards, files the user said to keep — is
+ * refused so the agent asks the user instead.
  */
 
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
 
-import { looksVacuousArchiveExtract, looksVacuousCliStdout } from "../prompt-enhancements.mjs";
-import { conflictMarkerNote, goalAllowsPosixShell, resolveWithinRoot, truncateMiddle } from "./fs.mjs";
+import { resolveWithinRoot } from "./fs.mjs";
 import { analyzeFileMention, isTooBroadTarget } from "./mutation-safety.mjs";
-
-/**
- * Reject run_command calls that mistakenly pass write_file/edit_file fields.
- * @param {object} [args]
- * @returns {string|null}
- */
-export function runCommandSchemaIssue(args) {
-  const a = args ?? {};
-  const command = a.command ?? a.cmd;
-  if (command && String(command).trim()) return null;
-  const foreign = [];
-  if (a.content != null) foreign.push("content");
-  if (a.path != null) foreign.push("path");
-  if (a.old_string != null) foreign.push("old_string");
-  if (a.new_string != null) foreign.push("new_string");
-  if (!foreign.length) return null;
-  return (
-    `run_command requires a "command" string, not write_file/edit_file fields (${foreign.join(", ")}). ` +
-    "Use write_file for file content, then run_command with the shell command."
-  );
-}
+import { createOutputSpiller } from "./output.mjs";
 
 function positiveIntEnv(name, fallback) {
   const raw = process.env[name];
@@ -48,7 +27,7 @@ const MAX_TIMEOUT_SECONDS = positiveIntEnv("HALO_MAX_COMMAND_TIMEOUT", 300);
 
 /**
  * Wall-clock the run keeps for itself after the last command: a model turn to
- * read the result and write the deliverable, plus the session save.
+ * read the result and answer, plus the session save.
  */
 export const DEADLINE_COMMAND_RESERVE_MS = 20_000;
 /** Below this much remaining budget a command cannot finish and be acted on. */
@@ -56,12 +35,8 @@ export const DEADLINE_MIN_COMMAND_MS = 5_000;
 
 /**
  * Fit a requested command timeout inside the run's remaining wall-clock budget.
- *
- * One install or build with a generous `timeout_seconds` can outlive the whole
- * run (a 1500s apt retry inside a 900s trial). The run owns the budget, not the
- * command, so the timeout is clamped to what is left after a reserve for the
- * final turn. Returns `{ timeoutMs, clamped, remainingMs }`, or
- * `{ exhausted: true, remainingMs }` when there is no room for another command.
+ * The run owns the budget, not the command, so the timeout is clamped to what
+ * is left after a reserve for the final turn.
  *
  * @param {object} input
  * @param {number} input.requestedMs
@@ -87,59 +62,15 @@ export function fitTimeoutToDeadline({ requestedMs, deadlineAt, now = Date.now()
  * REPL can never receive input — it just hangs until the timeout.
  */
 const REPL_COMMAND_NAMES = new Set([
-  "node",
-  "deno",
-  "bun",
-  "python",
-  "python3",
-  "py",
-  "ipython",
-  "irb",
-  "pry",
-  "ghci",
-  "lua",
-  "php",
-  "powershell",
-  "pwsh",
-  "cmd",
-  "bash",
-  "sh",
-  "zsh",
-  "fish",
+  "node", "deno", "bun", "python", "python3", "py", "ipython", "irb", "pry", "ghci",
+  "lua", "php", "powershell", "pwsh", "cmd", "bash", "sh", "zsh", "fish",
 ]);
 
 /** Flags that request an interactive session — never useful here. */
 const INTERACTIVE_ONLY_FLAGS = new Set(["-i", "--interactive"]);
 
 /**
- * Block bash/.sh invocations on Windows unless the user asked for POSIX shell.
- * Models otherwise write and run bash even when run_command is PowerShell.
- *
- * @param {string} command
- * @param {string} [goal]
- * @param {{ platform?: string }} [options]
- * @returns {string|null}
- */
-export function windowsBashCommandIssue(command, goal, { platform = process.platform } = {}) {
-  if (platform !== "win32") return null;
-  if (goalAllowsPosixShell(goal)) return null;
-  const text = String(command ?? "");
-  const usesBash =
-    /(?:^|[;|&\n]\s*)(?:bash|sh)(?:\s|$)/.test(text) ||
-    /(?:^|[;|&\n\s])[\w./\\-]+\.(?:sh|bash)(?:\s|$|"|')/.test(text);
-  if (!usesBash) return null;
-  return (
-    "This is Windows PowerShell. Do not run bash/.sh unless the user asked for bash. " +
-    "Write a .ps1 script or use PowerShell syntax (chain with ';'), then retry."
-  );
-}
-
-/**
- * Detect command segments that would start an interactive REPL or shell:
- * a bare interpreter (`node`, `python`, `bash`, …) with no script path,
- * no inline code, and no other arguments (or only interactive flags).
- * Such commands hang until the timeout, wasting an entire tool step.
- *
+ * Detect command segments that would start an interactive REPL or shell.
  * @param {string} command
  * @returns {string|null} The offending segment, or null when none found.
  */
@@ -159,171 +90,17 @@ export function findInteractiveCommand(command) {
 }
 
 /**
- * Shell heredocs in tool-call JSON usually arrive mangled. Prefer a script file.
- * @param {string} command
- * @returns {string|null}
- */
-export function findHeredocCommand(command) {
-  const text = String(command ?? "");
-  if (/<<-?\s*['"]?\w+/.test(text) || /python3?\s+-\s*<</.test(text)) return text;
-  return null;
-}
-
-/**
- * 7z extract/test without a password flag may hang on an interactive prompt.
- * @param {string} command
- * @returns {string|null} Error message when the command should be rewritten.
- */
-export function sevenZipMissingPasswordFlag(command) {
-  const text = String(command ?? "");
-  if (!/\b7z\b/i.test(text)) return null;
-  if (/(?:^|\s)-p(?:\S|\s)/.test(text)) return null;
-  if (!/\b[xtb]\b/i.test(text)) return null;
-  return (
-    "7z extract/test without -p may hang waiting for a password prompt (no TTY input). " +
-    "Use -p'' to fail fast without a password, or -pYOURPASSWORD when you have one."
-  );
-}
-
-/**
- * Stdout/stderr that shows an interactive password prompt — command likely hung until timeout.
- * @param {string} stdout
- * @param {string} [stderr]
- * @returns {string|null}
- */
-export function interactivePasswordPromptNote(stdout, stderr = "") {
-  const combined = `${stdout ?? ""}\n${stderr ?? ""}`;
-  if (!/enter password|password:\s*$/im.test(combined)) return null;
-  return (
-    "Output shows an interactive password prompt (no TTY input). " +
-    "Re-run with -pPASSWORD or -p'' on 7z/unzip, or use john/hashcat instead of typing at a prompt."
-  );
-}
-
-/**
- * Exit 0 with error-like stderr — often masks script failures (missing wordlist, etc.).
- * @param {number|null} exitCode
- * @param {string} [stderr]
- * @returns {string|null}
- */
-export function exitZeroWithStderrNote(exitCode, stderr = "") {
-  if (exitCode !== 0) return null;
-  const err = String(stderr ?? "").trim();
-  if (!err) return null;
-  if (/no such file|not found|fatal|error:|cannot open|wordlist/i.test(err)) {
-    return `Exited 0 but stderr reports a problem — treat as failure, not success: ${err.slice(0, 240)}`;
-  }
-  return null;
-}
-
-/**
- * Surface stderr prominently on non-zero exits (import errors, etc.).
- * @param {number|null} exitCode
- * @param {string} [stderr]
- * @returns {string|null}
- */
-export function nonZeroExitStderrNote(exitCode, stderr = "") {
-  if (exitCode === 0) return null;
-  const err = String(stderr ?? "").trim();
-  if (!err) return null;
-  if (/ModuleNotFoundError|No module named|ImportError/i.test(err)) {
-    const torchHint = /\btorch\b/i.test(err) ? " pip install torch in the workspace, then retry." : "";
-    return `Command failed — read stderr:${torchHint} ${err.slice(0, 320)}`;
-  }
-  return `Command failed — stderr: ${err.slice(0, 320)}`;
-}
-
-/**
- * Block copying binary checkpoints to JSON weight paths.
- * @param {string} command
- * @returns {string|null}
- */
-export function binaryCheckpointCopyToJsonIssue(command) {
-  const text = String(command ?? "");
-  if (!/\b(?:cp|mv)\b/.test(text)) return null;
-  if (!/\b[\w./-]+\.json\b/i.test(text)) return null;
-  if (/\b[\w./-]+\.(?:pth|pt|ckpt|bin|safetensors)\b/i.test(text)) {
-    return (
-      "Do not cp/mv binary checkpoints (.pth/.pt) to a .json path. " +
-      "Export weights as JSON and validate with python -c \"import json; json.load(open('weights.json'))\"."
-    );
-  }
-  return null;
-}
-
-/**
- * CLIs that should print to stdout.
- * @param {string} command
- * @param {number|null} exitCode
- * @param {string} stdout
- * @returns {string|null}
- */
-export function cliEmptyStdoutNote(command, exitCode, stdout) {
-  if (exitCode !== 0) return null;
-  const text = String(command ?? "");
-  if (looksVacuousArchiveExtract(stdout, text)) {
-    return (
-      "Exited 0 but 7z reported no files extracted (No files to process / Files: 0). " +
-      "Wrong password or missing -p flag — try -p'' to fail fast or supply the cracked password."
-    );
-  }
-  if (/\b(test\.mjs|test\.py|npm\s+test|node\s+--test|dotnet\s+test|pytest)\b/i.test(text)) {
-    return null;
-  }
-  if (
-    !(/\b(node|nodejs|python3?|py)\s+\S+\.(mjs|js|cjs|py)\b/i.test(text) || /\bdotnet\s+run\b/i.test(text))
-  ) {
-    return null;
-  }
-  const out = String(stdout ?? "").trim();
-  if (!out) {
-    return (
-      "Exited 0 with empty stdout. If this CLI should print, the entry-point guard is likely wrong on Windows: " +
-      "use import.meta.url === pathToFileURL(process.argv[1]).href (not new URL(process.argv[1])), " +
-      "and resolve sibling files with fileURLToPath(new URL('./file', import.meta.url))."
-    );
-  }
-  if (out === "[]") {
-    return (
-      "Exited 0 but stdout is an empty JSON array []. If the input has records, property names likely did not bind. " +
-      "In C# deserialize with JsonSerializerOptions { PropertyNameCaseInsensitive = true } and serialize with JsonNamingPolicy.CamelCase. " +
-      "Read the JSON file and compare stdout to expected records before claiming success."
-    );
-  }
-  if (looksVacuousCliStdout(out, text)) {
-    return (
-      "Exited 0 but stdout looks empty of catalog records (qty=0 and no SKUs). " +
-      "JSON property names likely did not bind — deserialize with PropertyNameCaseInsensitive = true, " +
-      "then re-run the same command and confirm SKUs appear before finishing."
-    );
-  }
-  return null;
-}
-
-/**
  * Command names (PowerShell and POSIX, incl. aliases) that delete files.
  * Compared against the first word of each shell segment, basename only.
  */
-const DELETE_COMMAND_NAMES = new Set([
-  "rm",
-  "rmdir",
-  "rd",
-  "del",
-  "erase",
-  "unlink",
-  "shred",
-  "trash",
-  "remove-item",
-  "ri",
-]);
+const DELETE_COMMAND_NAMES = new Set(["rm", "rmdir", "rd", "del", "erase", "unlink", "shred", "trash", "remove-item", "ri"]);
 
 /**
  * Best-effort detection of file-deletion commands. Splits the command line
- * into segments at shell separators (;, |, &&, ||, newlines, subshells,
- * script blocks) and checks the leading word of each. Catches `rm`/`del`/
- * `Remove-Item` variants, `git rm`/`git clean`, and `find ... -delete`; it
- * cannot catch every escape hatch (e.g. inline scripts), so the system
- * prompt carries the same rule for the model.
+ * into segments at shell separators and checks the leading word of each.
+ * Catches `rm`/`del`/`Remove-Item` variants, `git rm`/`git clean`, and
+ * `find ... -delete`; it cannot catch every escape hatch (inline scripts),
+ * so the system prompt carries the same rule for the model.
  *
  * @param {string} command
  * @returns {string|null} The offending segment, or null when none found.
@@ -357,37 +134,20 @@ function commandBaseName(segment) {
     .replace(/\.exe$/, "");
 }
 
+/** PowerShell common parameters that take a value (not a file path). */
+const PS_PARAMS_WITH_VALUE = new Set(["-erroraction", "-ea", "-warningaction", "-wa", "-informationaction", "-ia"]);
+
+/** Bare PowerShell action names that are not deletion targets. */
+const PS_ACTION_VALUES = new Set(["silentlycontinue", "continue", "stop", "inquire", "ignore", "suspend", "break"]);
+
 /**
  * File/directory arguments of a deletion segment: everything that is not a
- * flag (`-rf`, `-Force`, DOS switches like `/s`), with quotes and `./`
- * prefixes stripped. `git rm`/`git clean` skip the subcommand word;
- * `find … -delete` reports no targets because it deletes whatever a search
- * matches, which the user cannot have named.
+ * flag, with quotes and `./` prefixes stripped. `find … -delete` reports no
+ * targets because it deletes whatever a search matches.
  *
  * @param {string} segment
  * @returns {string[]}
  */
-/** PowerShell common parameters that take a value (not a file path). */
-const PS_PARAMS_WITH_VALUE = new Set([
-  "-erroraction",
-  "-ea",
-  "-warningaction",
-  "-wa",
-  "-informationaction",
-  "-ia",
-]);
-
-/** Bare PowerShell action names that are not deletion targets. */
-const PS_ACTION_VALUES = new Set([
-  "silentlycontinue",
-  "continue",
-  "stop",
-  "inquire",
-  "ignore",
-  "suspend",
-  "break",
-]);
-
 export function extractDeleteTargets(segment) {
   const words = segmentWords(segment);
   const base = commandBaseName(segment);
@@ -420,10 +180,8 @@ export function extractDeleteTargets(segment) {
  * - `none`: the command deletes nothing.
  * - `authorized`: every deletion target is explicitly named in the goal,
  *   with no protective language around it.
- * - `protected`: a target is named in the goal with protective language
- *   ("do not delete", "keep", "required", …) — a direct contradiction.
- * - `unauthorized`: a target the user never named (or too broad to name,
- *   like `*` or a `find -delete` / piped delete) — ambiguity, ask first.
+ * - `protected`: a target is named in the goal with protective language.
+ * - `unauthorized`: a target the user never named (or too broad to name).
  *
  * @param {string} command Full command line.
  * @param {string} [goal] The user's request for this run.
@@ -463,12 +221,7 @@ export function adaptPowerShellCommand(command, { platform = process.platform } 
   const text = String(command ?? "");
   if (platform !== "win32") return { command: text, adapted: false };
   if (!/\s&&\s/.test(text)) return { command: text, adapted: false };
-  const adapted = text.replace(/\s&&\s/g, "; ");
-  return {
-    command: adapted,
-    adapted: true,
-    note: "Adapted && to ; for PowerShell.",
-  };
+  return { command: text.replace(/\s&&\s/g, "; "), adapted: true, note: "Adapted && to ; for PowerShell." };
 }
 
 /**
@@ -477,30 +230,25 @@ export function adaptPowerShellCommand(command, { platform = process.platform } 
  * @param {string} options.workspaceRoot Directory commands run in.
  */
 export function registerShellTools(registry, { workspaceRoot }) {
+  const spill = createOutputSpiller({ workspaceRoot });
+
   registry.register({
     name: "run_command",
     requiresApproval: true,
     description:
       `Run a command through the system shell (${SHELL_NAME}; use ${IS_WINDOWS ? "PowerShell" : "POSIX sh"} syntax) ` +
-      "in the workspace directory and return its status ('success' or 'FAILED with exit code N'), " +
-      "exit code, stdout, and stderr. Commands run with no input, so never launch a bare " +
-      "interpreter or shell (node, python, bash) without a script or inline code. " +
-      (IS_WINDOWS
-        ? "On Windows do not invoke bash or .sh unless the user asked for bash; write and run .ps1 instead. "
-        : "") +
+      "in the workspace directory and return its status, exit code, stdout, and stderr. " +
+      "Commands run with no input, so never launch a bare interpreter or shell (node, python, bash) " +
+      "without a script or inline code. " +
       `Commands are killed after the timeout (default ${DEFAULT_TIMEOUT_SECONDS}s). ` +
       "For servers that must keep running, start them in the background " +
-      "(`nohup cmd >server.log 2>&1 &` on POSIX, or Start-Process on Windows) so they do not " +
-      "burn the timeout; then check the port with a short command. " +
-      "Do not use shell heredocs (`python - <<'EOF'`); write a script file and run that instead.",
+      "(`nohup cmd >server.log 2>&1 &` on POSIX, or Start-Process on Windows) and check them with a short command. " +
+      "Long output is saved to a file and returned as head + tail + path.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "The command line to execute." },
-        cwd: {
-          type: "string",
-          description: "Working directory relative to the workspace root. Defaults to the root.",
-        },
+        cwd: { type: "string", description: "Working directory relative to the workspace root. Defaults to the root." },
         timeout_seconds: {
           type: "integer",
           description: `Kill the command after this many seconds (default ${DEFAULT_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}).`,
@@ -508,10 +256,8 @@ export function registerShellTools(registry, { workspaceRoot }) {
       },
       required: ["command"],
     },
-    async execute({ command, cwd, timeout_seconds, ...rest }) {
-      const schemaIssue = runCommandSchemaIssue({ command, cwd, timeout_seconds, ...rest });
-      if (schemaIssue) throw new Error(schemaIssue);
-      if (!command || !command.trim()) throw new Error("command must not be empty.");
+    async execute({ command, cwd, timeout_seconds }) {
+      if (!command || !String(command).trim()) throw new Error("command must not be empty.");
       // A REPL can never succeed here (no TTY input), so this gate applies
       // even when a human approved the call — it saves a guaranteed timeout.
       const interactive = findInteractiveCommand(command);
@@ -522,30 +268,11 @@ export function registerShellTools(registry, { workspaceRoot }) {
             'python script.py) or pass inline code (e.g. node -e "...", python -c "...").',
         );
       }
-      const heredoc = findHeredocCommand(command);
-      if (heredoc) {
-        throw new Error(
-          "This command uses a shell heredoc (`<<`), which is unreliable in tool-call JSON. " +
-            "write_file a script (e.g. script.py) and run `python script.py` instead. " +
-            "Do not retry the same heredoc.",
-        );
-      }
-      const sevenZip = sevenZipMissingPasswordFlag(command);
-      if (sevenZip) throw new Error(sevenZip);
-      const binaryJson = binaryCheckpointCopyToJsonIssue(command);
-      if (binaryJson) throw new Error(binaryJson);
-      const posixShell = windowsBashCommandIssue(command, registry.runContext?.goal);
-      if (posixShell) throw new Error(posixShell);
       const { command: shellCommand, adapted, note: adaptNote } = adaptPowerShellCommand(command);
       // Deletion gate for unattended runs (in ask mode, reaching execute
-      // means the human already approved this exact call). Deletes the user
-      // explicitly asked for go ahead; contradictions and ambiguity are
-      // refused so the model asks the user instead.
+      // means the human already approved this exact call).
       if (!registry.approvalHandler) {
-        const { verdict, segment, target } = classifyDeleteCommand(
-          command,
-          registry.runContext?.goal,
-        );
+        const { verdict, segment, target } = classifyDeleteCommand(command, registry.runContext?.goal);
         if (verdict === "protected") {
           throw new Error(
             `This command ('${segment}') deletes '${target}', but the user's instructions say to ` +
@@ -572,50 +299,38 @@ export function registerShellTools(registry, { workspaceRoot }) {
         }
       }
       const requestedMs =
-        Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) *
-        1000;
-      const fit = fitTimeoutToDeadline({
-        requestedMs,
-        deadlineAt: registry.runContext?.deadlineAt,
-      });
+        Math.min(Math.max(1, timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS) * 1000;
+      const fit = fitTimeoutToDeadline({ requestedMs, deadlineAt: registry.runContext?.deadlineAt });
       if (fit.exhausted) {
         throw new Error(
           `Only ${Math.round(fit.remainingMs / 1000)}s of this run's wall-clock budget remain — ` +
-            "there is no time for another command to finish and be acted on. Do not start installs " +
-            "or builds. Write the final deliverable with what you already have and give your final answer now.",
+            "there is no time for another command to finish and be acted on. Give your final answer now.",
         );
       }
       const clampNote = fit.clamped
         ? `timeout_seconds was clamped from ${Math.round(requestedMs / 1000)}s to ${Math.round(fit.timeoutMs / 1000)}s: ` +
-          `only ${Math.round(fit.remainingMs / 1000)}s of the run's wall-clock budget remain. ` +
-          "Prefer commands that finish well within that; a longer install/build cannot complete in this run."
+          `only ${Math.round(fit.remainingMs / 1000)}s of the run's wall-clock budget remain.`
         : null;
-      return runCommand(shellCommand, {
-        cwd: dir,
-        timeoutMs: fit.timeoutMs,
-        adaptNote: [adapted ? adaptNote : null, clampNote].filter(Boolean).join(" ") || null,
-      });
+      const result = await runCommand(shellCommand, { cwd: dir, timeoutMs: fit.timeoutMs });
+      result.stdout = await spill(result.stdout, "stdout");
+      result.stderr = await spill(result.stderr, "stderr");
+      const notes = [adapted ? adaptNote : null, clampNote].filter(Boolean);
+      if (notes.length) result.note = notes.join(" ");
+      return result;
     },
   });
 
   return registry;
 }
 
-function runCommand(command, { cwd, timeoutMs, adaptNote = null }) {
+function runCommand(command, { cwd, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const child = IS_WINDOWS
       ? // `exit $LASTEXITCODE` propagates the native command's exit code,
         // which powershell.exe otherwise reports as 0.
         spawn(
           "powershell.exe",
-          [
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            `${command}; exit $LASTEXITCODE`,
-          ],
+          ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", `${command}; exit $LASTEXITCODE`],
           { cwd, windowsHide: true },
         )
       : spawn(command, {
@@ -643,35 +358,11 @@ function runCommand(command, { cwd, timeoutMs, adaptNote = null }) {
       // `status` leads the result so a failure cannot be mistaken for
       // success just because the tool call itself succeeded (ok: true).
       const status = timedOut
-        ? `TIMED OUT after ${Math.round(timeoutMs / 1000)}s and was killed — treat this as a failure; do not re-run the same command unchanged`
+        ? `TIMED OUT after ${Math.round(timeoutMs / 1000)}s and was killed`
         : code === 0
           ? "success"
           : `FAILED with exit code ${code}`;
-      const notes = timedOut
-        ? []
-        : [
-            cliEmptyStdoutNote(command, code, stdout),
-            interactivePasswordPromptNote(stdout, stderr),
-            exitZeroWithStderrNote(code, stderr),
-            nonZeroExitStderrNote(code, stderr),
-            conflictMarkerNote(`${stdout}\n${stderr}`),
-          ].filter(Boolean);
-      const note = notes.length > 0 ? notes.join(" ") : null;
-      const outLimit = 12_000;
-      const errLimit = 8_000;
-      const build = /\b(make|cmake|gcc|g\+\+|cargo|\.\/configure)\b/i.test(command);
-      const cappedStdout = truncateMiddle(stdout, outLimit);
-      const cappedStderr = truncateMiddle(stderr, errLimit);
-      const io = build && stderr
-        ? { stderr: cappedStderr, stdout: cappedStdout }
-        : { stdout: cappedStdout, stderr: cappedStderr };
-      resolve({
-        status,
-        exitCode: code,
-        timedOut,
-        ...io,
-        ...(note || adaptNote ? { note: [adaptNote, note].filter(Boolean).join(" ") } : {}),
-      });
+      resolve({ status, exitCode: code, timedOut, stdout, stderr });
     };
 
     child.stdout.on("data", (chunk) => {

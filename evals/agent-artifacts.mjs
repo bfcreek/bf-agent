@@ -78,8 +78,12 @@ export function buildAgentArtifacts(agentResult, extra = {}) {
     task: extra.goal ?? extra.task ?? null,
     followUp: extra.followUp ?? null,
     rubric: extra.rubric ?? null,
+    oracle: extra.oracle ?? null,
+    efficiency: extra.efficiency ?? null,
     finalAnswer: agentAnswerText(agentResult),
     stopReason: agentResult.stopReason,
+    elapsedMs: agentResult.elapsedMs ?? null,
+    compactions: agentResult.compactions ?? 0,
     stepCount: agentResult.steps?.length ?? 0,
     toolCallOrder: collectToolCallOrder(agentResult),
     stepSummary: formatStepSummary(agentResult),
@@ -87,11 +91,15 @@ export function buildAgentArtifacts(agentResult, extra = {}) {
       index: step.index,
       kind: step.kind,
       content: step.content ?? "",
+      ...(typeof step.durationMs === "number" ? { durationMs: step.durationMs } : {}),
+      ...(typeof step.promptTokens === "number" ? { promptTokens: step.promptTokens } : {}),
+      ...(typeof step.completionTokens === "number" ? { completionTokens: step.completionTokens } : {}),
       toolCalls: (step.toolCalls ?? []).map((call) => ({
         name: call.name,
         args: call.args ?? {},
         ok: Boolean(call.ok),
         error: call.error ?? null,
+        ...(typeof call.durationMs === "number" ? { durationMs: call.durationMs } : {}),
         resultPreview:
           call.result == null
             ? null

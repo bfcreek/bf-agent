@@ -43,12 +43,12 @@ test("agentResultFromTrial falls back to the live-flushed session in the /app ar
       path.join(sessions, "harbor.json"),
       JSON.stringify({
         stopReason: "running",
-        escalationCount: 2,
-        cloudUsed: true,
+        elapsedMs: 900_000,
+        compactions: 1,
         steps: [
-          { index: 0, kind: "plan", content: "1. build", toolCalls: [] },
-          { index: 3, kind: "escalation", content: "Escalated model a → b", toolCalls: [] },
-          { index: 3, kind: "tool-calls", content: "", toolCalls: [{ name: "run_command" }] },
+          { index: 1, kind: "tool-calls", content: "", toolCalls: [{ name: "read_file", ok: true }] },
+          { index: 2, kind: "tool-calls", content: "", toolCalls: [{ name: "edit_file", ok: true }] },
+          { index: 3, kind: "tool-calls", content: "", toolCalls: [{ name: "run_command", ok: true }] },
         ],
         messages: [],
       }),
@@ -61,8 +61,8 @@ test("agentResultFromTrial falls back to the live-flushed session in the /app ar
 
     const result = await agentResultFromTrial(trialDir);
     assert.equal(result.steps.length, 3, "steps come from the artifact session, not 0");
-    assert.equal(result.escalationCount, 2);
-    assert.equal(result.cloudUsed, true);
+    assert.equal(result.elapsedMs, 900_000);
+    assert.equal(result.compactions, 1);
     assert.equal(result.stopReason, "running");
   } finally {
     await rm(trialDir, { recursive: true, force: true });
@@ -75,7 +75,8 @@ test("agentResultFromTrial with no session at all still reports a killed agent",
     const result = await agentResultFromTrial(trialDir);
     assert.equal(result.steps.length, 0);
     assert.equal(result.stopReason, "error");
-    assert.equal(result.escalationCount, 0);
+    assert.equal(result.compactions, 0);
+    assert.equal(result.elapsedMs, null);
   } finally {
     await rm(trialDir, { recursive: true, force: true });
   }

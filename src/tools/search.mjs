@@ -9,7 +9,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { resolveWithinRoot, truncateOutput } from "./fs.mjs";
+import { resolveWithinRoot } from "./fs.mjs";
+import { createOutputSpiller } from "./output.mjs";
 
 /** Directories that are never worth searching and can be enormous. */
 const SKIP_DIRS = new Set([
@@ -119,6 +120,7 @@ async function collectFiles(rootAbs, startAbs, maxFiles = MAX_FILES_SCANNED) {
  */
 export function registerSearchTools(registry, { workspaceRoot }) {
   const root = path.resolve(workspaceRoot);
+  const spill = createOutputSpiller({ workspaceRoot: root });
 
   registry.register({
     name: "grep_search",
@@ -126,8 +128,6 @@ export function registerSearchTools(registry, { workspaceRoot }) {
       "Search file contents in the workspace with a regular expression. " +
       "Returns matching lines as 'path:line: text'. Use this to find where " +
       "something is defined or used instead of reading files one by one. " +
-      "When the user asked which file defines a symbol, reply with that file's " +
-      "workspace-relative path after the search — do not stop with an empty message. " +
       "Common directories like node_modules and .git are skipped.",
     parameters: {
       type: "object",
@@ -143,9 +143,8 @@ export function registerSearchTools(registry, { workspaceRoot }) {
         glob: {
           type: "string",
           description:
-            "Only search files whose name matches this glob, e.g. '*.mjs' or 'src/**/*.js'. " +
-            "Omit glob (or use '*.py' / '*.cs') when the workspace is not JavaScript. " +
-            "If the glob matches no files, the search automatically repeats without a glob.",
+            "Only search files whose name matches this glob, e.g. '*.py' or 'src/**/*.js'. " +
+            "If the glob matches no files, the search repeats without it.",
         },
         case_insensitive: {
           type: "boolean",
@@ -222,48 +221,18 @@ export function registerSearchTools(registry, { workspaceRoot }) {
 
       if (matches.length === 0) {
         const prefix = globFallbackNote ? `${globFallbackNote} ` : "";
-        if (glob && !globFallbackNote) {
-          return (
-            `No matches for /${pattern}/ in ${candidates.length} file(s) searched ` +
-            `(glob '${glob}' may be too narrow — retry without glob or with '*.py' / '*.cs').`
-          );
-        }
         return `${prefix}No matches for /${pattern}/ in ${candidates.length} file(s) searched.`;
       }
       const notes = [];
-      if (hitLimit)
+      if (hitLimit) {
         notes.push(
-          `stopped at ${maxMatches} matches — more may exist; do not assume these are the only ` +
-            "occurrences. Re-run with a higher max_results or a narrower pattern/path to see the rest",
-        );
-      if (scanTruncated) notes.push(`only the first ${MAX_FILES_SCANNED} files were scanned`);
-      const secretHits = matches.filter((line) =>
-        /\b(AKIA[0-9A-Z]{8,}|ghp_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,})\b|=\s*['"]?[A-Za-z0-9/+=]{16,}/.test(
-          line,
-        ),
-      );
-      if (secretHits.length > 0) {
-        notes.push(
-          `${secretHits.length} hit(s) look like assigned secrets (AKIA/ghp/hf/'=' values) — ` +
-            "edit_file those values out, then re-grep; truncated lines still show the assignment side",
+          `stopped at ${maxMatches} matches — more may exist; re-run with a higher max_results or a narrower pattern/path`,
         );
       }
-      // Prefer keeping assignment values visible when truncating long secret lines.
-      const displayMatches = matches.map((line) => {
-        if (line.length <= MAX_LINE_CHARS) return line;
-        if (!/AKIA|ghp_|hf_|\w+\s*=/.test(line)) return line;
-        const idx = line.indexOf(": ");
-        if (idx < 0) return line.slice(0, MAX_LINE_CHARS);
-        const head = line.slice(0, idx + 2);
-        const body = line.slice(idx + 2);
-        if (body.length <= MAX_LINE_CHARS - 20) return line;
-        return `${head}${body.slice(0, 40)}…${body.slice(-80)}`;
-      });
+      if (scanTruncated) notes.push(`only the first ${MAX_FILES_SCANNED} files were scanned`);
       const header = `${matches.length} match(es) in ${filesWithMatches} file(s)${notes.length ? ` (${notes.join("; ")})` : ""}:`;
-      const lines = globFallbackNote
-        ? [globFallbackNote, header, ...displayMatches]
-        : [header, ...displayMatches];
-      return truncateOutput(lines.join("\n"));
+      const lines = globFallbackNote ? [globFallbackNote, header, ...matches] : [header, ...matches];
+      return spill(lines.join("\n"), "grep");
     },
   });
 
@@ -272,9 +241,9 @@ export function registerSearchTools(registry, { workspaceRoot }) {
     description:
       "Find files in the workspace by name. Glob patterns: '*' within a path " +
       "segment, '**' across segments, '?' one character. A pattern without '/' " +
-      "matches file names anywhere (e.g. '*.test.mjs' or substring 'filter.py'). " +
-      "A pattern with '/' matches the relative path (e.g. 'src/**/*.mjs'). " +
-      "Plain text without glob metacharacters is a case-insensitive substring of the basename.",
+      "matches file names anywhere (e.g. '*.test.mjs'); a pattern with '/' matches " +
+      "the relative path (e.g. 'src/**/*.mjs'). Plain text is a case-insensitive " +
+      "substring of the file name.",
     parameters: {
       type: "object",
       properties: {

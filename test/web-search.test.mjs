@@ -62,11 +62,11 @@ test("formatWebSearchResults is numbered and includes URLs", () => {
   assert.match(text, /A site\./);
 });
 
-test("formatWebSearchResults explains empty results and local-inspect fallback", () => {
+test("formatWebSearchResults explains empty results and points at local search", () => {
   const text = formatWebSearchResults([], "mobile_sam docs");
   assert.match(text, /0 web result/);
-  assert.match(text, /do not retry the same query/i);
-  assert.match(text, /import mobile_sam|installed package|grep_search/i);
+  assert.match(text, /different terms/i);
+  assert.match(text, /grep_search/);
 });
 
 test("web_search tool returns empty guidance instead of throwing on no hits", async () => {

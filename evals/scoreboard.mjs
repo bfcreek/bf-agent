@@ -5,17 +5,35 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-export const DEFAULT_SCOREBOARD = "evals/scoreboard-history.jsonl";
-export const TB_SCOREBOARD = "evals/tb-scoreboard-history.jsonl";
+import { summarizeEfficiency } from "./efficiency.mjs";
+import { localPaths } from "./local-layout.mjs";
+import { scoreboardPath as recognizedScoreboardPath } from "./recognized/layout.mjs";
+
+/** Local (dev-bench) scoreboard — lives under halo-agent-benchmark/local/. */
+export const DEFAULT_SCOREBOARD = localPaths().scoreboard;
+
+/** Terminal-Bench scoreboard — lives under halo-agent-benchmark/recognized/terminal-bench/. */
+export const TB_SCOREBOARD = recognizedScoreboardPath("terminal-bench");
 
 /**
- * @param {Array<object>} results
- * @returns {{passRate: number, avgSteps: number, cloudRate: number, avgEscalations: number}}
+ * Pass/efficiency aggregates for one bench run. `passRate` is the outcome
+ * signal (oracle + outcome score); the rest describe how the runs went.
+ *
+ * @param {Array<object>} results dev-bench rows
  */
 export function computeRunMetrics(results) {
   const rows = results ?? [];
   if (!rows.length) {
-    return { passRate: 0, avgSteps: 0, cloudRate: 0, avgEscalations: 0 };
+    return {
+      passRate: 0,
+      avgSteps: 0,
+      avgToolCalls: null,
+      avgProcessScore: null,
+      avgPromptTokens: null,
+      verifiedRate: null,
+      avgHeuristicScore: null,
+      flagCounts: {},
+    };
   }
   const passed = rows.filter(
     (r) =>
@@ -25,13 +43,21 @@ export function computeRunMetrics(results) {
       !r.error,
   ).length;
   const steps = rows.map((r) => r.agent?.steps ?? 0);
-  const clouds = rows.filter((r) => r.agent?.cloudUsed === true).length;
-  const escalations = rows.map((r) => r.agent?.escalationCount ?? 0);
+  const processScores = rows
+    .map((r) => r.verdict?.process?.score)
+    .filter((s) => typeof s === "number");
+  const efficiency = summarizeEfficiency(rows.map((r) => r.agent?.efficiency));
   return {
     passRate: passed / rows.length,
     avgSteps: steps.reduce((a, b) => a + b, 0) / rows.length,
-    cloudRate: clouds / rows.length,
-    avgEscalations: escalations.reduce((a, b) => a + b, 0) / rows.length,
+    avgToolCalls: efficiency.avgToolCalls,
+    avgProcessScore: processScores.length
+      ? processScores.reduce((a, b) => a + b, 0) / processScores.length
+      : null,
+    avgPromptTokens: efficiency.avgPromptTokens,
+    verifiedRate: efficiency.verifiedRate,
+    avgHeuristicScore: efficiency.avgHeuristicScore,
+    flagCounts: efficiency.flagCounts,
   };
 }
 

@@ -70,17 +70,16 @@ export function parseTierPresetArg(raw) {
 
 /**
  * Quality / routing policy implied by a named preset.
- * `cloud-max` keeps every agent pass (planning, critique, tools, escalation)
- * on flagship cloud models at maximum reasoning effort.
+ * `cloud-max` keeps the run on flagship cloud models at maximum reasoning effort.
  *
  * @param {string|null|undefined} preset
- * @returns {{think: string|null, planning: boolean|null, escalationCloud: boolean|null, cloudOnly: boolean}}
+ * @returns {{think: string|null, cloudOnly: boolean}}
  */
 export function getTierPresetPolicy(preset) {
   if (preset === "cloud-max") {
-    return { think: "max", planning: true, escalationCloud: true, cloudOnly: true };
+    return { think: "max", cloudOnly: true };
   }
-  return { think: null, planning: null, escalationCloud: null, cloudOnly: false };
+  return { think: null, cloudOnly: false };
 }
 
 /**
@@ -112,25 +111,12 @@ export function coerceTierPresetModel(options) {
  * @param {string|null|undefined} preset
  * @param {object} [flags]
  * @param {boolean} [flags.thinkExplicit]
- * @param {boolean} [flags.planningExplicit]
- * @param {boolean} [flags.escalationCloudExplicit]
  * @returns {object} The same options object.
  */
 export function applyTierPresetPolicy(options, preset, flags = {}) {
   const policy = getTierPresetPolicy(preset);
   if (policy.think && !flags.thinkExplicit && (options.think == null || options.think === DEFAULT_THINK)) {
     options.think = policy.think;
-  }
-  if (policy.planning === true && !flags.planningExplicit && options.planning !== true) {
-    if (options.noPlan === true) {
-      // `--no-plan` stays an explicit opt-out.
-    } else {
-      options.planning = true;
-      if (options.noPlan === false || options.noPlan == null) options.noPlan = false;
-    }
-  }
-  if (policy.escalationCloud === true && !flags.escalationCloudExplicit) {
-    options.escalationCloud = true;
   }
   options.cloudOnly = policy.cloudOnly === true;
   return options;

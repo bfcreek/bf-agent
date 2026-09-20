@@ -5,6 +5,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { summarizeEfficiency } from "../efficiency.mjs";
+
 /**
  * Accept a Harbor job dir, or a recognized run dir that contains harbor/result.json.
  * @param {string} input
@@ -160,7 +162,7 @@ export function durationSeconds(start, end) {
 }
 
 /**
- * @param {Array<{resolved: boolean, exception: string|null, verdict?: {score: number}|null}>} tasks
+ * @param {Array<{resolved: boolean, exception: string|null, verdict?: {score: number, process?: {score: number|null}}|null, efficiency?: object|null}>} tasks
  */
 export function summarizeTasks(tasks) {
   const resolved = tasks.filter((t) => t.resolved).length;
@@ -168,10 +170,14 @@ export function summarizeTasks(tasks) {
   const judged = tasks.filter((t) => t.verdict && typeof t.verdict.score === "number");
   const judgeAvg =
     judged.length > 0 ? judged.reduce((sum, t) => sum + t.verdict.score, 0) / judged.length : null;
+  const processScored = judged.filter((t) => typeof t.verdict.process?.score === "number");
+  const processAvg =
+    processScored.length > 0
+      ? processScored.reduce((sum, t) => sum + t.verdict.process.score, 0) / processScored.length
+      : null;
   const totalSeconds = tasks.reduce((sum, t) => sum + (t.seconds ?? 0), 0);
   const stepCounts = tasks.map((t) => Number(t.steps ?? t.stepCount ?? 0) || 0);
-  const clouded = tasks.filter((t) => t.cloudUsed === true).length;
-  const escalations = tasks.map((t) => Number(t.escalationCount ?? 0) || 0);
+  const efficiency = summarizeEfficiency(tasks.map((t) => t.efficiency));
   return {
     tasks: tasks.length,
     resolved,
@@ -179,9 +185,13 @@ export function summarizeTasks(tasks) {
     resolveRate: tasks.length ? resolved / tasks.length : 0,
     judged: judged.length,
     judgeAvg,
+    processAvg,
     totalSeconds,
     avgSteps: tasks.length ? stepCounts.reduce((a, b) => a + b, 0) / tasks.length : null,
-    cloudRate: tasks.length ? clouded / tasks.length : null,
-    avgEscalations: tasks.length ? escalations.reduce((a, b) => a + b, 0) / tasks.length : null,
+    avgToolCalls: efficiency.avgToolCalls,
+    avgPromptTokens: efficiency.avgPromptTokens,
+    verifiedRate: efficiency.verifiedRate,
+    avgHeuristicScore: efficiency.avgHeuristicScore,
+    flagCounts: efficiency.flagCounts,
   };
 }

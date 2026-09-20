@@ -17,13 +17,34 @@ test("adaptPowerShellCommand leaves POSIX commands unchanged", () => {
   assert.equal(adapted, false);
 });
 
-test("computeRunMetrics aggregates pass rate and steps", () => {
+test("computeRunMetrics aggregates outcome, process, and efficiency", () => {
   const metrics = computeRunMetrics([
-    { precheck: { pass: true }, integrity: { pass: true }, verdict: { score: 80 }, agent: { steps: 4, cloudUsed: false, escalationCount: 0 } },
-    { precheck: { pass: true }, integrity: { pass: true }, verdict: { score: 90 }, agent: { steps: 6, cloudUsed: true, escalationCount: 1 } },
+    {
+      precheck: { pass: true },
+      integrity: { pass: true },
+      verdict: { score: 80, process: { score: 60 } },
+      agent: {
+        steps: 4,
+        efficiency: { toolCalls: 3, flags: ["no-verification"], heuristicScore: 85, verifiedAfterLastMutation: false, tokens: { prompt: 1000 } },
+      },
+    },
+    {
+      precheck: { pass: true },
+      integrity: { pass: true },
+      verdict: { score: 90, process: { score: 80 } },
+      agent: {
+        steps: 6,
+        efficiency: { toolCalls: 5, flags: [], heuristicScore: 100, verifiedAfterLastMutation: true, tokens: { prompt: 3000 } },
+      },
+    },
   ]);
   assert.equal(metrics.passRate, 1);
   assert.equal(metrics.avgSteps, 5);
-  assert.equal(metrics.cloudRate, 0.5);
-  assert.equal(metrics.avgEscalations, 0.5);
+  assert.equal(metrics.avgToolCalls, 4);
+  assert.equal(metrics.avgProcessScore, 70);
+  assert.equal(metrics.avgPromptTokens, 2000);
+  assert.equal(metrics.verifiedRate, 0.5);
+  assert.equal(metrics.avgHeuristicScore, 92.5);
+  assert.deepEqual(metrics.flagCounts, { "no-verification": 1 });
+  assert.equal("cloudRate" in metrics, false);
 });

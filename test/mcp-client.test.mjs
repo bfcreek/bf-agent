@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 
-import { McpClient, registerMcpTools } from "../src/mcp-client.mjs";
+import { formatMcpToolIndex, McpClient, registerMcpTools } from "../src/mcp-client.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /**
@@ -85,9 +85,43 @@ test("isError results throw so the registry can report them", async () => {
   await assert.rejects(() => client.callTool("boom", {}), /kaboom/);
 });
 
-test("registerMcpTools bridges tools into the registry with a prefix", async () => {
+test("registerMcpTools (lazy) lists tools by name and bridges them through describe_tool/call_mcp_tool", async () => {
   const registry = new ToolRegistry();
   const names = await registerMcpTools(registry, client);
+  assert.deepEqual(names, ["fake-server/add", "fake-server/boom"]);
+
+  // Only the two bridge tools take schema space; MCP schemas are fetched on demand.
+  assert.deepEqual(
+    registry.schemas().map((s) => s.function.name),
+    ["describe_tool", "call_mcp_tool"],
+  );
+  const index = formatMcpToolIndex(registry);
+  assert.match(index, /## MCP tools/);
+  assert.match(index, /- fake-server\/add: Add two numbers\./);
+
+  const described = await registry.execute("describe_tool", { name: "fake-server/add" });
+  assert.equal(described.ok, true);
+  assert.equal(described.result.description, "Add two numbers.");
+  assert.deepEqual(described.result.parameters.required, ["a", "b"]);
+
+  const ok = await registry.execute("call_mcp_tool", { name: "fake-server/add", arguments: { a: 1, b: 2 } });
+  assert.deepEqual(ok, { ok: true, result: "3" });
+  // Bare tool names work when unambiguous.
+  const bare = await registry.execute("call_mcp_tool", { name: "add", arguments: { a: 2, b: 2 } });
+  assert.deepEqual(bare, { ok: true, result: "4" });
+
+  const failed = await registry.execute("call_mcp_tool", { name: "fake-server/boom", arguments: {} });
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /kaboom/);
+
+  const unknown = await registry.execute("describe_tool", { name: "nope" });
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /Unknown MCP tool 'nope'/);
+});
+
+test("registerMcpTools (eager) registers each tool with a prefix and full schema", async () => {
+  const registry = new ToolRegistry();
+  const names = await registerMcpTools(registry, client, { lazy: false });
   assert.deepEqual(names, ["mcp_add", "mcp_boom"]);
 
   const schema = registry.schemas().find((s) => s.function.name === "mcp_add");
@@ -96,10 +130,7 @@ test("registerMcpTools bridges tools into the registry with a prefix", async () 
 
   const ok = await registry.execute("mcp_add", { a: 1, b: 2 });
   assert.deepEqual(ok, { ok: true, result: "3" });
-
-  const failed = await registry.execute("mcp_boom", {});
-  assert.equal(failed.ok, false);
-  assert.match(failed.error, /kaboom/);
+  assert.equal(formatMcpToolIndex(registry), "");
 });
 
 test("requests reject cleanly when the server dies", async () => {

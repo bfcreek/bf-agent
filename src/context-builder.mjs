@@ -1,17 +1,23 @@
 /**
- * Context builder: gives the model its bearings before step 1 so it does not
- * burn loop steps discovering where it is. Injected into the system prompt by
- * the CLI and server.
+ * Context builder: what the model sees before step 1.
  *
- * Instruction files follow the same layering Cursor applies: user-level
- * instructions, then workspace AGENTS.md / .cursor/rules (always-apply).
+ * Follows Cursor's context model. Static context is small — environment,
+ * git snapshot, always-on instruction files — and everything else is
+ * discovered on demand with tools. Rules that are not always-on are listed
+ * by name and description only; the model pulls one in with `fetch_rule`
+ * when it looks relevant. Nested AGENTS.md files are listed by path and read
+ * when the model works in that directory.
  */
 
+import { execFile } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { getConfigDir } from "./user-config.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_MAX_ENTRIES = 40;
 
@@ -20,8 +26,13 @@ export const WORKSPACE_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", ".cursorru
 
 export const USER_INSTRUCTIONS_FILE = "instructions.md";
 
-export const MAX_INSTRUCTION_CHARS = 8000;
-export const MAX_SINGLE_INSTRUCTION_CHARS = 4000;
+export const MAX_INSTRUCTION_CHARS = 12_000;
+export const MAX_SINGLE_INSTRUCTION_CHARS = 6000;
+
+/** Directories never scanned for nested AGENTS.md. */
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "out", ".halo-agent", "vendor", "target"]);
+const NESTED_AGENTS_MAX_DEPTH = 4;
+const GIT_STATUS_MAX_LINES = 30;
 
 /**
  * Top-level workspace entry names (directories suffixed with `/`).
@@ -39,17 +50,62 @@ export async function listWorkspaceTopLevel(workspaceRoot, maxEntries = DEFAULT_
 }
 
 /**
+ * Git snapshot for the prompt: branch and a short status, like Cursor's
+ * `<git_status>` block. Empty string when the workspace is not a repo or git
+ * is unavailable.
+ *
+ * @param {string} root
+ * @param {{ exec?: typeof execFileAsync }} [options]
+ * @returns {Promise<string>}
+ */
+export async function buildGitSnapshot(root, { exec = execFileAsync } = {}) {
+  const run = async (args) => {
+    const { stdout } = await exec("git", args, { cwd: root, timeout: 3000, windowsHide: true });
+    return String(stdout ?? "").trimEnd();
+  };
+  let branch;
+  try {
+    // symbolic-ref works on a fresh repo with no commits; rev-parse covers
+    // a detached HEAD.
+    branch = await run(["symbolic-ref", "--short", "-q", "HEAD"]).catch(() =>
+      run(["rev-parse", "--abbrev-ref", "HEAD"]),
+    );
+  } catch {
+    return "";
+  }
+  let status = "";
+  try {
+    status = await run(["status", "--short"]);
+  } catch {
+    // leave status empty
+  }
+  // Keep the leading column of `--short` codes (" M" vs "M ") intact.
+  const lines = status ? status.split(/\r?\n/).filter((l) => l.trim()) : [];
+  const shown = lines.slice(0, GIT_STATUS_MAX_LINES);
+  const out = ["## Git", `- Branch: ${branch || "(detached)"}`];
+  if (lines.length === 0) out.push("- Working tree clean.");
+  else {
+    out.push(`- Status (${lines.length} change${lines.length === 1 ? "" : "s"}):`, "```", ...shown);
+    if (lines.length > shown.length) out.push(`... and ${lines.length - shown.length} more`);
+    out.push("```");
+  }
+  return out.join("\n");
+}
+
+/**
  * Describe the environment and workspace as a text block for the system
- * prompt: platform, shell, workspace root, and a top-level listing.
+ * prompt: platform, shell, workspace root, git snapshot, top-level listing.
  *
  * @param {object} [options]
  * @param {string} [options.workspaceRoot]
  * @param {number} [options.maxEntries] Cap on listed top-level entries.
+ * @param {boolean} [options.git] Include the git snapshot (default true).
  * @returns {Promise<string>}
  */
 export async function buildEnvironmentContext({
   workspaceRoot,
   maxEntries = DEFAULT_MAX_ENTRIES,
+  git = true,
 } = {}) {
   const root = path.resolve(workspaceRoot ?? process.cwd());
   const isWindows = process.platform === "win32";
@@ -72,43 +128,25 @@ export async function buildEnvironmentContext({
   const lines = [
     "## Environment",
     `- Workspace root: ${root} — file tool paths are relative to this directory.`,
-    `- Do not prefix paths with the workspace folder name. If the root is /app, write_file "filter.py" not "app/filter.py" or "/app/filter.py" (those create /app/app/filter.py).`,
-    `- Multi-line scripts: write_file a path then run_command that path — do not put large heredocs or nested quotes inside run_command JSON.`,
-    `- Artifact tasks: creating an empty/stub file is not completion when the instruction defines behavioral output — run the named verification command and match stdout before stopping.`,
-    `- Verification means commands explicitly named in the user instruction — not generic examples like test.mjs or test.py unless the instruction names them. If no such command exists after the artifact is written, re-read the output file and stop.`,
-    `- Never declare a task complete without running every acceptance command named in the instruction and confirming exit 0 plus the expected output shape.`,
-    `- For 7z/archive extraction: exit 0 with 'No files to process' or 'Files: 0' is not success — confirm decrypted files exist before finishing.`,
-    `- For PyTorch/ML tasks: read /tests before implementing; token IDs stay torch.long; run pytest — py_compile alone is not verification. Avoid module-level print() on import.`,
-    `- For weights.json deliverables: write valid JSON (not cp of .pth/.pt), validate with json.load, then run ./cli_tool weights.json <image> before finishing.`,
-    `- Lookup-and-write: acquire data once, write_file the required output, verify — do not finish with a todo list.`,
-    `- Install-and-run tasks: successful install/compile alone is not done — run the named command and confirm exit 0.`,
-    `- Numbered deliverables: every output path listed in numbered steps must exist on disk before finishing.`,
-    `- Leaderboard/API URLs return JSON, not HTML — use curl -s and python -c json parsing when fetch_url fails.`,
-    `- For artifact-creation tasks: if the required output path is still missing after several tool steps, keep working — do not give a final answer.`,
-    `- For system paths outside the workspace (/etc/apt, /usr/local/bin), use run_command — write_file cannot touch them.`,
-    `- Internal thinking/reasoning never counts as progress — artifact-creation tasks require an early write_file or run_command tool call.`,
+    `- Do not prefix paths with the workspace folder name; if the root is /app, write "filter.py", not "app/filter.py" or "/app/filter.py".`,
     `- Platform: ${process.platform} (${os.type()} ${os.release()}); run_command uses ${shell}.`,
     ...(isWindows
-      ? [
-          "- Shell scripts: write PowerShell (.ps1). Do not default to bash or .sh — bash is not the default shell and may not be installed. Chain commands with ';' not '&&'.",
-        ]
-      : []),
-    ...(names.some((n) => n === ".git" || n === ".git/")
-      ? [
-          "- This workspace is a git repository. After a merge CONFLICT, resolve <<<<<<< markers with edit_file, then git add/commit, then verify — do not stop after git show of both sides.",
-        ]
-      : []),
-    ...(names.some((n) => /lodepng|cjson/i.test(n))
-      ? [
-          "- Workspace includes lodepng/cJSON — when the task asks for a binary cli_tool, compile the native C path (gcc/make) instead of a Python wrapper.",
-        ]
+      ? ["- Shell scripts: write PowerShell (.ps1), not bash/.sh, unless the user asks for bash. Chain commands with ';' not '&&'."]
       : []),
     `- Node.js: ${process.version}`,
     `- Local date: ${new Date().toString()}`,
+  ];
+
+  if (git && names.some((n) => n === ".git/" || n === ".git")) {
+    const snapshot = await buildGitSnapshot(root);
+    if (snapshot) lines.push("", snapshot);
+  }
+
+  lines.push(
     "",
     "## Workspace top-level contents",
     names.length > 0 ? names.map((n) => `- ${n}`).join("\n") : "(empty directory)",
-  ];
+  );
   if (listingNote) lines.push(listingNote);
   return lines.join("\n");
 }
@@ -136,9 +174,9 @@ export function parseRuleFrontmatter(text) {
 }
 
 /**
- * Cursor always-apply rules: `alwaysApply: true`, or no globs when the flag
- * is omitted. File-scoped rules (`globs:` / `alwaysApply: false`) stay out
- * because this runtime has no open-editor set.
+ * Cursor always-apply rules: `alwaysApply: true`, or no globs and no
+ * description when the flag is omitted. Described or file-scoped rules are
+ * offered to the model by name instead and fetched on demand.
  *
  * @param {Record<string, string|boolean>} attributes
  * @returns {boolean}
@@ -147,7 +185,90 @@ export function shouldAlwaysApplyRule(attributes) {
   if (attributes?.alwaysApply === true) return true;
   if (attributes?.alwaysApply === false) return false;
   const globs = attributes?.globs ?? attributes?.glob;
-  return !globs;
+  if (globs) return false;
+  return !attributes?.description;
+}
+
+/**
+ * @typedef {object} RuleEntry
+ * @property {string} name File name without extension (what `fetch_rule` takes).
+ * @property {string} source Workspace-relative path.
+ * @property {string} description
+ * @property {string} globs
+ * @property {boolean} alwaysApply
+ * @property {string} body
+ */
+
+/**
+ * All rules under `.cursor/rules` (recursively), parsed.
+ * @param {string} [workspaceRoot]
+ * @returns {Promise<RuleEntry[]>}
+ */
+export async function listRules(workspaceRoot) {
+  const root = path.resolve(workspaceRoot ?? process.cwd());
+  const rulesDir = path.join(root, ".cursor", "rules");
+  /** @type {RuleEntry[]} */
+  const rules = [];
+  const walk = async (dir) => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!entry.isFile() || !/\.(mdc|md)$/i.test(entry.name)) continue;
+      const raw = await readOptionalFile(full);
+      if (!raw) continue;
+      const { attributes, body } = parseRuleFrontmatter(raw);
+      if (!body) continue;
+      rules.push({
+        name: entry.name.replace(/\.(mdc|md)$/i, ""),
+        source: path.relative(root, full).split(path.sep).join("/"),
+        description: String(attributes.description ?? ""),
+        globs: String(attributes.globs ?? attributes.glob ?? ""),
+        alwaysApply: shouldAlwaysApplyRule(attributes),
+        body,
+      });
+    }
+  };
+  await walk(rulesDir);
+  return rules;
+}
+
+/**
+ * Nested AGENTS.md files below the root (root-level ones are inlined by
+ * `loadAppliedInstructions`). Returned as workspace-relative paths.
+ * @param {string} [workspaceRoot]
+ * @returns {Promise<string[]>}
+ */
+export async function listNestedAgentsFiles(workspaceRoot) {
+  const root = path.resolve(workspaceRoot ?? process.cwd());
+  const found = [];
+  const walk = async (dir, depth) => {
+    if (depth > NESTED_AGENTS_MAX_DEPTH) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        await walk(path.join(dir, entry.name), depth + 1);
+      } else if (entry.isFile() && depth > 0 && entry.name === "AGENTS.md") {
+        found.push(path.relative(root, path.join(dir, entry.name)).split(path.sep).join("/"));
+      }
+    }
+  };
+  await walk(root, 0);
+  return found.sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -163,14 +284,9 @@ async function readOptionalFile(filePath) {
   }
 }
 
-/**
- * @param {string} text
- * @param {number} [maxChars]
- * @returns {string}
- */
 function capText(text, maxChars = MAX_SINGLE_INSTRUCTION_CHARS) {
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n\n[truncated — ${text.length - maxChars} more characters]`;
+  return `${text.slice(0, maxChars)}\n\n[truncated — ${text.length - maxChars} more characters; read_file the source for the rest]`;
 }
 
 /**
@@ -201,6 +317,8 @@ function formatInstructionSections(sections, maxChars = MAX_INSTRUCTION_CHARS) {
 /**
  * Load Cursor-style instruction files: user `instructions.md`, workspace
  * AGENTS.md / CLAUDE.md / .cursorrules, and always-apply `.cursor/rules`.
+ * Then list, by name only, what the model can pull in on demand: described
+ * or file-scoped rules (`fetch_rule`) and nested AGENTS.md files (read_file).
  *
  * @param {object} [options]
  * @param {string} [options.workspaceRoot]
@@ -215,61 +333,70 @@ export async function loadAppliedInstructions({ workspaceRoot, userConfigDir } =
   const userDir = userConfigDir ?? getConfigDir();
   const userText = await readOptionalFile(path.join(userDir, USER_INSTRUCTIONS_FILE));
   if (userText) {
-    sections.push({
-      title: "User instructions",
-      source: USER_INSTRUCTIONS_FILE,
-      body: capText(userText),
-    });
+    sections.push({ title: "User instructions", source: USER_INSTRUCTIONS_FILE, body: capText(userText) });
   }
 
   for (const rel of WORKSPACE_INSTRUCTION_FILES) {
     const text = await readOptionalFile(path.join(root, rel));
     if (!text) continue;
-    sections.push({
-      title: "Workspace instructions",
-      source: rel,
-      body: capText(text),
-    });
+    sections.push({ title: "Workspace instructions", source: rel, body: capText(text) });
   }
 
-  const rulesDir = path.join(root, ".cursor", "rules");
-  try {
-    const entries = await readdir(rulesDir, { withFileTypes: true });
-    const files = entries
-      .filter((e) => e.isFile() && /\.(mdc|md)$/i.test(e.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of files) {
-      const raw = await readOptionalFile(path.join(rulesDir, entry.name));
-      if (!raw) continue;
-      const { attributes, body } = parseRuleFrontmatter(raw);
-      if (!body || !shouldAlwaysApplyRule(attributes)) continue;
-      sections.push({
-        title: "Workspace instructions",
-        source: `.cursor/rules/${entry.name}`,
-        body: capText(body),
-      });
-    }
-  } catch {
-    // no .cursor/rules directory
+  const rules = await listRules(root);
+  for (const rule of rules) {
+    if (!rule.alwaysApply) continue;
+    sections.push({ title: "Workspace instructions", source: rule.source, body: capText(rule.body) });
   }
 
-  return formatInstructionSections(sections);
+  const parts = [];
+  const inlined = formatInstructionSections(sections);
+  if (inlined) parts.push(inlined);
+
+  const onDemand = rules.filter((r) => !r.alwaysApply);
+  if (onDemand.length > 0) {
+    parts.push(
+      [
+        "## Available rules (fetch with fetch_rule when relevant)",
+        ...onDemand.map((r) => {
+          const scope = r.globs ? ` [applies to ${r.globs}]` : "";
+          const desc = r.description ? `: ${r.description}` : "";
+          return `- ${r.name}${scope}${desc}`;
+        }),
+      ].join("\n"),
+    );
+  }
+
+  const nested = await listNestedAgentsFiles(root);
+  if (nested.length > 0) {
+    parts.push(
+      [
+        "## Directory instructions (read_file before working in that directory)",
+        ...nested.map((p) => `- ${p}`),
+      ].join("\n"),
+    );
+  }
+
+  return parts.join("\n\n");
 }
 
 /**
- * Compose a full system prompt: base behavior instructions, Cursor-style
- * instruction files, then environment context.
+ * Compose a full system prompt: core instructions, model overlay, instruction
+ * files and rule index, environment, then any extra context the caller adds.
  *
  * @param {object} options
  * @param {string} options.basePrompt
+ * @param {string} [options.modelOverlay] From `modelPromptOverlay(model)`.
  * @param {string} [options.workspaceRoot]
- * @param {string} [options.projectContext] Injected project overview / index note.
+ * @param {string} [options.extraContext] Appended last (e.g. an MCP tool index).
+ * @param {string} [options.projectContext] Deprecated alias of `extraContext`.
  * @param {string} [options.userConfigDir]
  * @returns {Promise<string>}
  */
 export async function buildSystemPrompt({
   basePrompt,
+  modelOverlay,
   workspaceRoot,
+  extraContext,
   projectContext,
   userConfigDir,
 } = {}) {
@@ -278,8 +405,10 @@ export async function buildSystemPrompt({
     loadAppliedInstructions({ workspaceRoot, userConfigDir }),
   ]);
   const parts = [basePrompt];
+  if (modelOverlay?.trim()) parts.push(modelOverlay.trim());
   if (instructions?.trim()) parts.push(instructions.trim());
   parts.push(context);
-  if (projectContext?.trim()) parts.push(projectContext.trim());
+  const extra = extraContext ?? projectContext;
+  if (extra?.trim()) parts.push(extra.trim());
   return parts.join("\n\n");
 }

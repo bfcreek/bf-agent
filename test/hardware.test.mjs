@@ -8,7 +8,7 @@ import {
   resolveModelFitBudget,
   VRAM_FIT_FRACTION,
 } from "../src/hardware.mjs";
-import { buildModelLadder } from "../src/escalation.mjs";
+import { suggestModel } from "../src/model-routing.mjs";
 
 const GB = 1024 ** 3;
 
@@ -64,56 +64,38 @@ test("no GPU falls back to the RAM rule", async () => {
   assert.equal(budget.budgetBytes, 16 * GB);
 });
 
-test("the ladder drops a local model that cannot fit in VRAM", async () => {
+test("auto routing skips a local model that cannot fit in VRAM", async () => {
+  const models = [
+    { name: "qwen3:14b", parameterSize: "14.8B", sizeBytes: 9 * GB },
+    // Fits the 32 GB RAM rule, but not a 24 GB card: it would spill to CPU.
+    { name: "qwen3:72b", parameterSize: "72B", sizeBytes: 28 * GB },
+  ];
   const client = {
-    async listModelsDetailed() {
-      return [
-        { name: "qwen3:14b", parameterSize: "14.8B", sizeBytes: 9 * GB },
-        // Fits the 32 GB RAM rule, but not a 24 GB card: it would spill to CPU.
-        { name: "qwen3:72b", parameterSize: "72B", sizeBytes: 28 * GB },
-      ];
-    },
     async show() {
       return { capabilities: ["tools", "thinking"] };
     },
   };
 
-  const withGpu = await buildModelLadder({ client, totalMemBytes: 64 * GB, vramBytes: 24 * GB });
-  assert.deepEqual(
-    withGpu.map((m) => m.name),
-    ["qwen3:14b"],
-  );
+  const withGpu = await suggestModel({ client, models, totalMemBytes: 64 * GB, vramBytes: 24 * GB });
+  assert.equal(withGpu.model, "qwen3:14b");
 
-  const ramOnly = await buildModelLadder({ client, totalMemBytes: 64 * GB, vramBytes: 0 });
-  assert.deepEqual(
-    ramOnly.map((m) => m.name),
-    ["qwen3:14b", "qwen3:72b"],
-  );
+  const ramOnly = await suggestModel({ client, models, totalMemBytes: 64 * GB, vramBytes: 0 });
+  assert.equal(ramOnly.model, "qwen3:72b");
 });
 
-test("cloudOnly ladder keeps only Ollama cloud models", async () => {
+test("cloudOnly routing keeps only Ollama cloud models", async () => {
+  const models = [
+    { name: "qwen3:14b", parameterSize: "14.8B", sizeBytes: 9 * GB },
+    { name: "glm-5.3:cloud", parameterSize: "753B", sizeBytes: 400 },
+    { name: "kimi-k3:cloud", parameterSize: "2810B", sizeBytes: 400 },
+  ];
   const client = {
-    async listModelsDetailed() {
-      return [
-        { name: "qwen3:14b", parameterSize: "14.8B", sizeBytes: 9 * GB },
-        { name: "glm-5.3:cloud", parameterSize: "753B", sizeBytes: 400 },
-        { name: "kimi-k3:cloud", parameterSize: "2810B", sizeBytes: 400 },
-      ];
-    },
     async show() {
       return { capabilities: ["tools", "thinking"] };
     },
   };
 
-  const ladder = await buildModelLadder({
-    client,
-    totalMemBytes: 64 * GB,
-    vramBytes: 24 * GB,
-    cloudOnly: true,
-  });
-  assert.deepEqual(
-    ladder.map((m) => m.name),
-    ["glm-5.3:cloud", "kimi-k3:cloud"],
-  );
-  assert.ok(ladder.every((m) => m.cloud));
+  const pick = await suggestModel({ client, models, totalMemBytes: 64 * GB, vramBytes: 24 * GB, cloudOnly: true });
+  assert.equal(pick.model, "kimi-k3:cloud");
+  assert.equal(pick.cloud, true);
 });

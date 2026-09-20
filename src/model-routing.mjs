@@ -286,6 +286,7 @@ export async function detectVisionCapable(client, name) {
  * @param {number} [options.totalMemBytes] Defaults to this machine's RAM.
  * @param {number} [options.vramBytes] Pass 0 to ignore the GPU, omit to probe.
  * @param {boolean} [options.requireVision] Require image/vision capability.
+ * @param {boolean} [options.cloudOnly] Consider only installed Ollama cloud models.
  * @returns {Promise<{model: string, paramsB: number, cloud: boolean, reason: string}|null>}
  */
 export async function suggestModel({
@@ -294,6 +295,7 @@ export async function suggestModel({
   totalMemBytes = os.totalmem(),
   vramBytes,
   requireVision = false,
+  cloudOnly = false,
 }) {
   const { resolveModelFitBudget } = await import("./hardware.mjs");
   const { budgetBytes: memoryBudget } = await resolveModelFitBudget({ totalMemBytes, vramBytes });
@@ -301,6 +303,7 @@ export async function suggestModel({
   const clouds = [];
 
   for (const entry of models ?? []) {
+    if (cloudOnly && !isCloudModel(entry.name)) continue;
     const { tools, thinking, vision } = await detectCapabilities(client, entry.name);
     if (tools !== true) continue;
     if (requireVision) {

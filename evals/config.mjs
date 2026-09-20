@@ -39,15 +39,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
  * @property {boolean} keepWorkspace
  * @property {string|null} [benchmarkRoot]
  * @property {boolean} verbose
- * @property {boolean} planning
  * @property {boolean|string|null} [think] Ollama native thinking mode.
- * @property {boolean} taskHints
- * @property {boolean} memory
- * @property {boolean} memoryReadonly
- * @property {boolean} noCritique
- * @property {boolean} noAcceptance
- * @property {boolean} escalation
- * @property {boolean} escalationCloud
  * @property {number} judgeRetries
  * @property {string|null} [scenario]
  * @property {string[]|null} [scenarios]
@@ -57,6 +49,7 @@ export const CWD_CONFIG_NAME = "bench.config.json";
 
 import { defaultGatesConfig } from "./gates.mjs";
 import { DEFAULT_CHECKPOINT_REL, checkpointRelForLanguage } from "./checkpoint.mjs";
+import { localPaths } from "./local-layout.mjs";
 
 const LANGUAGE_ALIASES = {
   js: "js",
@@ -108,25 +101,20 @@ export function defaultConfig() {
     keepWorkspace: false,
     benchmarkRoot: null,
     verbose: false,
-    planning: false,
     think: null,
-    taskHints: true,
-    memory: true,
-    memoryReadonly: true,
-    noCritique: false,
-    noAcceptance: false,
-    escalation: true,
-    escalationCloud: false,
     judgeRetries: 2,
     scenario: null,
     scenarios: null,
     checkpointPath: DEFAULT_CHECKPOINT_REL,
-    report: {
-      json: "bench-latest.json",
-      markdown: "bench-latest.md",
-      capability: "bench-capability.json",
-      public: "bench-public.json",
-    },
+    report: (() => {
+      const paths = localPaths();
+      return {
+        json: paths.json,
+        markdown: paths.markdown,
+        capability: paths.capability,
+        public: paths.public,
+      };
+    })(),
   };
 }
 
@@ -188,11 +176,7 @@ export async function loadBenchOptions(argv, cwd = process.cwd()) {
   const fileConfig = resolved.path ? await loadBenchConfig(resolved.path) : defaultConfig();
   const { values: modelsValues, errors: modelsErrors } = await loadModelsConfig();
   const options = parseCliArgs(argv, fileConfig);
-  applyTierPresetPolicy(options, options.tierPreset, {
-    thinkExplicit: argv.includes("--think"),
-    planningExplicit: argv.includes("--planning") || argv.includes("--no-planning"),
-    escalationCloudExplicit: argv.includes("--escalation-cloud") || argv.includes("--no-escalation-cloud"),
-  });
+  applyTierPresetPolicy(options, options.tierPreset, { thinkExplicit: argv.includes("--think") });
   if (modelsErrors.length > 0) {
     throw new Error(modelsErrors.join("\n"));
   }
@@ -206,15 +190,8 @@ export async function loadBenchOptions(argv, cwd = process.cwd()) {
     baseUrl: options.baseUrl,
   });
 
-  // Escalation-first routing needs "auto" to survive: it starts on the weakest
-  // capable local model and climbs only on struggle. Substituting a tier model
-  // here would pin the run to a fixed rung and bypass the ladder entirely.
-  if (
-    options.escalation !== true &&
-    options.tierModels?.length &&
-    options.models.length === 1 &&
-    options.models[0] === "auto"
-  ) {
+  // With a tier table, "auto" means the first band's model.
+  if (options.tierModels?.length && options.models.length === 1 && options.models[0] === "auto") {
     options.models = [options.tierModels[0].model];
   }
 
@@ -266,16 +243,8 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeModel: null,
     judgeTimeoutSeconds: null,
     judgeRetries: null,
-    planning: null,
     think: null,
-    taskHints: null,
     label: null,
-    memory: null,
-    memoryReadonly: null,
-    noCritique: null,
-    noAcceptance: null,
-    escalation: null,
-    escalationCloud: null,
     enforceGates: null,
     gatePreset: null,
     tierPreset: null,
@@ -331,8 +300,6 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     else if (arg === "--judge-model") cli.judgeModel = argv[++i];
     else if (arg === "--judge-timeout") cli.judgeTimeoutSeconds = Number.parseInt(argv[++i], 10);
     else if (arg === "--judge-retries") cli.judgeRetries = Number.parseInt(argv[++i], 10);
-    else if (arg === "--planning") cli.planning = true;
-    else if (arg === "--no-planning") cli.planning = false;
     else if (arg === "--think") {
       const level = argv[++i];
       if (!level) throw new Error("--think requires auto, true, false, off, or low|medium|high|max.");
@@ -344,20 +311,7 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
         throw new Error(`--think must be auto, true, false, off, or low|medium|high|max, got '${level}'.`);
       }
     }
-    else if (arg === "--no-hints") cli.taskHints = false;
     else if (arg === "--label") cli.label = argv[++i];
-    else if (arg === "--memory") cli.memory = true;
-    else if (arg === "--no-memory") cli.memory = false;
-    else if (arg === "--memory-write") cli.memoryReadonly = false;
-    else if (arg === "--memory-readonly") cli.memoryReadonly = true;
-    else if (arg === "--critique") cli.noCritique = false;
-    else if (arg === "--no-critique") cli.noCritique = true;
-    else if (arg === "--acceptance") cli.noAcceptance = false;
-    else if (arg === "--no-acceptance") cli.noAcceptance = true;
-    else if (arg === "--escalation") cli.escalation = true;
-    else if (arg === "--no-escalation") cli.escalation = false;
-    else if (arg === "--escalation-cloud") cli.escalationCloud = true;
-    else if (arg === "--no-escalation-cloud") cli.escalationCloud = false;
     else if (arg === "--enforce-gates") cli.enforceGates = true;
     else if (arg === "--gate") {
       const preset = argv[++i];
@@ -414,16 +368,8 @@ export function parseCliArgs(argv, fileConfig = defaultConfig()) {
     judgeModel: cli.judgeModel ?? fileConfig.judgeModel,
     judgeTimeoutSeconds: cli.judgeTimeoutSeconds ?? fileConfig.judgeTimeoutSeconds,
     judgeRetries: cli.judgeRetries ?? fileConfig.judgeRetries,
-    planning: cli.planning ?? fileConfig.planning,
     think: cli.think ?? fileConfig.think ?? null,
-    taskHints: cli.taskHints ?? fileConfig.taskHints,
     label: cli.label ?? null,
-    memory: cli.memory ?? fileConfig.memory,
-    memoryReadonly: cli.memoryReadonly ?? fileConfig.memoryReadonly,
-    noCritique: cli.noCritique ?? fileConfig.noCritique,
-    noAcceptance: cli.noAcceptance ?? fileConfig.noAcceptance,
-    escalation: cli.escalation ?? fileConfig.escalation,
-    escalationCloud: cli.escalationCloud ?? fileConfig.escalationCloud,
     gates: fileConfig.gates,
     enforceGates: cli.enforceGates ?? fileConfig.enforceGates,
     gatePreset: cli.gatePreset ?? fileConfig.gatePreset,

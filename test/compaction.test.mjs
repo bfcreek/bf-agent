@@ -3,13 +3,9 @@ import { test } from "node:test";
 
 import { AgentLoop } from "../src/agent-loop.mjs";
 import {
-  capSpeculativeReasoning,
-  collapseRepetitiveThinking,
-  collapseRepeatedPhrase,
   compactMessages,
   estimateTokens,
   extractOriginalInstruction,
-  formatVerificationRecap,
   transcriptSize,
 } from "../src/compaction.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
@@ -179,7 +175,7 @@ test("loop derives a token budget from the client's numCtx and compacts on real 
   );
   const registry = new ToolRegistry();
   registry.register({ name: "noop", execute: () => "ok" });
-  const loop = new AgentLoop({ client, registry, compaction: { keepRecent: 2 }, planning: false });
+  const loop = new AgentLoop({ client, registry, compaction: { keepRecent: 2 } });
 
   const result = await loop.run("go");
 
@@ -202,168 +198,32 @@ test("loop without compaction option never makes a summarizer call", async () =>
   assert.equal(client.calls.length, 1);
 });
 
-test("formatVerificationRecap lists passing and failing command results", () => {
-  const recap = formatVerificationRecap([
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: "status: success\nexitCode: 0\nstdout:\nok\n",
-    },
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: JSON.stringify({ status: "FAILED with exit code 1", exitCode: 1 }),
-    },
-    { role: "user", content: "ignore me" },
-  ]);
-  assert.match(recap, /do not re-run a command that already exited 0/i);
-  assert.match(recap, /success \(exit 0\)/);
-  assert.match(recap, /FAILED \(exit 1\)/);
-  assert.equal(formatVerificationRecap([]), "");
-  const withStdout = formatVerificationRecap([
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: JSON.stringify({ status: "FAILED with exit code 1", exitCode: 1, stdout: "AssertionError: mul(3, 4)" }),
-    },
-  ]);
-  assert.match(withStdout, /last output:.*mul\(3, 4\)/);
-  const withCompiler = formatVerificationRecap([
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content:
-        "status: FAILED with exit code 1\nexitCode: 1\nstderr:\nProgram.cs(12,17): error CS0136: A local named 'args'\n",
-    },
-  ]);
-  assert.match(withCompiler, /compiler:.*CS0136/);
-});
 
-test("formatVerificationRecap reminds after many empty searches", () => {
-  const messages = [];
-  for (let i = 0; i < 3; i++) {
-    messages.push({
-      role: "tool",
-      tool_name: "web_search",
-      content: "0 web result(s) for 'hidden verifier'.\nEmpty results are a real outcome.",
-    });
-  }
-  const recap = formatVerificationRecap(messages);
-  assert.match(recap, /no hidden verifier|cost_model|consecutive searches returned empty/i);
-});
-
-test("formatVerificationRecap keeps file snapshots and failing assertions", () => {
-  const recap = formatVerificationRecap([
-    {
-      role: "assistant",
-      tool_calls: [
-        { function: { name: "read_file", arguments: { path: "calc.py" } } },
-        { function: { name: "run_command", arguments: { command: "python test.py" } } },
-      ],
-    },
-    {
-      role: "tool",
-      tool_name: "read_file",
-      content: "def add(a, b):\n    return a + b\n\ndef mul(a, b):\n    return a + b\n",
-    },
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: JSON.stringify({
-        status: "FAILED with exit code 1",
-        exitCode: 1,
-        stdout: "    assert mul(3, 4) == 12\nAssertionError",
-      }),
-    },
-  ]);
-  assert.match(recap, /Last known file state/);
-  assert.match(recap, /calc\.py:.*def add/);
-  assert.match(recap, /Known assertion outcomes/);
-  assert.match(recap, /assert mul\(3, 4\) == 12/);
-});
-
-test("formatVerificationRecap keeps verbatim stdout for recent commands", () => {
-  const recap = formatVerificationRecap([
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: "status: success\nexitCode: 0\nstdout:\napt 2.4.11\n",
-    },
-    {
-      role: "tool",
-      tool_name: "run_command",
-      content: "status: blocked\ncommand: apt-get install -y ocaml\nnote: not executed\n",
-    },
-  ]);
-  assert.match(recap, /Last command outputs/);
-  assert.match(recap, /apt 2\.4\.11/);
-  assert.match(recap, /blocked/);
-  assert.match(recap, /stdout:\n\(empty\)|blocked/);
-});
-
-test("collapseRepetitiveThinking truncates degenerate repeated phrases", () => {
-  const phrase = "I need to reconsider the approach. ";
-  const thinking = phrase.repeat(8);
-  const messages = [
-    { role: "system", content: "SYSTEM" },
-    { role: "user", content: "Build the circuit output." },
-    { role: "assistant", content: "working", thinking },
-  ];
-  const result = collapseRepetitiveThinking(messages);
-  assert.notEqual(result, messages);
-  assert.ok(result[2].thinking.length < thinking.length);
-  assert.match(result[2].thinking, /repetitive thinking collapsed/i);
-  assert.equal(result[2].content, "working");
-});
-
-test("collapseRepeatedPhrase leaves normal prose alone", () => {
-  const text = "Plan: read the spec, write a generator, run_command it, verify stdout.";
-  assert.equal(collapseRepeatedPhrase(text, 5, 12), text);
-});
-
-test("capSpeculativeReasoning truncates long think before git setup", async () => {
-  const messages = [
-    { role: "system", content: "SYSTEM" },
-    {
-      role: "user",
-      content:
-        "Merge the two branches. After the merge conflict, implement map() and verify with examples.json.",
-    },
-    { role: "assistant", content: "x".repeat(3000), thinking: "y".repeat(3000) },
-  ];
-  const client = new FakeClient([]);
-  const result = await compactMessages({ client, messages, maxChars: 100_000 });
-  assert.notEqual(result, messages);
-  assert.ok(result[2].thinking.length < 2000);
-  assert.match(result[2].thinking, /truncated/);
-  assert.match(result[2].content, /truncated/);
-  assert.equal(client.calls.length, 0);
-});
-
-test("capSpeculativeReasoning leaves thinking once git setup started", () => {
-  const thinking = "y".repeat(3000);
-  const messages = [
-    { role: "system", content: "SYSTEM" },
-    { role: "user", content: "Merge the two branches and resolve the merge conflict." },
-    {
-      role: "assistant",
-      content: "",
-      tool_calls: [{ function: { name: "run_command", arguments: { command: "git merge feature" } } }],
-    },
-    { role: "assistant", thinking, content: "ok" },
-  ];
-  const result = capSpeculativeReasoning(messages);
-  assert.equal(result, messages);
-  assert.equal(result[3].thinking, thinking);
-});
-
-test("summarizer prompt prefers act-on-instruction git order", async () => {
+test("the summary keeps the original instruction verbatim and points at the history file", async () => {
   const client = new FakeClient([{ role: "assistant", content: "SUMMARY OF OLD TURNS" }]);
   const messages = longTranscript();
-  messages[1] = {
-    role: "user",
-    content: `Merge the two branches. ${"x".repeat(500)}`,
-  };
-  await compactMessages({ client, messages, maxChars: 2000, keepRecent: 4 });
-  assert.match(client.calls[0].messages[0].content, /act-on-instruction|repo\/branches\/merge/i);
+  messages[1] = { role: "user", content: `Merge the two branches. ${"x".repeat(500)}` };
+
+  const result = await compactMessages({
+    client,
+    messages,
+    maxChars: 2000,
+    keepRecent: 4,
+    historyPath: ".halo-agent/sessions/fix.json",
+  });
+
+  assert.notEqual(result, messages);
+  const recap = result[1].content;
+  assert.match(recap, /Original user instruction \(verbatim/);
+  assert.match(recap, /Merge the two branches\./);
+  assert.match(recap, /SUMMARY OF OLD TURNS/);
+  assert.match(recap, /\.halo-agent\/sessions\/fix\.json/);
+  assert.match(recap, /grep_search or read_file/);
+  assert.equal(extractOriginalInstruction(result).startsWith("[Earlier conversation"), false);
+});
+
+test("without a history file the summary carries no file reference", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "SUMMARY" }]);
+  const result = await compactMessages({ client, messages: longTranscript(), maxChars: 2000, keepRecent: 4 });
+  assert.doesNotMatch(result[1].content, /transcript is saved at/);
 });

@@ -4,15 +4,7 @@
   "baseUrl": "http://127.0.0.1:11434",
   "maxSteps": 15,
   "timeoutSeconds": 480,
-  "planning": true,
   "think": "max",
-  "taskHints": true,
-  "memory": true,
-  "memoryReadonly": true,
-  "noCritique": false,
-  "noAcceptance": false,
-  "escalation": true,
-  "escalationCloud": true,
   "judgeModel": "auto",
   "judgeTimeoutSeconds": 300,
   "judgeRetries": 2,
@@ -33,9 +25,9 @@
   "keepWorkspace": false,
   "verbose": false,
   "report": {
-    "json": "bench-latest.json",
-    "markdown": "bench-latest.md",
-    "capability": "bench-capability.json",
-    "public": "bench-public.json"
+    "json": "../halo-agent-benchmark/local/latest.json",
+    "markdown": "../halo-agent-benchmark/local/latest.md",
+    "capability": "../halo-agent-benchmark/local/capability.json",
+    "public": "../halo-agent-benchmark/local/public.json"
   }
 }

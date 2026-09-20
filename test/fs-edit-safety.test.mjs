@@ -6,7 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { ToolRegistry } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
-import { nearbySnippet, normalizeWorkspaceRelativePath, replaceFlexible, replaceOnce, truncatedSourceIssue, suggestedUniqueSnippets, windowsBashScriptIssue, largeInlineWriteHint } from "../src/tools/fs.mjs";
+import { nearbySnippet, normalizeWorkspaceRelativePath, replaceFlexible, replaceOnce, suggestedUniqueSnippets } from "../src/tools/fs.mjs";
 
 let root;
 let registry;
@@ -255,26 +255,6 @@ test("edit_file flexible match re-indents without shifting unrelated code", asyn
   assert.equal(after.split("\n")[4], "    return idle();");
 });
 
-test("write_file refuses to create a missing file the user asked to edit", async () => {
-  registry.setRunContext({ goal: "Fix the typo in NONEXISTENT_FILE.mjs and save it." });
-  const write = await registry.execute("write_file", {
-    path: "NONEXISTENT_FILE.mjs",
-    content: "export const x = 1;\n",
-  });
-  assert.equal(write.ok, false);
-  assert.match(write.error, /does not exist/);
-});
-
-test("write_file still creates files when the task asked to create them", async () => {
-  registry.setRunContext({ goal: "Create greet.mjs that exports greet()." });
-  const write = await registry.execute("write_file", {
-    path: "greet-created.mjs",
-    content: "export function greet() { return 'hi'; }\n",
-  });
-  assert.equal(write.ok, true);
-  assert.match(await readWorkspaceFile("greet-created.mjs"), /export function greet/);
-});
-
 test("edit_file rejects identical old_string and new_string without touching the file", async () => {
   const before = "hello world\n";
   await writeWorkspaceFile("same.txt", before);
@@ -285,18 +265,6 @@ test("edit_file rejects identical old_string and new_string without touching the
   });
   await assertFileUnchanged("same.txt", before, edit);
   assert.match(edit.error, /identical/);
-});
-
-test("write_file allows creating a shared module on extract/refactor goals", async () => {
-  registry.setRunContext({
-    goal: "Extract shared slugify into src/slugify.mjs, update imports, keep behavior identical.",
-  });
-  const write = await registry.execute("write_file", {
-    path: "src/slugify.mjs",
-    content: "export function slugify(text) { return String(text).toLowerCase(); }\n",
-  });
-  assert.equal(write.ok, true);
-  assert.match(await readWorkspaceFile("src/slugify.mjs"), /export function slugify/);
 });
 
 test("write_file rejects a missing path", async () => {
@@ -314,71 +282,6 @@ test("edit_file suggests similar paths when the target is missing", async () => 
   assert.equal(edit.ok, false);
   assert.match(edit.error, /does not exist/);
   assert.match(edit.error, /MathOps\.cs|Did you mean/i);
-});
-
-test("largeInlineWriteHint steers toward generator scripts for huge artifacts", () => {
-  const goal = "Generate output.txt with at least 5000 lines of data.";
-  assert.match(
-    largeInlineWriteHint(goal, "line1\nline2\n"),
-    /generator script|run_command/i,
-  );
-  assert.equal(largeInlineWriteHint(goal, "x\n".repeat(400)), null);
-  assert.equal(largeInlineWriteHint("Write hello.txt", "hi"), null);
-});
-
-test("truncatedSourceIssue flags unbalanced C# and accepts a complete class", () => {
-  assert.match(
-    truncatedSourceIssue("Program.cs", "class Program { static void Main() {"),
-    /truncated|incomplete/i,
-  );
-  assert.equal(
-    truncatedSourceIssue("Program.cs", "class Program { static void Main() {} }\n"),
-    null,
-  );
-});
-
-test("write_file refuses truncated C# source", async () => {
-  const write = await registry.execute("write_file", {
-    path: "Broken.cs",
-    content: "class Broken { void M() {",
-  });
-  assert.equal(write.ok, false);
-  assert.match(write.error, /truncated|incomplete/i);
-});
-
-test("truncatedSourceIssue flags placeholder C# stubs", () => {
-  assert.match(
-    truncatedSourceIssue(
-      "Catalog.cs",
-      "class Catalog { public void List() { throw new NotImplementedException(); } }\n",
-    ),
-    /placeholder|incomplete/i,
-  );
-  assert.match(
-    truncatedSourceIssue("Catalog.cs", "class Catalog {\n  // ... incomplete\n}\n"),
-    /placeholder|incomplete/i,
-  );
-  assert.equal(
-    truncatedSourceIssue("Catalog.cs", "class Catalog { public static void List() {} }\n"),
-    null,
-  );
-});
-
-test("truncatedSourceIssue flags C# CS0542 method/class name clash", () => {
-  assert.match(
-    truncatedSourceIssue(
-      "Slugify.cs",
-      "public static class Slugify { public static string Slugify(string text) { return text; } }\n",
-    ),
-    /CS0542|same name as its class/i,
-  );
-  assert.equal(
-    truncatedSourceIssue(
-      "Slugify.cs",
-      "public static class Slugify { public static string ToSlug(string text) { return text; } }\n",
-    ),
-    null,
-  );
 });
 
 test("edit_file refuses replace_all on a non-unique statement snippet", async () => {
@@ -413,75 +316,3 @@ test("suggestedUniqueSnippets includes enclosing function context", () => {
 
 const BASH_HELLO = "#!/bin/bash\necho hello\n";
 const PS1_HELLO = "Write-Output 'hello'\n";
-
-test("windowsBashScriptIssue refuses new bash scripts on Windows", () => {
-  const win = { platform: "win32" };
-  assert.match(
-    windowsBashScriptIssue("hello.sh", BASH_HELLO, "Create a script that prints hello", win),
-    /\.ps1|PowerShell/,
-  );
-  assert.match(
-    windowsBashScriptIssue("hello.bash", BASH_HELLO, "write a helper script", win),
-    /\.ps1|PowerShell/,
-  );
-  assert.match(
-    windowsBashScriptIssue("run", BASH_HELLO, "Create a script that prints hello", win),
-    /shebang|\.ps1|PowerShell/i,
-  );
-  assert.equal(
-    windowsBashScriptIssue("hello.ps1", PS1_HELLO, "Create a script that prints hello", win),
-    null,
-  );
-  assert.equal(
-    windowsBashScriptIssue("hello.sh", BASH_HELLO, "Create a script that prints hello", {
-      platform: "linux",
-    }),
-    null,
-  );
-  assert.equal(
-    windowsBashScriptIssue("hello.sh", BASH_HELLO, "Write a bash script that prints hello", win),
-    null,
-  );
-  assert.equal(
-    windowsBashScriptIssue("deploy.sh", BASH_HELLO, "Fix deploy.sh", { ...win, exists: true }),
-    null,
-  );
-  assert.equal(
-    windowsBashScriptIssue("cli.mjs", "#!/usr/bin/env node\nexport const x = 1;\n", "Create cli.mjs", win),
-    null,
-  );
-});
-
-test("write_file uses the native shell script type", async () => {
-  registry.setRunContext({ goal: "Create a script that prints hello" });
-  if (process.platform === "win32") {
-    const sh = await registry.execute("write_file", {
-      path: "hello.sh",
-      content: BASH_HELLO,
-    });
-    assert.equal(sh.ok, false);
-    assert.match(sh.error, /\.ps1|PowerShell/);
-    const ps1 = await registry.execute("write_file", {
-      path: "hello.ps1",
-      content: PS1_HELLO,
-    });
-    assert.equal(ps1.ok, true);
-    assert.match(await readWorkspaceFile("hello.ps1"), /Write-Output/);
-  } else {
-    const sh = await registry.execute("write_file", {
-      path: "hello.sh",
-      content: "#!/bin/sh\necho hello\n",
-    });
-    assert.equal(sh.ok, true);
-  }
-});
-
-test("write_file allows an explicit bash script on Windows", async () => {
-  if (process.platform !== "win32") return;
-  registry.setRunContext({ goal: "Create a bash script named hello.sh that prints hello." });
-  const sh = await registry.execute("write_file", {
-    path: "hello.sh",
-    content: BASH_HELLO,
-  });
-  assert.equal(sh.ok, true);
-});

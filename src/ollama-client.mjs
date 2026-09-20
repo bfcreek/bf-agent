@@ -4,7 +4,7 @@
  * deltas (and still returns a complete message for the agent loop).
  */
 
-import { resolveThinkSetting } from "./prompt-enhancements.mjs";
+import { resolveThinkSetting } from "./model-tuning.mjs";
 
 export class OllamaClientError extends Error {
   constructor(message, { status, cause } = {}) {

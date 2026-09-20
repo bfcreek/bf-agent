@@ -11,19 +11,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 
-import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+import { AgentLoop, DEFAULT_MAX_STEPS, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+import { CheckpointStore } from "./checkpoints.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
-import { EscalationController, resolveModelWithEscalation } from "./escalation.mjs";
-import {
-  clearMemory,
-  consolidateMemory,
-  formatCanonicalPrinciples,
-  loadMemoryStore,
-  memoryStats,
-  seedMemoryFromRules,
-} from "./memory-store.mjs";
-import { buildProjectContext } from "./project-index.mjs";
-import { McpClient, registerMcpTools } from "./mcp-client.mjs";
+import { ensureProjectIndex } from "./project-index.mjs";
+import { formatMcpToolIndex, McpClient, registerMcpTools } from "./mcp-client.mjs";
 import {
   ModelRoutingError,
   resolveModelAuto,
@@ -31,8 +23,8 @@ import {
   listClassifiedModelsDetected,
   suggestModel,
 } from "./model-routing.mjs";
-import { DEFAULT_NUM_CTX, DEFAULT_THINK, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
-import { configureClientModel, exportTaskHintSeedRules as getTaskHintRules } from "./prompt-enhancements.mjs";
+import { configureClientModel, modelPromptOverlay } from "./model-tuning.mjs";
+import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
@@ -141,8 +133,8 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       case "--quiet":
         options.quiet = true;
         break;
-      case "--show-plan":
-        options.showPlan = true;
+      case "--no-checkpoints":
+        options.noCheckpoints = true;
         break;
       case "--cwd": {
         const raw = value(arg, ++i);
@@ -203,42 +195,6 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         options.thinkExplicit = true;
         break;
       }
-      case "--no-plan":
-        options.noPlan = true;
-        options.noPlanExplicit = true;
-        break;
-      case "--no-replan":
-        options.noReplan = true;
-        break;
-      case "--no-hints":
-        options.noHints = true;
-        break;
-      case "--no-memory":
-        options.noMemory = true;
-        break;
-      case "--memory-readonly":
-        options.memoryReadonly = true;
-        break;
-      case "--no-critique":
-        options.noCritique = true;
-        break;
-      case "--no-acceptance":
-        options.noAcceptance = true;
-        break;
-      case "--no-escalation":
-        options.escalation = false;
-        break;
-      case "--escalation-cloud":
-        options.escalationCloud = true;
-        options.escalationCloudExplicit = true;
-        break;
-      case "--escalation-max": {
-        const raw = value(arg, ++i);
-        const n = Number.parseInt(raw ?? "", 10);
-        if (Number.isFinite(n) && n >= 0 && n <= 10) options.escalationMax = n;
-        else if (raw !== undefined) options.errors.push(`--escalation-max needs 0–10, got '${raw}'.`);
-        break;
-      }
       case "--help":
       case "-h":
         options.help = true;
@@ -264,9 +220,10 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
     options.serve = true;
     positional.shift();
   }
-  if (positional[0] === "memory") {
+  if (positional[0] === "checkpoints") {
     positional.shift();
-    options.memoryCommand = positional.shift() ?? "stats";
+    options.checkpointsCommand = positional.shift() ?? "list";
+    options.checkpointsRunId = positional.shift();
   }
   if (positional[0] === "models") {
     positional.shift();
@@ -309,7 +266,7 @@ Usage:
   bf-agent models [options]       List installed Ollama models and tool compliance
   bf-agent models config edit       Create or open the model-routing config (models.yaml)
   bf-agent config edit              Create or open the general user config (config.yaml)
-  bf-agent memory list|stats|consolidate|clear|seed  Episodic memory store
+  bf-agent checkpoints [list|restore <run-id>]  File snapshots taken before edits
 
 Config:
   General defaults: ${getConfigPath()} (YAML)
@@ -323,7 +280,7 @@ Options:
   --tier-preset <name> Preset for model routing: ${TIER_PRESET_HELP}
   --tier <n>           Task difficulty 0–6 for model routing (default from models.yaml)
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
-  --max-steps <n>      Max model round-trips (default 10)
+  --max-steps <n>      Max model round-trips (default ${DEFAULT_MAX_STEPS})
   --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
   --wall-clock <sec>   Wall-clock budget for the run (also HALO_WALL_CLOCK_SECONDS). Time spent
                        counts toward budget pressure, command timeouts are clamped to what
@@ -337,19 +294,9 @@ Options:
   --no-index           Skip building the local project vector index
   --think <mode>       Native model reasoning: auto (default), true, false/off,
                        or low|medium|high|max (for thinking models / gpt-oss)
-  --no-plan            Skip the planning pre-pass on the first turn
-  --no-replan          Skip mid-run remaining-step replan and follow-up adjust
-  --show-plan          Print Goals/plan/Acceptance/checkpoints on stderr (hidden by default)
-  --no-hints           Skip task-type constraint hints in the user message
-  --no-memory          Skip episodic memory retrieval and writes
-  --memory-readonly    Retrieve memory but do not update stats or write lessons
-  --no-critique        Skip self-critique pass after planning
-  --no-acceptance      Skip acceptance-contract verification gate
-  --no-escalation      Disable mid-run model escalation (use strongest model up front)
-  --escalation-max <n> Max model escalations per run (default 2)
-  --escalation-cloud   Allow escalation onto paid cloud models (default local only)
+  --no-checkpoints     Do not snapshot files before write_file/edit_file
   --port <n>           Port for serve mode (default 11435)
-  --quiet              Only print the final answer (overrides --show-plan)
+  --quiet              Only print the final answer
   --json               JSON output (models command)
   --                   Treat everything after as the goal, even if it starts with -
   -v, --version        Print the version
@@ -372,15 +319,6 @@ Examples:
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
   3  Ollama error   4  MCP attach failed`);
-}
-
-function makeProjectBootstrap(options, client) {
-  return {
-    workspaceRoot: options.cwd,
-    client: options.noIndex ? undefined : client,
-    embeddingModel: options.embedModel,
-    onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
-  };
 }
 
 function makeApprovalPrompt() {
@@ -522,7 +460,6 @@ async function runInteractiveSession({
             `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
           );
         }
-        maybeDescribeAcceptance(options, result);
         if (result.text) console.log(result.text);
       } catch (err) {
         if (err instanceof OllamaClientError) {
@@ -590,99 +527,55 @@ async function listOllamaModels(options) {
   }
 }
 
-/**
- * @param {object} step
- * @param {{ showPlan?: boolean }} [opts]
- */
-function describeStep(step, opts = {}) {
-  if (step.kind === "plan") {
-    if (!opts.showPlan) return;
-    console.error(`[plan]\n${step.content}`);
+/** @param {object} step */
+function describeStep(step) {
+  if (step.kind === "steer") {
+    console.error(`[steer] ${step.content}`);
     return;
   }
-  if (step.kind === "checkpoint") {
-    if (!opts.showPlan) return;
-    console.error(`[checkpoint]\n${step.content}`);
+  if (step.kind === "failed") {
+    console.error(`[failed] ${step.content}`);
     return;
   }
-  if (step.kind === "escalation") {
-    console.error(`[escalation] ${step.content}`);
-    return;
-  }
-  if (step.kind === "final") return;
-  for (const call of step.toolCalls) {
+  for (const call of step.toolCalls ?? []) {
     const status = call.ok ? "ok" : `error: ${call.error}`;
     console.error(`[step ${step.index}] ${call.name}(${JSON.stringify(call.args)}) -> ${status}`);
   }
 }
 
-/**
- * @param {{ passed?: boolean, checks?: Array<{kind: string, target: string, passed: boolean, detail?: string}>, missing?: string[] } | undefined} verification
- */
-function describeAcceptance(verification) {
-  if (!verification?.checks?.length) return;
-  const status = verification.passed ? "passed" : "failed";
-  console.error(`[acceptance] ${status}`);
-  for (const check of verification.checks) {
-    const mark = check.passed ? "ok" : "fail";
-    const detail = check.detail ? ` (${check.detail})` : "";
-    console.error(`  ${mark} ${check.kind}: ${check.target}${detail}`);
-  }
-  if (!verification.passed && verification.missing?.length) {
-    console.error(`  still required: ${verification.missing.join("; ")}`);
-  }
-}
-
-/**
- * @param {object} options
- * @param {{ verification?: object }} result
- */
-function maybeDescribeAcceptance(options, result) {
-  if (options.quiet || options.showPlan !== true) return;
-  describeAcceptance(result.verification);
-}
-
-async function runMemoryCommand(options, client) {
-  const cmd = options.memoryCommand ?? "stats";
+async function runCheckpointsCommand(options) {
+  const cmd = options.checkpointsCommand ?? "list";
   switch (cmd) {
     case "list": {
-      const store = await loadMemoryStore();
-      for (const lesson of store.lessons.filter((l) => l.status !== "retired")) {
-        console.log(`${lesson.id}\t${lesson.status}\t${lesson.source}\t${lesson.lesson.slice(0, 120)}`);
+      const runs = await CheckpointStore.list(options.cwd);
+      if (options.json) {
+        console.log(JSON.stringify(runs, null, 2));
+        return;
+      }
+      if (runs.length === 0) {
+        console.log("No checkpoints.");
+        return;
+      }
+      for (const run of runs) {
+        console.log(`${run.runId}  (${run.files.length} file${run.files.length === 1 ? "" : "s"})`);
+        for (const file of run.files) console.log(`  ${file.existed ? "modified" : "created "}  ${file.path}`);
       }
       return;
     }
-    case "stats": {
-      const stats = await memoryStats();
-      console.log(JSON.stringify(stats, null, 2));
-      return;
-    }
-    case "consolidate": {
-      const result = await consolidateMemory({ embeddingModel: options.embedModel });
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-    case "clear": {
-      await clearMemory();
-      console.log("Memory cleared.");
-      return;
-    }
-    case "seed": {
-      if (!client?.embed) {
-        console.error("Embedding client required for seed (Ollama with embed model).");
+    case "restore": {
+      if (!options.checkpointsRunId) {
+        console.error("Usage: bf-agent checkpoints restore <run-id>");
         process.exitCode = 1;
         return;
       }
-      const count = await seedMemoryFromRules({
-        rules: getTaskHintRules(),
-        client,
-        embeddingModel: options.embedModel,
-      });
-      console.log(`Seeded ${count} lesson(s) from task hint rules.`);
+      const { restored, removed } = await CheckpointStore.restore(options.cwd, options.checkpointsRunId);
+      console.log(`Restored ${restored.length} file(s), removed ${removed.length} from ${options.checkpointsRunId}.`);
+      for (const file of restored) console.log(`  restored ${file}`);
+      for (const file of removed) console.log(`  removed  ${file}`);
       return;
     }
     default:
-      console.error(`Unknown memory subcommand '${cmd}'. Use: list, stats, consolidate, clear, seed`);
+      console.error(`Unknown checkpoints subcommand '${cmd}'. Use: list, restore <run-id>`);
       process.exitCode = 1;
   }
 }
@@ -733,7 +626,11 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (!options.goal && !options.serve && !options.listModels && !options.memoryCommand) {
+  if (options.checkpointsCommand) {
+    await runCheckpointsCommand(options);
+    return;
+  }
+  if (!options.goal && !options.serve && !options.listModels) {
     const forceInteractive = process.env.HALO_AGENT_FORCE_INTERACTIVE === "1";
     if ((process.stdin.isTTY && process.stdout.isTTY) || forceInteractive) {
       options.interactive = true;
@@ -751,11 +648,7 @@ async function main() {
   }
 
   const effectivePreset = options.tierPreset ?? modelsConfigValues.tierPreset;
-  applyTierPresetPolicy(options, effectivePreset, {
-    thinkExplicit: options.thinkExplicit === true,
-    planningExplicit: options.noPlanExplicit === true,
-    escalationCloudExplicit: options.escalationCloudExplicit === true,
-  });
+  applyTierPresetPolicy(options, effectivePreset, { thinkExplicit: options.thinkExplicit === true });
   const presetPolicy = getTierPresetPolicy(effectivePreset);
 
   const client = new OllamaClient({
@@ -765,30 +658,12 @@ async function main() {
     think: options.think,
   });
 
-  if (options.memoryCommand) {
-    await runMemoryCommand(options, client);
-    return;
-  }
-
-  let modelLadder = [];
-
   // Route to an installed, suitable model up front; skip silently when Ollama is
   // unreachable — the run itself will surface that error clearly.
   try {
-    if (
-      options.escalation !== false &&
-      options.model === "auto" &&
-      !modelsConfigExists &&
-      !options.tierPreset &&
-      !presetPolicy.cloudOnly
-    ) {
-      const routed = await resolveModelWithEscalation({
-        requested: options.model,
-        client,
-        escalationEnabled: true,
-      });
-      modelLadder = routed.ladder ?? [];
-      for (const warning of routed.warnings) console.error(warning);
+    if (options.model === "auto" && !modelsConfigExists && !options.tierPreset && !presetPolicy.cloudOnly) {
+      const routed = await resolveModelAuto({ requested: options.model, client });
+      for (const warning of routed.warnings ?? []) console.error(warning);
       options.model = routed.model;
       await configureClientModel(client, routed.model);
     } else {
@@ -796,15 +671,6 @@ async function main() {
       for (const warning of routed.warnings) console.error(warning);
       options.model = routed.model;
       await configureClientModel(client, routed.model);
-      if (options.escalation !== false) {
-        const esc = await resolveModelWithEscalation({
-          requested: "auto",
-          client,
-          escalationEnabled: false,
-          cloudOnly: presetPolicy.cloudOnly,
-        });
-        modelLadder = esc.ladder ?? [];
-      }
     }
   } catch (err) {
     if (err instanceof ModelRoutingError) {
@@ -825,10 +691,12 @@ async function main() {
     // Ollama unreachable — fall through; the run itself will surface that error.
   }
 
+  const checkpointStore = options.noCheckpoints ? undefined : new CheckpointStore({ workspaceRoot: options.cwd });
   const registry = registerBuiltinTools(new ToolRegistry(), {
     workspaceRoot: options.cwd,
     searchClient: options.noIndex ? undefined : client,
     embeddingModel: options.embedModel,
+    checkpoints: checkpointStore,
   });
 
   const mcpClients = [];
@@ -851,46 +719,25 @@ async function main() {
     }
   }
 
-  const projectContext = await buildProjectContext({
-    workspaceRoot: options.cwd,
-    client: options.noIndex ? undefined : client,
-    embeddingModel: options.embedModel,
-    index: !options.noIndex,
-    onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
-  });
-
-  const canonical = !options.noMemory ? await formatCanonicalPrinciples() : "";
-  const systemPrompt = await buildSystemPrompt({
-    basePrompt: canonical ? `${DEFAULT_SYSTEM_PROMPT}\n\n${canonical}` : DEFAULT_SYSTEM_PROMPT,
-    workspaceRoot: options.cwd,
-    projectContext,
-  });
-
-  const escalationController =
-    options.escalation !== false && modelLadder.length > 1
-      ? new EscalationController({
-          client,
-          ladder: modelLadder,
-          maxEscalations: options.escalationMax ?? 2,
-          allowCloud: options.escalationCloud === true || presetPolicy.cloudOnly,
-        })
-      : false;
-
-  if (!options.noMemory && client.embed) {
-    const store = await loadMemoryStore();
-    if (!store.lessons.length) {
-      try {
-        const seeded = await seedMemoryFromRules({
-          rules: getTaskHintRules(),
-          client,
-          embeddingModel: options.embedModel,
-        });
-        if (seeded && !options.quiet) console.error(`[memory] seeded ${seeded} lesson(s) from task hints`);
-      } catch {
-        // Seed is best-effort.
-      }
+  if (!options.noIndex) {
+    try {
+      await ensureProjectIndex({
+        workspaceRoot: options.cwd,
+        client,
+        embeddingModel: options.embedModel,
+        onProgress: options.quiet ? undefined : (msg) => console.error(`[index] ${msg}`),
+      });
+    } catch {
+      // Index is best-effort; search_project reports its own errors.
     }
   }
+
+  const systemPrompt = await buildSystemPrompt({
+    basePrompt: DEFAULT_SYSTEM_PROMPT,
+    modelOverlay: modelPromptOverlay(options.model),
+    workspaceRoot: options.cwd,
+    extraContext: formatMcpToolIndex(registry),
+  });
 
   if (options.serve) {
     let serveTierModels = null;
@@ -913,7 +760,6 @@ async function main() {
       defaultModel: options.model,
       tierModels: serveTierModels,
       defaultTier: options.taskTier ?? modelsConfigValues.defaultTier ?? DEFAULT_TASK_TIER,
-      projectBootstrap: makeProjectBootstrap(options, client),
     });
     server.listen(options.port, () => {
       const { port } = server.address();
@@ -964,11 +810,7 @@ async function main() {
           messages: partial.messages ?? priorSession?.messages ?? [],
           steps: liveRunSteps,
           stopReason: partial.stopReason ?? "running",
-          // Escalations happen mid-run; a killed process must not report 0.
-          escalationCount: partial.escalationCount ?? escalationController?.escalationCount,
-          cloudUsed: partial.cloudUsed ?? escalationController?.cloudUsed,
-          verification: partial.verification,
-          verificationPassed: partial.verificationPassed,
+          checkpointRunId: checkpointStore?.runId,
           error: partial.error,
         });
         await store.save(options.session, draft);
@@ -979,16 +821,12 @@ async function main() {
     return liveFlushBusy;
   };
 
-  const describe = options.quiet
-    ? undefined
-    : (step) => describeStep(step, { showPlan: options.showPlan === true });
-
   const onStep = (step) => {
     if (store && options.session && !options.interactive) {
       liveRunSteps.push(step);
       void flushLiveSession();
     }
-    describe?.(step);
+    if (!options.quiet) describeStep(step);
   };
 
   const loop = new AgentLoop({
@@ -998,25 +836,7 @@ async function main() {
     maxSteps: options.maxSteps,
     onStep,
     compaction: {},
-    planning: !options.noPlan,
-    replan: !options.noPlan && !options.noReplan,
-    taskHints: !options.noHints,
-    memory: !options.noMemory,
-    memoryReadonly: options.memoryReadonly === true,
-    embeddingModel: options.embedModel,
-    acceptance: !options.noAcceptance,
-    critique: !options.noCritique,
-    escalation: escalationController,
     wallClockMs: resolveWallClockMs(options),
-    projectBootstrap: makeProjectBootstrap(options, client),
-    onBootstrap: options.quiet
-      ? undefined
-      : ({ readme, ragHits }) => {
-          const parts = [];
-          if (readme) parts.push("README");
-          if (ragHits > 0) parts.push(`${ragHits} indexed passage(s)`);
-          if (parts.length > 0) console.error(`[bootstrap] auto-retrieved ${parts.join(" + ")}`);
-        },
   });
 
   const onKillSignal = () => {
@@ -1048,7 +868,10 @@ async function main() {
 
     if (store) {
       await flushLiveSession();
-      const saved = store.merge(options.session, priorSession, result);
+      const saved = store.merge(options.session, priorSession, {
+        ...result,
+        checkpointRunId: checkpointStore?.runId,
+      });
       await store.save(options.session, saved);
       if (!options.quiet && saved.changedFiles.length > 0) {
         console.error(`[session ${options.session}] files changed: ${saved.changedFiles.join(", ")}`);
@@ -1061,22 +884,16 @@ async function main() {
           ? `Stopped at the wall-clock budget (${Math.round((result.elapsedMs ?? 0) / 1000)}s); the answer below may be incomplete (raise --wall-clock to allow more).`
           : `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
       );
-      maybeDescribeAcceptance(options, result);
       if (result.text) console.log(result.text);
       process.exitCode = 2;
       return;
     }
     if (result.stopReason === "failed") {
-      if (result.diagnostic) console.error(result.diagnostic);
-      else if (result.wallClockExhausted)
-        console.error("Agent stopped: wall-clock budget exhausted with required work incomplete.");
-      else console.error("Agent stopped: required work incomplete after empty model responses.");
-      maybeDescribeAcceptance(options, result);
+      console.error(result.error ?? "Agent stopped: the model returned no usable response.");
       if (result.text) console.log(result.text);
       process.exitCode = 1;
       return;
     }
-    maybeDescribeAcceptance(options, result);
     console.log(result.text);
   } catch (err) {
     if (store && options.session) {

@@ -197,28 +197,130 @@ export class McpClient {
 }
 
 /**
- * Bridge an MCP server's tools into the registry so the loop can call them
- * like builtins. Names are prefixed to avoid collisions (`mcp_<name>` by
- * default) and sanitized to the OpenAI function-name charset.
+ * Bridge an MCP server's tools into the registry.
+ *
+ * Two modes, following Cursor's dynamic MCP loading:
+ *
+ * - `lazy` (default): the model sees only tool names and one-line descriptions
+ *   (via {@link formatMcpToolIndex} in the system prompt) plus two generic
+ *   tools, `describe_tool` and `call_mcp_tool`. It fetches a schema only when
+ *   it decides to use that tool, so large servers do not flood every request
+ *   with schemas.
+ * - `inline` (`lazy: false`): each MCP tool is registered as its own
+ *   function `mcp_<name>` with its full schema in every request.
  *
  * @param {import("./tool-registry.mjs").ToolRegistry} registry
  * @param {McpClient} client
  * @param {object} [options]
- * @param {string} [options.prefix]
- * @returns {Promise<string[]>} Registered tool names.
+ * @param {string} [options.prefix] Inline-mode name prefix.
+ * @param {boolean} [options.lazy]
+ * @returns {Promise<string[]>} Tool names made available (registered names in
+ *   inline mode, catalog names in lazy mode).
  */
-export async function registerMcpTools(registry, client, { prefix = "mcp_" } = {}) {
+export async function registerMcpTools(registry, client, { prefix = "mcp_", lazy = true } = {}) {
   const tools = await client.listTools();
-  const registered = [];
-  for (const tool of tools) {
-    const name = `${prefix}${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, "_");
-    registry.register({
-      name,
-      description: tool.description ?? `MCP tool '${tool.name}'.`,
-      parameters: tool.inputSchema ?? { type: "object", properties: {} },
-      execute: (args) => client.callTool(tool.name, args),
-    });
-    registered.push(name);
+  const serverName = client.serverInfo?.name ?? "mcp";
+
+  if (!lazy) {
+    const registered = [];
+    for (const tool of tools) {
+      const name = `${prefix}${tool.name}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+      registry.register({
+        name,
+        description: tool.description ?? `MCP tool '${tool.name}'.`,
+        parameters: tool.inputSchema ?? { type: "object", properties: {} },
+        execute: (args) => client.callTool(tool.name, args),
+      });
+      registered.push(name);
+    }
+    return registered;
   }
-  return registered;
+
+  if (!registry.mcpCatalog) registry.mcpCatalog = new Map();
+  const names = [];
+  for (const tool of tools) {
+    const name = `${serverName}/${tool.name}`;
+    registry.mcpCatalog.set(name, { server: serverName, client, tool });
+    names.push(name);
+  }
+  ensureMcpBridgeTools(registry);
+  return names;
+}
+
+function ensureMcpBridgeTools(registry) {
+  if (!registry.has("describe_tool")) {
+    registry.register({
+      name: "describe_tool",
+      description:
+        "Get the full description and JSON argument schema of an MCP tool listed under 'MCP tools' in your instructions. Call this before call_mcp_tool for a tool you have not used yet.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Tool name as listed, e.g. 'server/tool'." },
+        },
+        required: ["name"],
+      },
+      execute({ name }) {
+        const entry = lookupMcpTool(registry, name);
+        return {
+          name,
+          description: entry.tool.description ?? "",
+          parameters: entry.tool.inputSchema ?? { type: "object", properties: {} },
+        };
+      },
+    });
+  }
+  if (!registry.has("call_mcp_tool")) {
+    registry.register({
+      name: "call_mcp_tool",
+      description:
+        "Call an MCP tool listed under 'MCP tools' in your instructions, with arguments matching the schema from describe_tool.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Tool name as listed, e.g. 'server/tool'." },
+          arguments: { type: "object", description: "Arguments object for the tool." },
+        },
+        required: ["name"],
+      },
+      execute({ name, arguments: args }) {
+        const entry = lookupMcpTool(registry, name);
+        return entry.client.callTool(entry.tool.name, args ?? {});
+      },
+    });
+  }
+}
+
+function lookupMcpTool(registry, name) {
+  const catalog = registry.mcpCatalog ?? new Map();
+  const key = String(name ?? "").trim();
+  let entry = catalog.get(key);
+  if (!entry) {
+    // Accept the bare tool name when it is unambiguous.
+    const matches = [...catalog.entries()].filter(([full]) => full.endsWith(`/${key}`));
+    if (matches.length === 1) entry = matches[0][1];
+  }
+  if (!entry) {
+    const known = [...catalog.keys()];
+    throw new Error(`Unknown MCP tool '${name}'. Known tools: ${known.join(", ") || "(none)"}.`);
+  }
+  return entry;
+}
+
+/**
+ * System-prompt block listing lazily registered MCP tools by name and short
+ * description. Empty string when there are none.
+ *
+ * @param {import("./tool-registry.mjs").ToolRegistry} registry
+ * @returns {string}
+ */
+export function formatMcpToolIndex(registry) {
+  const catalog = registry?.mcpCatalog;
+  if (!catalog || catalog.size === 0) return "";
+  const lines = ["## MCP tools (describe_tool for the schema, call_mcp_tool to invoke)"];
+  for (const [name, { tool }] of catalog) {
+    const desc = String(tool.description ?? "").split(/\r?\n/)[0].trim().slice(0, 120);
+    lines.push(`- ${name}${desc ? `: ${desc}` : ""}`);
+  }
+  return lines.join("\n");
 }

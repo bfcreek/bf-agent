@@ -3,11 +3,12 @@ node_modules/
 .env
 .halo-agent/
 evals-*.json
+# Accidental repo-root dumps (reports now go to ../halo-agent-benchmark/local/)
 bench-*.json
 bench-*.md
+bench-*.txt
 ah-train-log.md
 ha-train-log.md
-evals/tb-scoreboard-history.jsonl
 bench-test.json
 bench-test.md
 __pycache__/

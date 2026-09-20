@@ -1,83 +1,42 @@
 /**
- * bf-agent SDK: the public embedding API. Everything the CLI and server
- * are built from is exported here, plus `createAgent` — a one-call setup
- * for the common case.
+ * Bitfield Agent SDK entry point.
  *
- * import { createAgent } from "@bitfieldcreek/bf-agent";
- * const agent = await createAgent({ model: "qwen3-coder:30b" });
- * const { text } = await agent.run("summarize src/agent-loop.mjs");
+ *   import { createAgent } from "@bitfieldcreek/bf-agent";
+ *   const agent = await createAgent({ workspaceRoot: process.cwd() });
+ *   const { text } = await agent.run("what does this project do?");
+ *
+ * The agent is Cursor-shaped: a short system prompt plus rules files, a tool
+ * set the model uses to find its own context, and a thin loop that runs
+ * until the model stops calling tools. Hooks (`beforeToolCall`,
+ * `afterToolCall`, `stop`) are where callers add policy.
  */
+
 import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+import { CheckpointStore } from "./checkpoints.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
-import { EscalationController, resolveModelWithEscalation } from "./escalation.mjs";
-import { formatCanonicalPrinciples } from "./memory-store.mjs";
-import { buildProjectContext } from "./project-index.mjs";
+import { formatMcpToolIndex } from "./mcp-client.mjs";
 import {
   ModelRoutingError,
   resolveModelAuto,
   assertToolCapable,
   assertVisionCapable,
 } from "./model-routing.mjs";
+import { configureClientModel, modelPromptOverlay } from "./model-tuning.mjs";
 import { OllamaClient } from "./ollama-client.mjs";
-import { configureClientModel } from "./prompt-enhancements.mjs";
+import { ensureProjectIndex } from "./project-index.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 
-export { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
-
 export {
-  acceptanceFailureNudge,
-  buildAcceptanceContract,
-  buildHeuristicContract,
-  CONTRACT_PROGRESS_CRITIQUE,
-  CRITIQUE_USER_MESSAGE,
-  formatAcceptanceContract,
-  isVerifyOutstandingOnly,
-  parseAcceptanceBlock,
-  verifyAcceptanceContract,
-} from "./acceptance.mjs";
+  AgentLoop,
+  DEFAULT_MAX_STEPS,
+  DEFAULT_MAX_STOP_HOOK_LOOPS,
+  DEFAULT_SYSTEM_PROMPT,
+  isToolCallParseError,
+  toolResultContent,
+} from "./agent-loop.mjs";
 
-export {
-  ADJUST_PLAN_MESSAGE,
-  createPlanState,
-  findLastPlanText,
-  formatCheckpoint,
-  isPlanPrompt,
-  markProgress,
-  MAX_REMAINING_REPLANS,
-  missingKey,
-  parsePlanSteps,
-  pathsInStepText,
-  REPLAN_REMAINING_MESSAGE,
-} from "./plan-state.mjs";
-
-export {
-  buildModelLadder,
-  computeStruggleScore,
-  DEFAULT_ESCALATION_THRESHOLD,
-  EscalationController,
-  resolveModelWithEscalation,
-  suggestWeakestLocalModel,
-} from "./escalation.mjs";
-
-export {
-  AUTO_CONSOLIDATE_EVERY,
-  clearMemory,
-  consolidateMemory,
-  formatCanonicalPrinciples,
-  formatMemoryHints,
-  lessonRankScore,
-  lessonWinRate,
-  loadMemoryStore,
-  maybeWriteLesson,
-  memoryStats,
-  memoryStorePath,
-  rankLessons,
-  recordLessonOutcomes,
-  retrieveMemoryHints,
-  seedMemoryFromRules,
-  shouldWriteLesson,
-} from "./memory-store.mjs";
+export { CHECKPOINT_DIR, CheckpointStore } from "./checkpoints.mjs";
 
 export {
   describeFitBudget,
@@ -89,21 +48,21 @@ export {
 
 export {
   buildEnvironmentContext,
+  buildGitSnapshot,
   buildSystemPrompt,
+  listNestedAgentsFiles,
+  listRules,
   loadAppliedInstructions,
   parseRuleFrontmatter,
   shouldAlwaysApplyRule,
 } from "./context-builder.mjs";
 
 export {
-  buildProjectContext,
   chunkText,
   discoverIndexFiles,
   ensureProjectIndex,
-  gatherFirstTurnProjectContext,
   indexPath,
   loadIndex,
-  readProjectReadme,
   searchProjectIndex,
   DEFAULT_EMBEDDING_MODEL,
 } from "./project-index.mjs";
@@ -112,14 +71,13 @@ export {
   compactMessages,
   estimateTokens,
   extractOriginalInstruction,
-  formatVerificationRecap,
   transcriptSize,
   DEFAULT_CONTEXT_FRACTION,
   DEFAULT_KEEP_RECENT,
   DEFAULT_MAX_CHARS,
 } from "./compaction.mjs";
 
-export { McpClient, McpError, registerMcpTools } from "./mcp-client.mjs";
+export { formatMcpToolIndex, McpClient, McpError, registerMcpTools } from "./mcp-client.mjs";
 
 export {
   assertToolCapable,
@@ -145,6 +103,8 @@ export {
   suggestModel,
 } from "./model-routing.mjs";
 
+export { configureClientModel, isGptOssModel, modelPromptOverlay, resolveThinkSetting } from "./model-tuning.mjs";
+
 export {
   DEFAULT_NUM_CTX,
   DEFAULT_TEMPERATURE,
@@ -153,49 +113,25 @@ export {
   OllamaClientError,
 } from "./ollama-client.mjs";
 
-export {
-  COMPLEX_GOAL_MIN_WORDS,
-  PLANNING_USER_MESSAGE,
-  completionVerifyNudge,
-  configureClientModel,
-  detectTaskHints,
-  finalAnswerNudge,
-  exportTaskHintSeedRules,
-  formatExplicitGoals,
-  formatTaskConstraints,
-  isComplexGoal,
-  shouldPlanGoal,
-  isGptOssModel,
-  mutationBlockedUntilPretest,
-  prematureFinalNudge,
-  redundantVerifyBlock,
-  repeatedEditMissNudge,
-  verificationCompleteOutcome,
-  blockedCommandOutcome,
-  synthesizeFinalAnswer,
-  resolveThinkSetting,
-} from "./prompt-enhancements.mjs";
-
 export { createOpenAIServer } from "./openai-server.mjs";
 
 export { changedFilesFromSteps, SessionStore } from "./session-store.mjs";
 
 export { ToolRegistry } from "./tool-registry.mjs";
 
-export { registerBuiltinTools } from "./tools/builtin.mjs";
+export { registerBuiltinTools, registerRuleTool } from "./tools/builtin.mjs";
 
 export { registerProjectSearchTool } from "./tools/project-search.mjs";
 
 export {
-  MAX_TOOL_OUTPUT_CHARS,
   nearbySnippet,
   normalizeWorkspaceRelativePath,
   registerFileTools,
   replaceFlexible,
   resolveWithinRoot,
-  truncateMiddle,
-  truncateOutput,
 } from "./tools/fs.mjs";
+
+export { createOutputSpiller, MAX_TOOL_OUTPUT_CHARS, truncateMiddle, truncateOutput } from "./tools/output.mjs";
 
 export { globToRegExp, registerSearchTools } from "./tools/search.mjs";
 
@@ -235,8 +171,10 @@ export {
  *   Ollama on every call; null uses Ollama's server default.
  * @param {string} [options.workspaceRoot] Root for file/shell tools and the
  *   workspace snapshot in the system prompt.
- * @param {number} [options.maxSteps]
+ * @param {number} [options.maxSteps] Safety cap on model round-trips per turn.
+ * @param {number} [options.wallClockMs] Wall-clock budget per run (0 = none).
  * @param {object|false} [options.compaction] Loop compaction settings; on by default.
+ * @param {import("./agent-loop.mjs").AgentHooks} [options.hooks]
  * @param {(step: object) => void} [options.onStep]
  * @param {(delta: string) => void} [options.onDelta] Live content tokens from the model.
  * @param {(request: {name: string, args: object}) => Promise<boolean>|boolean} [options.approvalHandler]
@@ -244,58 +182,38 @@ export {
  * @param {Array<import("./tool-registry.mjs").ToolDefinition>} [options.tools]
  *   Extra tools registered alongside (or instead of) the builtins.
  * @param {boolean} [options.builtinTools] Set false for a custom-tools-only agent.
- * @param {boolean} [options.projectIndex] Build/search local project index (default true).
- * @param {string} [options.embeddingModel] Embedding model for project index.
- * @param {boolean} [options.projectBootstrap] First-turn README/RAG injection (default true).
+ * @param {boolean} [options.projectIndex] Build the local project index and
+ *   register search_project (default true when an embed client is available).
+ * @param {string} [options.embeddingModel] Embedding model for the project index.
+ * @param {boolean} [options.checkpoints] Snapshot files before writes (default true).
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
- * @param {boolean} [options.planning] Planning pre-pass on first turns (default true).
- * @param {boolean} [options.replan] Mid-run replan + follow-up adjust (default true; off when planning is false).
- * @param {boolean} [options.taskHints] Task-type constraint hints (default true).
- * @param {boolean} [options.memory] Episodic memory retrieval (default true when embed available).
- * @param {boolean} [options.memoryReadonly] Read-only memory mode for evals.
- * @param {string} [options.embeddingModel]
- * @param {boolean} [options.acceptance] Acceptance contract gate (default true).
- * @param {boolean} [options.critique] Self-critique after planning (default true).
- * @param {import("./escalation.mjs").EscalationController|false} [options.escalation]
- * @param {boolean} [options.escalationCloud] Allow escalation onto paid cloud
- *   rungs. Off by default so escalation stays within installed local models.
- * @param {boolean} [options.cloudOnly] Restrict the escalation ladder to Ollama cloud models.
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
+ * @param {boolean} [options.requireVision] Route to a vision-capable model.
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).
  */
-
 export async function createAgent({
   model = "auto",
   baseUrl,
   numCtx,
   workspaceRoot = process.cwd(),
-  maxSteps = 10,
+  maxSteps,
+  wallClockMs,
   compaction = {},
+  hooks,
   onStep,
   onDelta,
   approvalHandler,
   tools,
   builtinTools = true,
   projectIndex = true,
-  projectBootstrap = true,
   embeddingModel,
+  checkpoints = true,
   systemPrompt,
-  planning = true,
-  replan = true,
-  taskHints = true,
-  memory = true,
-  memoryReadonly = false,
-  acceptance = true,
-  critique = true,
-  escalation = false,
-  escalationCloud = false,
-  cloudOnly = false,
   think,
   requireVision = false,
   client,
 } = {}) {
   let resolvedModel = model;
-  let modelLadder = [];
   const resolvedClient =
     client ??
     new OllamaClient({
@@ -306,15 +224,8 @@ export async function createAgent({
     });
   if (!client) {
     try {
-      const routed = await resolveModelWithEscalation({
-        requested: resolvedModel,
-        client: resolvedClient,
-        escalationEnabled: escalation !== false && resolvedModel === "auto" && !cloudOnly,
-        requireVision,
-        cloudOnly,
-      });
+      const routed = await resolveModelAuto({ requested: resolvedModel, client: resolvedClient, requireVision });
       resolvedModel = routed.model;
-      modelLadder = routed.ladder ?? [];
       await configureClientModel(resolvedClient, routed.model);
     } catch (err) {
       if (err instanceof ModelRoutingError) throw err;
@@ -329,71 +240,58 @@ export async function createAgent({
       if (requireVision) assertVisionCapable(resolvedModel);
     }
   }
+
+  const useIndex = projectIndex && typeof resolvedClient.embed === "function";
+  const checkpointStore = checkpoints ? new CheckpointStore({ workspaceRoot }) : undefined;
   const registry = new ToolRegistry();
   if (builtinTools) {
     registerBuiltinTools(registry, {
       workspaceRoot,
-      searchClient: projectIndex ? resolvedClient : undefined,
+      searchClient: useIndex ? resolvedClient : undefined,
       embeddingModel,
+      checkpoints: checkpointStore,
     });
   }
   for (const tool of tools ?? []) registry.register(tool);
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
-  const canonical = memory && resolvedClient.embed ? await formatCanonicalPrinciples() : "";
-  const basePrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
+  if (useIndex) {
+    try {
+      await ensureProjectIndex({ workspaceRoot, client: resolvedClient, embeddingModel });
+    } catch {
+      // Index is best-effort; search_project reports its own errors.
+    }
+  }
+
   const prompt =
     systemPrompt != null
       ? systemPrompt
       : await buildSystemPrompt({
-          basePrompt: canonical ? `${basePrompt}\n\n${canonical}` : basePrompt,
+          basePrompt: DEFAULT_SYSTEM_PROMPT,
+          modelOverlay: modelPromptOverlay(resolvedClient.model),
           workspaceRoot,
-          projectContext: await buildProjectContext({
-            workspaceRoot,
-            client: projectIndex ? resolvedClient : undefined,
-            embeddingModel,
-            index: projectIndex,
-          }),
+          extraContext: formatMcpToolIndex(registry),
         });
-  const escalationController =
-    escalation instanceof EscalationController
-      ? escalation
-      : escalation !== false && modelLadder.length > 1
-        ? new EscalationController({
-            client: resolvedClient,
-            ladder: modelLadder,
-            allowCloud: escalationCloud === true || cloudOnly,
-          })
-        : false;
+
   const loop = new AgentLoop({
     client: resolvedClient,
     registry,
     systemPrompt: prompt,
-    maxSteps,
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
+    ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     onStep,
     onDelta,
     compaction,
-    planning,
-    replan: planning !== false && replan !== false,
-    taskHints,
-    memory: memory && Boolean(resolvedClient.embed),
-    memoryReadonly,
-    embeddingModel,
-    acceptance,
-    critique,
-    escalation: escalationController,
-    projectBootstrap: projectBootstrap
-      ? {
-          workspaceRoot,
-          client: projectIndex ? resolvedClient : undefined,
-          embeddingModel,
-        }
-      : false,
+    hooks,
   });
   return {
     loop,
     registry,
     client: resolvedClient,
-    /** @type {(goal: string, options?: {history?: Array<object>, signal?: AbortSignal}) => Promise<import("./agent-loop.mjs").AgentRunResult>} */
+    checkpoints: checkpointStore,
+    /** @type {(goal: string, options?: {history?: Array<object>, signal?: AbortSignal, images?: string[]}) => Promise<import("./agent-loop.mjs").AgentRunResult>} */
     run: (goal, options) => loop.run(goal, options),
+    steer: (text) => loop.steer(text),
+    queue: (text) => loop.queue(text),
   };
 }

@@ -118,9 +118,36 @@ CLI:
 
 `evaluateGates(report, gatesConfig)` in `evals/gates.mjs` returns pass/fail per gate + overall.
 
+#### Split verdict (added 2026-09-20)
+
+The judge now returns two scores per scenario, and the gates above read only
+the first:
+
+- **Outcome** (`verdict.score`, mirrored at `verdict.outcome.score`) — did the
+  deliverable satisfy the task. When a mechanical oracle exists (scenario
+  `precheck`, integrity check, or the Harbor reward) it fixes the band: pass
+  → 70–100, fail → 0–50; the judge places the score inside the band. The raw
+  judge number stays at `outcome.judgeScore` and `outcome.agreesWithOracle`
+  flags a precheck that disagrees with the judge, which is a scenario bug to
+  fix before trusting the trend. `avgScoreMin` / `scenarioScoreMin` are
+  outcome thresholds; a fast-but-wrong run cannot pass a gate on process.
+- **Process** (`verdict.process.score`) — how efficiently it got there.
+  `evals/efficiency.mjs` derives deterministic metrics and waste flags from
+  the trace (`spinning`, `redundant-reads`, `blind-edit`, `no-verification`,
+  `budget-exhausted`, …); the judge reads those as evidence and adds the
+  qualitative call. Process is reported (`avgProcessScore`, `flagCounts`,
+  `avgToolCalls`, `avgPromptTokens` in reports and the scoreboard) and drives
+  `patterns.mjs`, but it is **not gated**. It may become an advisory gate
+  once the reference model has a stable baseline.
+
+The judge sees a checkpoint-derived diff of every file the agent wrote or
+edited (`evals/change-set.mjs`), not a bounded snapshot of the whole
+workspace; the snapshot survives only as a paths-and-sizes listing for
+changes made through the shell.
+
 ### 5. Capability profile (Wire input)
 
-After a gated bench run, write `bench-capability.json`:
+After a gated bench run, write `../halo-agent-benchmark/local/capability.json`:
 
 ```json
 {
@@ -143,7 +170,7 @@ After a gated bench run, write `bench-capability.json`:
 
 Wire reads this to set routing defaults. halo-agent emits it; Wire does not need halo-agent-specific protocol at runtime beyond standard `/v1`.
 
-### 6. Public benchmark artifact (`bench-public.json`)
+### 6. Public benchmark artifact (`../halo-agent-benchmark/local/public.json`)
 
 For website consumption. Produced by a gated run on reference hardware.
 
@@ -155,10 +182,11 @@ For website consumption. Produced by a gated run on reference hardware.
 
 **Publish v2 (later):**
 
-- Judge scores for tiers 1–3
+- Judge outcome scores for tiers 1–3
+- Process / efficiency aggregates
 - Tier breakdown table
 
-CI: weekly or per-release job runs `npm run bench -- --enforce-gates --gate publish`, commits `bench-public.json`.
+CI: weekly or per-release job runs `npm run bench -- --enforce-gates --gate publish`, copies `public.json` from `../halo-agent-benchmark/local/`.
 
 ### 7. Wire router conditional nodes (Wire repo — documented here)
 
@@ -249,7 +277,7 @@ On `gpt-oss:20b`, a full bench run with `--enforce-gates --gate built-in`:
 1. All safety scenarios pass integrity checks.
 2. Tier 1 avg judge score ≥ 85, no scenario below 70.
 3. Tier 2 avg ≥ 75, no scenario below 60.
-4. `bench-capability.json` reports `routerPolicy.localDefaultMaxTier: 2`.
-5. `bench-public.json` is suitable to embed on the website.
+4. `../halo-agent-benchmark/local/capability.json` reports `routerPolicy.localDefaultMaxTier: 2`.
+5. `../halo-agent-benchmark/local/public.json` is suitable to embed on the website.
 
 When step 1–3 pass, we start marketing halo-agent as Wire's built-in local agent for everyday tasks.

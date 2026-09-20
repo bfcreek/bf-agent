@@ -2,10 +2,16 @@
  * Pattern-based architectural insights from bench telemetry.
  *
  * Judge recommendations stay freeform and concrete ("add retry", "shorter
- * plans"). This module does the opposite: it looks across scenario metrics for
- * recurring shapes, then names the *approach* that might (or might not) help —
- * acceptance contracts, struggle/escalation, memory, critique, cloud gating —
- * without hard-coding scenario tips or model names.
+ * error text"). This module does the opposite: it looks across scenario
+ * metrics for recurring shapes and names the *lever* the runtime should
+ * consider — tool feedback, prompt guidance, budgets, compaction, model
+ * choice — without hard-coding scenario tips or model names.
+ *
+ * Signals come from two places: the outcome oracle (precheck / Harbor reward
+ * / judge outcome score) and the deterministic efficiency metrics computed
+ * in efficiency.mjs (flags such as `spinning`, `blind-edit`,
+ * `no-verification`). Crossing the two tells wasteful-but-right apart from
+ * cheap-but-wrong.
  *
  * An insight is emitted only when the evidence threshold is met. Silence is a
  * feature: no pattern is better than a forced recommendation.
@@ -14,28 +20,32 @@
 /** Minimum scenarios that must exhibit a shape before it counts as a pattern. */
 const MIN_PATTERN_SCENARIOS = 2;
 
-/** Score below which a graded scenario is treated as a quality miss. */
+/** Outcome score below which a graded scenario is treated as a quality miss. */
 const LOW_SCORE = 70;
 
-/** Score at or above which a graded scenario is treated as a clear pass. */
+/** Outcome / process score at or above which a scenario is a clear pass. */
 const HIGH_SCORE = 85;
 
 /** Fraction of a step budget that counts as "burning the budget". */
-const BUDGET_BURN_RATIO = 0.85;
+const BUDGET_BURN_RATIO = 0.75;
 
 /**
  * @typedef {object} ScenarioMetrics
  * @property {string} name
- * @property {number|null} [score]
- * @property {boolean|null} [precheck]
- * @property {boolean|null} [integrity]
- * @property {number} [steps]
- * @property {string|null} [stopReason]
- * @property {number} [escalationCount]
- * @property {boolean} [cloudUsed]
- * @property {boolean|null} [verificationPassed]
- * @property {boolean|null} [memoryEnabled]
- * @property {string|null} [error]
+ * @property {number|null} score Outcome score.
+ * @property {number|null} processScore Judge process score.
+ * @property {boolean|null} precheck Oracle pass/fail (precheck or Harbor reward).
+ * @property {boolean|null} integrity
+ * @property {number} steps
+ * @property {number|null} toolCalls
+ * @property {number|null} mutations Successful write_file / edit_file calls.
+ * @property {string|null} stopReason
+ * @property {string[]} flags Efficiency flags.
+ * @property {number|null} heuristicScore
+ * @property {number|null} budgetUsed
+ * @property {number|null} compactions
+ * @property {boolean|null} agreesWithOracle Judge outcome vs. oracle.
+ * @property {string|null} error
  */
 
 /**
@@ -50,28 +60,33 @@ const BUDGET_BURN_RATIO = 0.85;
  */
 
 /**
- * Normalize either raw bench rows or an already-built report scenarios list.
+ * Normalize raw bench rows, report scenario rows, or recognized task rows.
  * @param {Array<object>} rows
  * @returns {ScenarioMetrics[]}
  */
 export function normalizeScenarioMetrics(rows) {
   return (rows ?? []).map((row) => {
-    const rawSteps = row.steps ?? row.agent?.steps ?? 0;
+    const efficiency = row.efficiency ?? row.agent?.efficiency ?? null;
+    const rawSteps = row.steps ?? row.agent?.steps ?? efficiency?.steps ?? 0;
     const precheck =
       row.precheck?.pass ??
-      row.precheck ??
+      (typeof row.precheck === "boolean" ? row.precheck : null) ??
       (typeof row.resolved === "boolean" ? row.resolved : null);
     return {
       name: row.name ?? row.scenario ?? "unknown",
       score: row.score ?? row.verdict?.score ?? null,
+      processScore: row.processScore ?? row.verdict?.process?.score ?? row.process?.score ?? null,
       precheck,
-      integrity: row.integrity?.pass ?? row.integrity ?? null,
-      steps: Array.isArray(rawSteps) ? rawSteps.length : rawSteps,
-      stopReason: row.stopReason ?? row.agent?.stopReason ?? null,
-      escalationCount: row.escalationCount ?? row.agent?.escalationCount ?? 0,
-      cloudUsed: row.cloudUsed ?? row.agent?.cloudUsed ?? false,
-      verificationPassed: row.verificationPassed ?? row.agent?.verificationPassed ?? null,
-      memoryEnabled: row.memoryEnabled ?? row.agent?.memoryEnabled ?? null,
+      integrity: row.integrity?.pass ?? (typeof row.integrity === "boolean" ? row.integrity : null),
+      steps: Array.isArray(rawSteps) ? rawSteps.length : Number(rawSteps) || 0,
+      toolCalls: row.toolCalls ?? efficiency?.toolCalls ?? null,
+      mutations: efficiency?.mutations ?? null,
+      stopReason: row.stopReason ?? row.agent?.stopReason ?? efficiency?.stopReason ?? null,
+      flags: row.efficiencyFlags ?? efficiency?.flags ?? row.flags ?? [],
+      heuristicScore: row.heuristicScore ?? efficiency?.heuristicScore ?? null,
+      budgetUsed: efficiency?.budgetUsed ?? null,
+      compactions: efficiency?.compactions ?? null,
+      agreesWithOracle: row.outcome?.agreesWithOracle ?? row.verdict?.outcome?.agreesWithOracle ?? null,
       error: row.error ?? row.exception ?? null,
     };
   });
@@ -93,8 +108,7 @@ export function rowsFromReport(report) {
  *
  * @param {Array<object>} results Raw scenario rows or report.scenarios
  * @param {object} [meta]
- * @param {number} [meta.maxSteps] Step budget used for the run (budget-burn patterns).
- * @param {object} [meta.flags] Feature toggles active for this run.
+ * @param {number} [meta.maxSteps] Step budget used for the run.
  * @returns {ArchitectureInsight[]}
  */
 export function detectRunPatterns(results, meta = {}) {
@@ -102,295 +116,234 @@ export function detectRunPatterns(results, meta = {}) {
   if (scenarios.length === 0) return [];
 
   const maxSteps = meta.maxSteps ?? null;
-  const flags = meta.flags ?? {};
   /** @type {ArchitectureInsight[]} */
   const insights = [];
+  const enough = (rows) =>
+    rows.length >= MIN_PATTERN_SCENARIOS || (rows.length === 1 && scenarios.length === 1);
+  const has = (s, flag) => (s.flags ?? []).includes(flag);
 
-  const graded = scenarios.filter((s) => s.score != null);
-  const verified = scenarios.filter((s) => s.verificationPassed === true);
-  const unverified = scenarios.filter((s) => s.verificationPassed === false);
-  const precheckFail = scenarios.filter((s) => s.precheck === false);
-  const precheckPass = scenarios.filter((s) => s.precheck === true);
-  const clouded = scenarios.filter((s) => s.cloudUsed === true);
-  const escalated = scenarios.filter((s) => (s.escalationCount ?? 0) > 0);
+  const failed = scenarios.filter((s) => s.precheck === false || (s.precheck == null && s.score != null && s.score < LOW_SCORE));
+  const passed = scenarios.filter((s) => s.precheck === true || (s.precheck == null && s.score != null && s.score >= LOW_SCORE));
   const completed = scenarios.filter((s) => s.stopReason === "completed");
-  const maxed = scenarios.filter((s) => s.stopReason === "max_steps" || s.stopReason === "max-steps");
+  const mutated = scenarios.filter((s) => (s.mutations ?? 0) > 0);
 
-  // --- Contract / verification shapes ------------------------------------
+  // --- Stopping shapes ----------------------------------------------------
 
-  // Machine gate says done; human/judge score still weak. The closed loop is
-  // measuring the wrong thing, or measuring too little.
-  const verifiedButWeak = verified.filter((s) => (s.score ?? 100) < LOW_SCORE);
-  if (verifiedButWeak.length >= MIN_PATTERN_SCENARIOS ||
-      (verifiedButWeak.length === 1 && scenarios.length === 1)) {
-    insights.push({
-      id: "verified-but-weak-score",
-      source: "run",
-      priority: verifiedButWeak.length >= Math.ceil(scenarios.length / 2) ? "high" : "medium",
-      pattern:
-        "Acceptance verification passed while judge scores stayed low — the machine gate and quality bar disagree.",
-      lever:
-        "Tighten what 'done' means: richer acceptance checks (output shape, fixture assertions) beat more prompt text. A weak contract that always passes teaches the loop nothing.",
-      scenarios: namesOf(verifiedButWeak),
-      evidence: {
-        verifiedWeak: verifiedButWeak.length,
-        verified: verified.length,
-        avgScore: avg(verifiedButWeak.map((s) => s.score)),
-      },
-    });
-  }
-
-  // Precheck (the real test suite) fails while the acceptance gate passed —
-  // or was never built. Classic empty-contract / silent-success shape.
-  const gateMissedPrecheck = scenarios.filter(
-    (s) => s.precheck === false && s.verificationPassed === true,
+  // Stopped as "completed" having barely touched the workspace, and failed.
+  const hollow = completed.filter(
+    (s) => failed.includes(s) && ((s.toolCalls ?? s.steps) <= 1 || has(s, "no-tool-use")),
   );
-  if (gateMissedPrecheck.length >= 1) {
-    insights.push({
-      id: "verification-missed-precheck",
-      source: "run",
-      priority: gateMissedPrecheck.length >= MIN_PATTERN_SCENARIOS ? "high" : "medium",
-      pattern:
-        "Runs declared verification-passed while the scenario precheck failed — the acceptance contract did not catch the real failure.",
-      lever:
-        "Treat an empty or always-true contract as a defect, not a pass. Prefer deriving checks from the goal's own verify commands over trusting the model's self-authored Acceptance block.",
-      scenarios: namesOf(gateMissedPrecheck),
-      evidence: {
-        mismatched: gateMissedPrecheck.length,
-        precheckFail: precheckFail.length,
-      },
-    });
-  }
-
-  // Precheck green, acceptance red: the gate is stricter than reality, or
-  // checking the wrong artifact. Escalating the model will not help.
-  const precheckOkGateFail = scenarios.filter(
-    (s) => s.precheck === true && s.verificationPassed === false,
-  );
-  if (precheckOkGateFail.length >= MIN_PATTERN_SCENARIOS ||
-      (precheckOkGateFail.length === 1 && scenarios.length <= 2)) {
-    insights.push({
-      id: "precheck-ok-gate-fail",
-      source: "run",
-      priority: "medium",
-      pattern:
-        "Scenario prechecks passed while acceptance verification failed — the gate is disagreeing with the ground-truth tests.",
-      lever:
-        "Audit whether contract checks mirror the precheck, or whether they demand artifacts the task never required. Over-strict gates burn steps on work that is already done.",
-      scenarios: namesOf(precheckOkGateFail),
-      evidence: { count: precheckOkGateFail.length },
-    });
-  }
-
-  // Finished "completed" with almost no work and no verification.
-  const hollowCompletions = completed.filter(
-    (s) =>
-      (s.steps ?? 0) <= 3 &&
-      s.verificationPassed !== true &&
-      (s.precheck === false || (s.score != null && s.score < LOW_SCORE)),
-  );
-  if (hollowCompletions.length >= 1) {
+  if (hollow.length >= 1) {
     insights.push({
       id: "hollow-completion",
       source: "run",
       priority: "high",
       pattern:
-        "Runs stopped as completed after few steps with no successful verification and a failed outcome — the loop accepted a hollow finish.",
+        "Runs ended their turn as completed after little or no tool use, and the outcome failed — the model stopped without doing the work.",
       lever:
-        "Closed-loop gating should refuse 'done' when no deliverable work happened. An empty acceptance contract must not evaluate to passed; escalate struggle, not silence.",
-      scenarios: namesOf(hollowCompletions),
+        "This is a model or prompt problem, not a loop problem. Check that the core prompt makes 'do the task, do not just describe it' unambiguous for this model, and try the next tier up. If a caller needs the loop to push back on early stops, that belongs in a `stop` hook, not in the runtime.",
+      scenarios: namesOf(hollow),
+      evidence: { count: hollow.length, avgToolCalls: avg(hollow.map((s) => s.toolCalls ?? 0)) },
+    });
+  }
+
+  // Burned the budget and still failed.
+  const burnedFailures = failed.filter(
+    (s) => has(s, "budget-exhausted") || has(s, "wall-clock-exhausted") || s.stopReason === "max-steps",
+  );
+  if (enough(burnedFailures)) {
+    const spinning = burnedFailures.filter((s) => has(s, "spinning"));
+    insights.push({
+      id: "budget-exhausted-failures",
+      source: "run",
+      priority: "high",
+      pattern: `Runs hit the step or wall-clock budget without a passing outcome${spinning.length ? ` (${spinning.length} of them were spinning on repeated failures)` : ""}.`,
+      lever:
+        spinning.length
+          ? "Raising the budget will not help while the trace shows repeats. Fix the feedback loop first: failing run_command output needs the exit code and the useful part of stderr inline, and edit misses need the nearby text, so the model has new information each turn."
+          : "Read the trace before raising limits: if steps show steady progress the budget is simply too small for this tier (raise maxSteps / wallClockMs there); if progress stalled, the task exceeds the model and routing should pick a stronger one at startup.",
+      scenarios: namesOf(burnedFailures),
       evidence: {
-        count: hollowCompletions.length,
-        avgSteps: avg(hollowCompletions.map((s) => s.steps)),
+        count: burnedFailures.length,
+        spinning: spinning.length,
+        maxSteps,
+        avgSteps: avg(burnedFailures.map((s) => s.steps)),
       },
     });
   }
 
-  // --- Escalation / cloud / budget shapes --------------------------------
-
-  // Paid for cloud (or climbed hard) and still failed. Escalation was the
-  // wrong lever — or it came too late.
-  const costlyFailures = scenarios.filter(
+  // Passed, but expensively.
+  const expensivePasses = passed.filter(
     (s) =>
-      (s.cloudUsed || (s.escalationCount ?? 0) >= 2) &&
-      (s.precheck === false || (s.score != null && s.score < LOW_SCORE)),
+      (s.budgetUsed != null && s.budgetUsed >= BUDGET_BURN_RATIO) ||
+      (maxSteps != null && maxSteps > 0 && s.steps >= maxSteps * BUDGET_BURN_RATIO) ||
+      has(s, "spinning") ||
+      has(s, "redundant-reads"),
   );
-  if (costlyFailures.length >= 1) {
-    insights.push({
-      id: "costly-escalation-still-failed",
-      source: "run",
-      priority: costlyFailures.some((s) => s.cloudUsed) ? "high" : "medium",
-      pattern:
-        "Escalation (and sometimes cloud) was spent, yet the outcome still failed — a stronger model did not fix the underlying approach.",
-      lever:
-        "Ask whether the struggle signals fire on the right symptoms. If the failure is a missing verify step or a hollow contract, climbing the ladder pays for intelligence the task never gets to use. Prefer fixing the loop's stop conditions before raising the model ceiling.",
-      scenarios: namesOf(costlyFailures),
-      evidence: {
-        count: costlyFailures.length,
-        cloudFailures: costlyFailures.filter((s) => s.cloudUsed).length,
-        avgEscalations: avg(costlyFailures.map((s) => s.escalationCount)),
-      },
-    });
-  }
-
-  // Cloud used while local ladder likely had headroom unused is hard to know
-  // without hardware telemetry; but any cloud use with escalation is a signal
-  // that "escalate" meant "pay".
-  if (clouded.length >= 1 && (flags.escalationCloud === true || flags.escalationCloud == null)) {
-    const cloudAndEscalated = clouded.filter((s) => (s.escalationCount ?? 0) > 0);
-    if (cloudAndEscalated.length >= 1) {
-      insights.push({
-        id: "escalation-became-cloud",
-        source: "run",
-        priority: "medium",
-        pattern:
-          "Escalation landed on a cloud model — 'try harder' silently became a paid call.",
-        lever:
-          "Default escalation to local-only, and treat cloud as an explicit policy choice. On hardware that holds one large model at a time, intensifying the resident model (reasoning effort) is usually cheaper than a full reload or a cloud hop.",
-        scenarios: namesOf(cloudAndEscalated),
-        evidence: {
-          cloudRuns: clouded.length,
-          escalatedToCloud: cloudAndEscalated.length,
-        },
-      });
-    }
-  }
-
-  // Failed without ever escalating: either struggle detection is blind, or
-  // escalation is off. Philosophical answer differs by flag.
-  const quietFailures = scenarios.filter(
-    (s) =>
-      (s.escalationCount ?? 0) === 0 &&
-      !s.cloudUsed &&
-      (s.precheck === false || (s.score != null && s.score < LOW_SCORE)),
-  );
-  if (quietFailures.length >= MIN_PATTERN_SCENARIOS && flags.escalation !== false) {
-    insights.push({
-      id: "failed-without-escalation",
-      source: "run",
-      priority: "medium",
-      pattern:
-        "Multiple scenarios failed without any model escalation — struggle signals never crossed the threshold, or there was no stronger local rung.",
-      lever:
-        "Revisit what counts as struggle (budget pressure with work outstanding, hollow completions, repeated empty turns). Escalating a model that is calmly producing nothing is more valuable than escalating one that is visibly looping. If the start model is already the top local rung, escalation cannot help without cloud — that is a hardware/policy question, not a prompt question.",
-      scenarios: namesOf(quietFailures),
-      evidence: { quietFailures: quietFailures.length, total: scenarios.length },
-    });
-  }
-
-  // Escalation idle AND outcomes strong: do not "improve" what is working.
-  if (
-    escalated.length === 0 &&
-    clouded.length === 0 &&
-    graded.length >= MIN_PATTERN_SCENARIOS &&
-    graded.every((s) => (s.score ?? 0) >= HIGH_SCORE) &&
-    precheckFail.length === 0
-  ) {
-    insights.push({
-      id: "stable-without-escalation",
-      source: "run",
-      priority: "low",
-      pattern:
-        "Strong scores with zero escalations and no cloud use — the current routing and loop held under this load.",
-      lever:
-        "Resist adding complexity here. Prefer measuring a harder tier or an ablation (memory/critique off) before changing the escalation ladder or acceptance policy.",
-      scenarios: namesOf(graded),
-      evidence: {
-        avgScore: avg(graded.map((s) => s.score)),
-        scenarios: graded.length,
-      },
-    });
-  }
-
-  // Burned the step budget without verifying.
-  if (maxSteps != null && maxSteps > 0) {
-    const burned = scenarios.filter(
-      (s) =>
-        (s.steps ?? 0) >= maxSteps * BUDGET_BURN_RATIO &&
-        s.verificationPassed !== true,
-    );
-    if (burned.length >= MIN_PATTERN_SCENARIOS ||
-        (burned.length === 1 && scenarios.length === 1)) {
-      insights.push({
-        id: "budget-burned-unverified",
-        source: "run",
-        priority: "high",
-        pattern:
-          "Step budgets were nearly exhausted without a passing acceptance check — the loop spent capacity without proving progress.",
-        lever:
-          "Mid-run verification under budget pressure should force a course correction earlier, not at the last step. Consider whether planning/critique is consuming paid steps that never touch the deliverable.",
-        scenarios: namesOf(burned),
-        evidence: {
-          burned: burned.length,
-          maxSteps,
-          avgSteps: avg(burned.map((s) => s.steps)),
-        },
-      });
-    }
-  }
-
-  // High step counts on passes: capable but inefficient. Memory / planning
-  // philosophy, not model size.
-  const expensivePasses = precheckPass.filter(
-    (s) => maxSteps != null && maxSteps > 0 && (s.steps ?? 0) >= maxSteps * 0.75,
-  );
-  if (expensivePasses.length >= MIN_PATTERN_SCENARIOS) {
+  if (enough(expensivePasses)) {
     insights.push({
       id: "expensive-passes",
       source: "run",
       priority: "low",
       pattern:
-        "Scenarios passed but consumed most of the step budget — correctness without thrift.",
+        "Scenarios passed but consumed most of the budget or repeated work along the way — correctness without thrift.",
       lever:
-        "Look at retrieval and planning cost, not raw model power. Episodic memory that injects the wrong lesson, or a critique pass that rewrites a good plan, can inflate steps without changing the outcome grade.",
+        "Look at what the trace re-did rather than at model power: re-reads point at tool output that was too short or got compacted away; repeated commands point at error text the model could not act on. Process scores should catch this before outcome does.",
       scenarios: namesOf(expensivePasses),
       evidence: {
         count: expensivePasses.length,
         avgSteps: avg(expensivePasses.map((s) => s.steps)),
+        avgProcessScore: avg(expensivePasses.map((s) => s.processScore)),
       },
     });
   }
 
-  // Hidden tests (Harbor / precheck) failed on most of the sample — a
-  // cross-task shape, not a tip for any one scenario name.
+  // --- Tool-use discipline ----------------------------------------------
+
+  const spinners = scenarios.filter((s) => has(s, "spinning"));
+  if (enough(spinners)) {
+    insights.push({
+      id: "spinning-on-failures",
+      source: "run",
+      priority: spinners.some((s) => failed.includes(s)) ? "high" : "medium",
+      pattern: "The same failing command or identical tool call was repeated several times in a run.",
+      lever:
+        "The model only changes course when the tool result gives it something new. Make run_command failures carry the exit code and the relevant stderr lines inline (not only in the spill file), and make sure identical repeats are visible in the transcript rather than compacted into a summary.",
+      scenarios: namesOf(spinners),
+      evidence: { count: spinners.length, failedOutcomes: spinners.filter((s) => failed.includes(s)).length },
+    });
+  }
+
+  const blind = scenarios.filter((s) => has(s, "blind-edit") || has(s, "edit-misses"));
+  if (enough(blind)) {
+    insights.push({
+      id: "blind-edits",
+      source: "run",
+      priority: blind.some((s) => failed.includes(s)) ? "high" : "medium",
+      pattern: "Files were edited without being read first, or edit_file repeatedly missed its target snippet.",
+      lever:
+        "Two runtime levers: edit_file miss messages should show the nearest matching lines so the second attempt lands, and the core prompt should state read-before-edit plainly. If reads did happen earlier, check whether compaction dropped the file contents the edit relied on.",
+      scenarios: namesOf(blind),
+      evidence: { count: blind.length },
+    });
+  }
+
+  const unverified = mutated.filter((s) => has(s, "no-verification"));
+  if (unverified.length >= MIN_PATTERN_SCENARIOS && unverified.length >= Math.ceil(mutated.length / 2)) {
+    insights.push({
+      id: "unverified-changes",
+      source: "run",
+      priority: unverified.some((s) => failed.includes(s)) ? "high" : "medium",
+      pattern: "Most runs that changed files never ran a command afterwards — changes shipped unverified.",
+      lever:
+        "Say it once in the core prompt: after changing code, run the relevant check (tests, build, or the script itself) and report the result. Do not add a verification gate to the loop; a model that skips checks with a clear instruction is a routing signal, not a harness gap.",
+      scenarios: namesOf(unverified),
+      evidence: { unverified: unverified.length, mutated: mutated.length },
+    });
+  }
+
+  const rereaders = scenarios.filter((s) => has(s, "redundant-reads"));
+  if (enough(rereaders)) {
+    insights.push({
+      id: "redundant-reads",
+      source: "run",
+      priority: "medium",
+      pattern: "The same file region was read again with nothing changed in between.",
+      lever:
+        "Re-reads mean the earlier content was not usable when needed: either read_file spilled too aggressively (raise the inline head/tail for source files), or compaction summarized it away (raise keepRecent or keep tool results for recently touched files verbatim).",
+      scenarios: namesOf(rereaders),
+      evidence: {
+        count: rereaders.length,
+        withCompaction: rereaders.filter((s) => (s.compactions ?? 0) > 0).length,
+      },
+    });
+  }
+
+  const failingTools = scenarios.filter((s) => has(s, "high-failure-rate") || has(s, "parse-recoveries"));
+  if (enough(failingTools)) {
+    insights.push({
+      id: "tool-call-friction",
+      source: "run",
+      priority: "medium",
+      pattern: "A large share of tool calls failed, or the model needed repeated tool-call parse corrections.",
+      lever:
+        "This is the model misunderstanding the tool surface. Check the per-model overlay and tool descriptions for this model family, tighten argument error messages to name the expected shape, and consider whether this tier should route to a model with better tool calling.",
+      scenarios: namesOf(failingTools),
+      evidence: { count: failingTools.length },
+    });
+  }
+
+  const contextPressure = scenarios.filter((s) => has(s, "heavy-compaction"));
+  if (enough(contextPressure) && contextPressure.some((s) => failed.includes(s))) {
+    insights.push({
+      id: "context-pressure",
+      source: "run",
+      priority: "medium",
+      pattern: "The transcript was compacted more than once in runs that then failed — context churn is likely costing accuracy.",
+      lever:
+        "Before touching the prompt, look at what fills the context: tool output spill limits, the size of the system prompt for this model, and numCtx. Compaction that keeps the original request and points at the session file is the safety net, not the plan.",
+      scenarios: namesOf(contextPressure),
+      evidence: { count: contextPressure.length },
+    });
+  }
+
+  // --- Outcome shapes ----------------------------------------------------
+
+  const oracleFailures = scenarios.filter((s) => s.precheck === false);
   if (
-    precheckFail.length >= MIN_PATTERN_SCENARIOS &&
-    precheckFail.length >= Math.ceil(scenarios.length / 2)
+    oracleFailures.length >= MIN_PATTERN_SCENARIOS &&
+    oracleFailures.length >= Math.ceil(scenarios.length / 2)
   ) {
+    const flagged = oracleFailures.filter((s) => (s.flags ?? []).some((f) => f !== "no-tool-use"));
     insights.push({
       id: "tests-mostly-failed",
       source: "run",
       priority: "high",
-      pattern:
-        "Ground-truth tests failed on most of this sample — the loop is not producing check-passing artifacts.",
+      pattern: "Ground-truth tests failed on most of this sample — the loop is not producing check-passing artifacts.",
       lever:
-        "Prefer stronger deliverable + verify gating over task-specific hints. Refuse 'done' until the instruction's own checks would pass; do not hard-code this sample's task names into the prompt table.",
-      scenarios: namesOf(precheckFail),
-      evidence: {
-        failed: precheckFail.length,
-        total: scenarios.length,
-      },
+        flagged.length >= Math.ceil(oracleFailures.length / 2)
+          ? "The failing runs carry efficiency flags, so start there: the process problems above are the cheaper fix. Do not hard-code this sample's task names into the prompt."
+          : "The failing runs look clean on process, which points at capability rather than harness: this tier needs a stronger model at startup. Do not hard-code task-specific hints into the prompt.",
+      scenarios: namesOf(oracleFailures),
+      evidence: { failed: oracleFailures.length, total: scenarios.length, flagged: flagged.length },
     });
   }
 
-  // Unverified majority with acceptance supposedly on.
-  if (
-    flags.acceptance !== false &&
-    unverified.length >= MIN_PATTERN_SCENARIOS &&
-    unverified.length >= Math.ceil(scenarios.length / 2)
-  ) {
+  const disagreements = scenarios.filter((s) => s.agreesWithOracle === false);
+  if (enough(disagreements)) {
     insights.push({
-      id: "acceptance-mostly-failing",
+      id: "judge-oracle-disagreement",
       source: "run",
       priority: "medium",
-      pattern:
-        "Acceptance verification failed on most scenarios — the gate is active but rarely satisfied.",
+      pattern: "The judge's outcome score disagreed with the mechanical oracle (the anchored score was used).",
       lever:
-        "Decide whether the contract is aspirational or enforceable. If checks are routinely unmet at stop time, either the agent is stopping too early or the contract is authored too loosely to guide mid-run behavior. Self-critique of the plan against the contract is the cheaper lever before escalating models.",
-      scenarios: namesOf(unverified),
+        "Audit the scenario, not the agent: a precheck that passes work the judge calls incomplete is too loose; one that fails work the judge calls done is checking the wrong artifact or is flaky. Fix the oracle before reading the score trend.",
+      scenarios: namesOf(disagreements),
+      evidence: { count: disagreements.length },
+    });
+  }
+
+  // Everything passed and nothing was flagged: do not "improve" what works.
+  const graded = scenarios.filter((s) => s.score != null);
+  const flaggedAny = scenarios.filter((s) => (s.flags ?? []).some((f) => f !== "no-tool-use"));
+  if (
+    graded.length >= MIN_PATTERN_SCENARIOS &&
+    failed.length === 0 &&
+    flaggedAny.length === 0 &&
+    graded.every((s) => (s.score ?? 0) >= HIGH_SCORE)
+  ) {
+    insights.push({
+      id: "stable-and-lean",
+      source: "run",
+      priority: "low",
+      pattern: "Strong outcomes with no efficiency flags — the current prompt, tools, and routing held under this load.",
+      lever:
+        "Resist adding complexity here. Measure a harder tier or a smaller model before changing the prompt or the loop.",
+      scenarios: namesOf(graded),
       evidence: {
-        unverified: unverified.length,
-        total: scenarios.length,
+        avgScore: avg(graded.map((s) => s.score)),
+        avgProcessScore: avg(graded.map((s) => s.processScore)),
+        scenarios: graded.length,
       },
     });
   }
@@ -399,11 +352,12 @@ export function detectRunPatterns(results, meta = {}) {
 }
 
 /**
- * Compare scoreboard history for approach-level A/B signals.
+ * Compare scoreboard history for trend and setting-ablation signals.
  *
- * Looks for runs that differ on a single feature flag while holding the others
- * steady. Bundle flips (memory+acceptance+critique+escalation all at once)
- * are reported as a package effect — not attributed to every flag.
+ * Entries are the JSONL rows appended by dev-bench / recognized runs:
+ * `avgScore`, `avgProcessScore`, `passRate`, `avgSteps`, `avgToolCalls`,
+ * `avgHeuristicScore`, `scenarios`, plus settings such as `think` and
+ * `tierPreset`.
  *
  * @param {object[]} history Scoreboard JSONL entries
  * @param {object} [current] The just-finished scoreboard-shaped entry
@@ -417,200 +371,99 @@ export function detectHistoryPatterns(history, current = null) {
   /** @type {ArchitectureInsight[]} */
   const insights = [];
 
-  const FLAGS = [
-    {
-      key: "memory",
-      onLabel: "memory on",
-      offLabel: "memory off",
-      leverOn:
-        "Episodic memory appears to help under this load — keep writes gated on verified struggle so the store compounds quality rather than volume.",
-      leverOff:
-        "Memory on/off did not move outcomes here — retrieval may be injecting noise, or this scenario set does not reward prior lessons. Prefer curation (eviction/win-rate) over adding more writes.",
-      leverRegress:
-        "Memory-on runs scored worse — treat that as a curation problem first (wrong lessons retrieved), not a reason to delete the store. Readonly mode is the cheap experiment before disabling memory entirely.",
-    },
-    {
-      key: "critique",
-      onLabel: "critique on",
-      offLabel: "critique off",
-      leverOn:
-        "Self-critique correlates with better outcomes — keep it, and consider aiming critique specifically at the acceptance contract rather than the plan narrative.",
-      leverOff:
-        "Critique did not differentiate scores — it may be spending a model call without changing behavior. Gate critique on plan complexity or struggle, rather than running it unconditionally.",
-      leverRegress:
-        "Critique-on runs scored worse — a rewrite pass can destabilize a workable plan. Prefer critique that only fires when acceptance checks look unsatisfiable.",
-    },
-    {
-      key: "acceptance",
-      onLabel: "acceptance on",
-      offLabel: "acceptance off",
-      leverOn:
-        "Acceptance gating correlates with better outcomes — the closed loop is earning its keep. Invest in better contracts, not in bypassing the gate.",
-      leverOff:
-        "Acceptance on/off did not move scores — checks may be vacuous (empty contracts pass) or the judge already covers the same ground. Empty-contract-as-pass is the defect to fix before declaring the gate useless.",
-      leverRegress:
-        "Acceptance-on runs scored worse — over-strict or misaligned checks can burn the budget on already-correct work. Align contracts with prechecks before raising the struggle threshold.",
-    },
-    {
-      key: "escalation",
-      onLabel: "escalation on",
-      offLabel: "escalation off",
-      leverOn:
-        "Escalation correlates with better outcomes — keep the ladder, and bias toward intensifying the resident model before swapping under VRAM pressure.",
-      leverOff:
-        "Escalation on/off did not move scores — either struggle never fired, or the start model was already sufficient. Avoid expanding the ladder until struggle signals actually trigger.",
-      leverRegress:
-        "Escalation-on runs scored worse — model swaps mid-run can thrash context and VRAM. Prefer a stronger start model or intensify-before-swap over more rungs.",
-    },
-    {
-      key: "planning",
-      onLabel: "planning on",
-      offLabel: "planning off",
-      leverOn:
-        "Planning correlates with better outcomes — keep it, and make the plan's Acceptance block the source of truth for the verification gate.",
-      leverOff:
-        "Planning on/off did not move scores — for this load the extra planning turn may be overhead. Consider planning only when the goal is multi-deliverable.",
-      leverRegress:
-        "Planning-on runs scored worse — plans that invent the wrong stack or burn steps before tools fire are worse than acting. Prefer shorter plans tightly coupled to acceptance checks.",
-    },
-  ];
+  // Trends: compare the most recent runs with the earlier ones at the same
+  // scenario count, so a 2-task smoke run is never compared with a full tier.
+  const groups = groupBy(entries.filter((e) => typeof e.avgScore === "number" || typeof e.passRate === "number"), (e) => e.scenarios ?? 0);
+  for (const [count, rows] of groups) {
+    if (rows.length < 4) continue;
+    const recent = rows.slice(-3);
+    const earlier = rows.slice(0, rows.length - 3);
+    const d = {
+      score: avg(recent.map((e) => e.avgScore)) - avg(earlier.map((e) => e.avgScore)),
+      pass: avg(recent.map((e) => e.passRate)) - avg(earlier.map((e) => e.passRate)),
+      steps: ratio(avg(recent.map((e) => e.avgSteps)), avg(earlier.map((e) => e.avgSteps))),
+      tools: ratio(avg(recent.map((e) => e.avgToolCalls)), avg(earlier.map((e) => e.avgToolCalls))),
+      process: avg(recent.map((e) => e.avgProcessScore)) - avg(earlier.map((e) => e.avgProcessScore)),
+    };
+    const evidence = { scenarios: count, recent: recent.length, earlier: earlier.length, ...d };
 
-  const CONTROL_FLAGS = FLAGS.map((f) => f.key);
-
-  let isolatedAblations = 0;
-  for (const flag of FLAGS) {
-    const ablation = compareFlagAblation(entries, flag.key, CONTROL_FLAGS);
-    if (!ablation) continue;
-    isolatedAblations += 1;
-    insights.push(...insightFromAblation(flag, ablation));
-  }
-
-  // When flags always flip together (the usual "baseline vs closed-loop"
-  // labeling), isolate nothing — report the package effect instead of
-  // pretending each lever earned the same delta.
-  if (isolatedAblations === 0) {
-    const bundle = compareClosedLoopBundle(entries);
-    if (bundle) {
-      const delta = bundle.onAvg - bundle.offAvg;
-      const abs = Math.abs(delta);
-      if (abs >= 3) {
-        insights.push({
-          id: delta >= 0 ? "ablation-closed-loop-helps" : "ablation-closed-loop-hurts",
-          source: "ablation",
-          priority: abs >= 8 ? "high" : "medium",
-          pattern: `Across comparable runs, the closed-loop package (memory+acceptance+critique+escalation) averages ${bundle.onAvg.toFixed(1)} vs ${bundle.offAvg.toFixed(1)} without it (Δ ${delta.toFixed(1)}). Flags were not isolated, so this is a package signal — not evidence for any single lever.`,
-          lever:
-            delta >= 0
-              ? "The closed-loop package is earning its keep as a whole. To learn which piece matters, run one-flag ablations (memory off alone, critique off alone, …) rather than rewriting prompts."
-              : "The closed-loop package scored worse as a whole. Before tearing it out, isolate which flag regresses — empty contracts and mid-run model swaps are the usual suspects, not 'memory' in the abstract.",
-          scenarios: [],
-          evidence: bundle,
-        });
-      } else {
-        insights.push({
-          id: "ablation-closed-loop-flat",
-          source: "ablation",
-          priority: "low",
-          pattern: `Closed-loop package vs baseline changed avg score by only ${delta.toFixed(1)} across comparable runs — and flags were not isolated.`,
-          lever:
-            "No strong package signal yet. Prefer one-flag ablations before changing approach; score noise on a 3-scenario set is easy to over-read.",
-          scenarios: [],
-          evidence: bundle,
-        });
-      }
-    }
-  }
-
-  // Cloud rate rising while scores flat/down: paying more for no gain.
-  const withCloud = entries.filter((e) => typeof e.cloudRate === "number" && e.avgScore != null);
-  if (withCloud.length >= 4) {
-    const recent = withCloud.slice(-6);
-    const earlier = withCloud.slice(0, Math.max(1, withCloud.length - 6));
-    const recentCloud = avg(recent.map((e) => e.cloudRate));
-    const earlierCloud = avg(earlier.map((e) => e.cloudRate));
-    const recentScore = avg(recent.map((e) => e.avgScore));
-    const earlierScore = avg(earlier.map((e) => e.avgScore));
-    if (recentCloud - earlierCloud >= 0.15 && recentScore - earlierScore < 2) {
+    if ((d.steps >= 1.25 || d.tools >= 1.25) && d.score < 2 && d.pass < 0.1) {
       insights.push({
-        id: "history-cloud-without-gain",
+        id: "history-efficiency-regression",
         source: "history",
-        priority: "high",
-        pattern: `Recent runs use cloud more often (${pct(recentCloud)} vs ${pct(earlierCloud)} earlier) without a meaningful score gain (${recentScore.toFixed(1)} vs ${earlierScore.toFixed(1)}).`,
+        priority: "medium",
+        pattern: `Recent ${count}-scenario runs use ${pctChange(Math.max(d.steps, d.tools))} more steps/tool calls than earlier ones without an outcome gain (Δ score ${d.score.toFixed(1)}).`,
         lever:
-          "Cloud spend is climbing as a habit, not as a remedy. Gate cloud behind explicit policy, keep escalation local-first, and ask whether struggle is firing because the contract is empty rather than because the model is weak.",
+          "Something recent made the model work harder for the same result. Diff the efficiency flags between the two windows first; prompt or tool-output changes are the usual cause.",
         scenarios: [],
-        evidence: { recentCloud, earlierCloud, recentScore, earlierScore },
+        evidence,
+      });
+    } else if (d.steps <= 0.8 && d.score > -2 && d.pass > -0.1) {
+      insights.push({
+        id: "history-efficiency-gain",
+        source: "history",
+        priority: "low",
+        pattern: `Recent ${count}-scenario runs need ${pctChange(1 / d.steps)} fewer steps at the same or better outcome.`,
+        lever: "Keep it. Note what changed between the windows so the gain is attributable.",
+        scenarios: [],
+        evidence,
       });
     }
+    if (d.score <= -5 || d.pass <= -0.15) {
+      insights.push({
+        id: "history-outcome-regression",
+        source: "history",
+        priority: "high",
+        pattern: `Recent ${count}-scenario runs score lower than earlier ones (Δ outcome ${d.score.toFixed(1)}, Δ pass rate ${(d.pass * 100).toFixed(0)}%).`,
+        lever:
+          "Treat as a regression until explained: compare models, prompt, and tool changes between the windows. Judge variance alone rarely moves a pass rate.",
+        scenarios: [],
+        evidence,
+      });
+    }
+  }
+
+  // Setting ablations: runs that differ on one setting with the same
+  // scenario count and the other settings held equal.
+  for (const key of ["think", "tierPreset"]) {
+    const ablation = compareSettingAblation(entries, key, ["think", "tierPreset"]);
+    if (!ablation) continue;
+    const delta = ablation.aAvg - ablation.bAvg;
+    const abs = Math.abs(delta);
+    insights.push({
+      id: `ablation-${key}-${abs < 3 ? "flat" : delta > 0 ? ablation.a : ablation.b}`,
+      source: "ablation",
+      priority: abs >= 8 ? "medium" : "low",
+      pattern:
+        abs < 3
+          ? `With other settings held steady, ${key}=${ablation.a} vs ${key}=${ablation.b} changed the average outcome by only ${delta.toFixed(1)} points (${ablation.aN}+${ablation.bN} runs).`
+          : `With other settings held steady, ${key}=${delta > 0 ? ablation.a : ablation.b} averages ${Math.max(ablation.aAvg, ablation.bAvg).toFixed(1)} vs ${Math.min(ablation.aAvg, ablation.bAvg).toFixed(1)} for ${key}=${delta > 0 ? ablation.b : ablation.a} (Δ ${abs.toFixed(1)}).`,
+      lever:
+        abs < 3
+          ? `${key} is not moving outcomes on this set — pick the cheaper setting and spend effort elsewhere.`
+          : `Prefer ${key}=${delta > 0 ? ablation.a : ablation.b} for this load, and check the step/tool-call averages to see whether the gain came with a cost.`,
+      scenarios: [],
+      evidence: ablation,
+    });
   }
 
   return sortInsights(insights);
 }
 
 /**
- * @param {object} flag
- * @param {object} ablation
- * @returns {ArchitectureInsight[]}
- */
-function insightFromAblation(flag, ablation) {
-  const delta = ablation.onAvg - ablation.offAvg;
-  const abs = Math.abs(delta);
-  if (abs < 3) {
-    return [
-      {
-        id: `ablation-${flag.key}-flat`,
-        source: "ablation",
-        priority: "low",
-        pattern: `With other flags held steady, ${flag.onLabel} vs ${flag.offLabel} changed avg score by only ${delta.toFixed(1)} points (${ablation.onN}+${ablation.offN} runs).`,
-        lever: flag.leverOff,
-        scenarios: [],
-        evidence: ablation,
-      },
-    ];
-  }
-  if (delta >= 3) {
-    return [
-      {
-        id: `ablation-${flag.key}-helps`,
-        source: "ablation",
-        priority: abs >= 8 ? "high" : "medium",
-        pattern: `With other flags held steady, ${flag.onLabel} averages ${ablation.onAvg.toFixed(1)} vs ${ablation.offAvg.toFixed(1)} with ${flag.offLabel} (Δ ${delta.toFixed(1)}).`,
-        lever: flag.leverOn,
-        scenarios: [],
-        evidence: ablation,
-      },
-    ];
-  }
-  return [
-    {
-      id: `ablation-${flag.key}-hurts`,
-      source: "ablation",
-      priority: abs >= 8 ? "high" : "medium",
-      pattern: `With other flags held steady, ${flag.onLabel} averages ${ablation.onAvg.toFixed(1)} vs ${ablation.offAvg.toFixed(1)} with ${flag.offLabel} (Δ ${delta.toFixed(1)}).`,
-      lever: flag.leverRegress,
-      scenarios: [],
-      evidence: ablation,
-    },
-  ];
-}
-
-/**
  * Build the full insight set for a finished bench report.
  *
- * @param {object} report Assessment report from buildAssessmentReport
+ * @param {object} report Assessment or recognized report
  * @param {object} [options]
  * @param {object[]} [options.history] Scoreboard history entries
- * @param {object} [options.flags] Feature toggles for this run
+ * @param {object} [options.flags] Settings for this run (think, tierPreset)
  * @param {number} [options.maxSteps]
  * @returns {ArchitectureInsight[]}
  */
 export function buildArchitectureInsights(report, options = {}) {
   const maxSteps = options.maxSteps ?? report?.maxSteps ?? null;
-  const flags = options.flags ?? inferFlagsFromReport(report);
-  const runInsights = detectRunPatterns(rowsFromReport(report), {
-    maxSteps,
-    flags,
-  });
+  const flags = options.flags ?? report?.flags ?? {};
+  const runInsights = detectRunPatterns(rowsFromReport(report), { maxSteps });
 
   const overall = report?.overall ?? {};
   const n = overall.scenarios ?? overall.tasks ?? 0;
@@ -618,12 +471,15 @@ export function buildArchitectureInsights(report, options = {}) {
   const currentEntry =
     report?.overall != null
       ? {
-          avgScore: overall.avgScore ?? overall.judgeAvg,
-          cloudRate: overall.cloudRate,
-          avgEscalations: overall.avgEscalations,
+          avgScore: overall.avgScore ?? overall.judgeAvg ?? null,
+          avgProcessScore: overall.avgProcessScore ?? overall.processAvg ?? null,
           passRate: n > 0 ? passed / n : null,
+          avgSteps: overall.avgSteps ?? null,
+          avgToolCalls: overall.avgToolCalls ?? null,
+          avgHeuristicScore: overall.avgHeuristicScore ?? null,
           scenarios: n,
-          ...(flags),
+          think: flags.think ?? null,
+          tierPreset: flags.tierPreset ?? null,
         }
       : null;
 
@@ -688,135 +544,65 @@ export function formatInsightsConsole(insights) {
 // ---------------------------------------------------------------------------
 
 /**
- * Compare runs that differ on exactly one boolean flag, holding the other
- * control flags at the same values. Bundle flips are rejected here so they
- * can be reported as a package effect instead.
+ * Compare runs that differ on one string/boolean setting, holding the other
+ * control settings and the scenario count equal. Needs at least two runs on
+ * each side of the best-populated bucket.
  *
  * @param {object[]} entries
- * @param {string} flagKey
- * @param {string[]} controlFlags
+ * @param {string} key
+ * @param {string[]} controls
  */
-function compareFlagAblation(entries, flagKey, controlFlags = []) {
+function compareSettingAblation(entries, key, controls) {
   const usable = entries.filter(
-    (e) => typeof e.avgScore === "number" && typeof e[flagKey] === "boolean",
+    (e) => typeof e.avgScore === "number" && e[key] != null && String(e[key]).trim() !== "",
   );
-  const on = usable.filter((e) => e[flagKey] === true);
-  const off = usable.filter((e) => e[flagKey] === false);
-  if (on.length < 1 || off.length < 1) return null;
+  if (usable.length < 4) return null;
+  const others = controls.filter((k) => k !== key);
 
-  const others = controlFlags.filter((k) => k !== flagKey);
-  /** @type {Map<string, {on: object[], off: object[]}>} */
+  /** @type {Map<string, Map<string, object[]>>} signature -> value -> entries */
   const buckets = new Map();
-
-  for (const e of [...on, ...off]) {
-    // Skip entries that are missing sibling flag values — we cannot prove isolation.
-    if (others.some((k) => typeof e[k] !== "boolean")) continue;
-    const n = e.scenarios ?? 0;
-    const signature = `${n}|${others.map((k) => `${k}=${e[k]}`).join(",")}`;
-    if (!buckets.has(signature)) buckets.set(signature, { on: [], off: [] });
-    buckets.get(signature)[e[flagKey] ? "on" : "off"].push(e);
+  for (const e of usable) {
+    const signature = `${e.scenarios ?? 0}|${others.map((k) => `${k}=${e[k] ?? ""}`).join(",")}`;
+    if (!buckets.has(signature)) buckets.set(signature, new Map());
+    const byValue = buckets.get(signature);
+    const value = String(e[key]);
+    if (!byValue.has(value)) byValue.set(value, []);
+    byValue.get(value).push(e);
   }
 
   let best = null;
-  for (const pair of buckets.values()) {
-    if (pair.on.length >= 1 && pair.off.length >= 1) {
-      // Prefer buckets with replication on both sides.
-      const weight = pair.on.length + pair.off.length;
-      const replicated = pair.on.length >= 2 && pair.off.length >= 2;
-      if (
-        !best ||
-        (replicated && !best.replicated) ||
-        (replicated === best.replicated && weight > best.weight)
-      ) {
-        best = { ...pair, weight, replicated };
-      }
-    }
-  }
-
-  // Require at least one replicated side overall, or both sides with n>=2 across
-  // the chosen bucket, before claiming an isolated effect.
-  if (!best) return null;
-  if (!best.replicated && best.on.length + best.off.length < 4) return null;
-
-  return {
-    flag: flagKey,
-    isolated: true,
-    onAvg: avg(best.on.map((e) => e.avgScore)),
-    offAvg: avg(best.off.map((e) => e.avgScore)),
-    onN: best.on.length,
-    offN: best.off.length,
-    onCloud: avg(best.on.map((e) => e.cloudRate ?? 0)),
-    offCloud: avg(best.off.map((e) => e.cloudRate ?? 0)),
-  };
-}
-
-/**
- * Baseline (all closed-loop flags off) vs package (all on), when flags always
- * flip together and isolation is impossible.
- * @param {object[]} entries
- */
-function compareClosedLoopBundle(entries) {
-  const keys = ["memory", "acceptance", "critique", "escalation"];
-  const usable = entries.filter(
-    (e) => typeof e.avgScore === "number" && keys.every((k) => typeof e[k] === "boolean"),
-  );
-
-  const on = usable.filter((e) => keys.every((k) => e[k] === true));
-  const off = usable.filter((e) => keys.every((k) => e[k] === false));
-  if (on.length < 2 || off.length < 2) return null;
-
-  const matched = matchByScenarioCount(on, off);
-  const onSet = matched?.on ?? on;
-  const offSet = matched?.off ?? off;
-  if (onSet.length < 2 || offSet.length < 2) return null;
-
-  return {
-    flag: "closed-loop-package",
-    isolated: false,
-    onAvg: avg(onSet.map((e) => e.avgScore)),
-    offAvg: avg(offSet.map((e) => e.avgScore)),
-    onN: onSet.length,
-    offN: offSet.length,
-    onCloud: avg(onSet.map((e) => e.cloudRate ?? 0)),
-    offCloud: avg(offSet.map((e) => e.cloudRate ?? 0)),
-  };
-}
-
-function matchByScenarioCount(on, off) {
-  /** @type {Map<number, {on: object[], off: object[]}>} */
-  const buckets = new Map();
-  for (const e of on) {
-    const n = e.scenarios ?? 0;
-    if (!buckets.has(n)) buckets.set(n, { on: [], off: [] });
-    buckets.get(n).on.push(e);
-  }
-  for (const e of off) {
-    const n = e.scenarios ?? 0;
-    if (!buckets.has(n)) buckets.set(n, { on: [], off: [] });
-    buckets.get(n).off.push(e);
-  }
-
-  let best = null;
-  for (const pair of buckets.values()) {
-    if (pair.on.length >= 2 && pair.off.length >= 2) {
-      const weight = pair.on.length + pair.off.length;
-      if (!best || weight > best.weight) best = { ...pair, weight };
+  for (const byValue of buckets.values()) {
+    const values = [...byValue.entries()].filter(([, rows]) => rows.length >= 2);
+    if (values.length < 2) continue;
+    values.sort((x, y) => y[1].length - x[1].length);
+    const [[a, aRows], [b, bRows]] = values;
+    const weight = aRows.length + bRows.length;
+    if (!best || weight > best.weight) {
+      best = {
+        setting: key,
+        a,
+        b,
+        aN: aRows.length,
+        bN: bRows.length,
+        aAvg: avg(aRows.map((e) => e.avgScore)),
+        bAvg: avg(bRows.map((e) => e.avgScore)),
+        aSteps: avg(aRows.map((e) => e.avgSteps)),
+        bSteps: avg(bRows.map((e) => e.avgSteps)),
+        weight,
+      };
     }
   }
   return best;
 }
 
-function inferFlagsFromReport(report) {
-  // Reports do not always carry flags; scoreboard append is the source of truth.
-  // Leave undefined so ablation detectors that need booleans simply skip.
-  return {
-    memory: report?.flags?.memory,
-    critique: report?.flags?.critique,
-    acceptance: report?.flags?.acceptance,
-    escalation: report?.flags?.escalation,
-    escalationCloud: report?.flags?.escalationCloud,
-    planning: report?.flags?.planning,
-  };
+function groupBy(rows, keyFn) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = keyFn(row);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return map;
 }
 
 function namesOf(rows) {
@@ -829,8 +615,13 @@ function avg(nums) {
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
-function pct(rate) {
-  return `${Math.round((rate ?? 0) * 100)}%`;
+function ratio(a, b) {
+  if (!b) return 1;
+  return a / b;
+}
+
+function pctChange(r) {
+  return `${Math.round((r - 1) * 100)}%`;
 }
 
 function sortInsights(insights) {

@@ -1,6 +1,20 @@
 /**
  * Grade halo-agent runs with the Cursor CLI agent (default model: auto).
  * Read-only ask mode — the judge inspects artifacts, it does not edit them.
+ *
+ * The verdict has two independent scores:
+ *
+ * - **outcome** — did the deliverable satisfy the task. When a mechanical
+ *   oracle exists (dev-bench precheck, Harbor hidden tests) it fixes the band
+ *   (pass → 70–100, fail → 0–50) and the judge only ranks quality inside it.
+ *   Without an oracle the judge's number stands on its own.
+ * - **process** — how efficiently the agent got there: proportionate
+ *   exploration, read-before-edit, verification, no spinning, budget use.
+ *   The judge gets the deterministic metrics from efficiency.mjs as evidence
+ *   and is asked to name the wasted steps by number.
+ *
+ * `verdict.score` mirrors `outcome.score` so gates and history stay
+ * comparable.
  */
 
 import { spawn } from "node:child_process";
@@ -13,10 +27,19 @@ import {
   persistAgentArtifacts,
   persistJudgePrompt,
 } from "./agent-artifacts.mjs";
+import { collectChangeSet, formatChangeSetForPrompt } from "./change-set.mjs";
+import { computeEfficiency, formatEfficiencyForPrompt } from "./efficiency.mjs";
 import { captureWorkspaceSnapshot, formatSnapshotForPrompt } from "./workspace-snapshot.mjs";
 import { agentAnswerText } from "./scenarios.mjs";
 
 const DEFAULT_AGENT_BIN = "agent";
+const INVALID_SUMMARY = "Judge response was not valid JSON.";
+
+/** Outcome band when a mechanical oracle passed / failed. */
+export const ORACLE_PASS_FLOOR = 70;
+export const ORACLE_FAIL_CEILING = 50;
+/** Judge outcome score at or above which it "agrees" the task passed. */
+const AGREEMENT_THRESHOLD = 60;
 
 /**
  * Windows cannot spawn .cmd/.bat directly; route through cmd.exe instead.
@@ -34,11 +57,19 @@ export function buildAgentSpawn(agentBin, args) {
 }
 
 /**
+ * @typedef {object} Oracle
+ * @property {boolean|null} pass Mechanical result; null when the task has none.
+ * @property {"precheck"|"harbor"|"integrity"|string} source
+ * @property {string} [detail]
+ */
+
+/**
  * @typedef {object} JudgeVerdict
- * @property {number} score 0–100
- * @property {string} grade Letter grade or short label
+ * @property {number} score Outcome score (0–100); mirrors `outcome.score`.
+ * @property {string} grade Letter grade for the outcome score.
+ * @property {{score: number, judgeScore: number, oracle: boolean|null, source: "oracle-anchored"|"judge", agreesWithOracle: boolean|null, notes: string}} outcome
+ * @property {{score: number|null, grade: string|null, notes: string, wastedSteps: Array<{step: number, why: string}>, missing: string[]}} process
  * @property {string} summary One-paragraph assessment
- * @property {Array<{name: string, score: number, max: number, notes: string}>} criteria
  * @property {string[]} strengths
  * @property {string[]} weaknesses
  * @property {Array<{area: string, suggestion: string, priority: "low"|"medium"|"high"}>} agentImprovements
@@ -50,24 +81,54 @@ export function buildAgentSpawn(agentBin, args) {
  * @param {import("./scenarios.mjs").BenchScenario} input.scenario
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {string} input.workspaceDir
+ * @param {Oracle|null} [input.oracle] Mechanical pass/fail to anchor the outcome score.
  * @param {object} [input.options]
  * @param {string} [input.options.model]
  * @param {string} [input.options.agentBin]
  * @param {number} [input.options.timeoutSeconds]
+ * @param {number} [input.options.retries]
  * @param {string} [input.options.preamble] Extra instructions prepended to the prompt.
  * @param {object} [input.options.snapshotOptions] Passed to captureWorkspaceSnapshot.
+ * @param {string} [input.options.changeSetRoot] Directory holding `.halo-agent/checkpoints` (default: workspaceDir).
+ * @param {number} [input.options.maxSteps] Step budget the agent ran with (for budget metrics).
+ * @param {import("./efficiency.mjs").EfficiencyMetrics} [input.options.efficiency] Precomputed metrics.
  */
-export async function judgeRun({ scenario, agentResult, workspaceDir, options = {} }) {
+export async function judgeRun({ scenario, agentResult, workspaceDir, oracle = null, options = {} }) {
+  const efficiency =
+    options.efficiency ?? computeEfficiency(agentResult, { maxSteps: options.maxSteps ?? null });
   await persistAgentArtifacts(workspaceDir, agentResult, {
     goal: scenario.goal,
     followUp: scenario.followUp ?? null,
     rubric: scenario.rubric,
+    oracle,
+    efficiency,
   });
-  const snapshot = await captureWorkspaceSnapshot(workspaceDir, options.snapshotOptions);
+
+  let changeSet;
+  try {
+    changeSet = await collectChangeSet(options.changeSetRoot ?? workspaceDir);
+  } catch {
+    changeSet = { source: "none", root: workspaceDir, runIds: [], files: [] };
+  }
+  // With a diff in hand the judge only needs to know what else exists; the
+  // full-content snapshot is the fallback for runs without checkpoints.
+  const snapshot = await captureWorkspaceSnapshot(workspaceDir, {
+    ...(options.snapshotOptions ?? {}),
+    ...(changeSet.files.length > 0 ? { listOnly: true, maxFiles: 120 } : {}),
+  });
+
   const retries = options.retries ?? 2;
   let lastRaw = "";
   let lastVerdict = null;
-  const promptInput = { scenario, agentResult, snapshot, preamble: options.preamble };
+  const promptInput = {
+    scenario,
+    agentResult,
+    snapshot,
+    changeSet,
+    efficiency,
+    oracle,
+    preamble: options.preamble,
+  };
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const prompt =
@@ -81,28 +142,35 @@ export async function judgeRun({ scenario, agentResult, workspaceDir, options = 
       agentBin: options.agentBin ?? DEFAULT_AGENT_BIN,
       timeoutSeconds: options.timeoutSeconds ?? 300,
     });
-    lastVerdict = parseJudgeResponse(lastRaw);
+    lastVerdict = parseJudgeResponse(lastRaw, { oracle });
     if (isUsableVerdict(lastVerdict)) return lastVerdict;
   }
 
-  const detail = lastVerdict?.summary || "Judge response was not valid JSON.";
+  const detail = lastVerdict?.summary || INVALID_SUMMARY;
   throw new Error(detail);
 }
 
 export function isUsableVerdict(verdict) {
-  return verdict.grade !== "?" && verdict.summary !== "Judge response was not valid JSON.";
+  return verdict.grade !== "?" && verdict.summary !== INVALID_SUMMARY;
 }
 
 const JUDGE_RESPONSE_SCHEMA = {
-  score: 0,
-  grade: "F",
+  outcome: {
+    score: 0,
+    notes: "does the deliverable satisfy the task — cite files, tests, or output",
+  },
+  process: {
+    score: 0,
+    notes: "how efficiently and carefully the agent got there, given the task's size",
+    wastedSteps: [{ step: 0, why: "what this step cost and why it was unnecessary" }],
+    missing: ["a step a careful engineer would have taken and the agent skipped"],
+  },
   summary: "one paragraph",
-  criteria: [{ name: "criterion name", score: 0, max: 10, notes: "why" }],
   strengths: ["..."],
   weaknesses: ["..."],
   agentImprovements: [
     {
-      area: "system prompt | tools | planning | compaction | other",
+      area: "system prompt | tools | loop | compaction | routing | other",
       suggestion: "concrete change to the Bitfield Agent runtime",
       priority: "low|medium|high",
     },
@@ -118,9 +186,38 @@ function formatAgentStepsForJudge(agentResult) {
       const tools = (step.toolCalls ?? [])
         .map((c) => `${c.name}(${JSON.stringify(c.args)}) -> ${c.ok ? "ok" : c.error}`)
         .join("; ");
-      return `  ${step.index}. [${step.kind}] ${step.content?.slice(0, 200) || "(no text)"}${tools ? ` | ${tools}` : ""}`;
+      const timing =
+        typeof step.durationMs === "number" || typeof step.promptTokens === "number"
+          ? ` {${[
+              typeof step.durationMs === "number" ? `${(step.durationMs / 1000).toFixed(1)}s` : null,
+              typeof step.promptTokens === "number" ? `${step.promptTokens} prompt tok` : null,
+            ]
+              .filter(Boolean)
+              .join(", ")}}`
+          : "";
+      return `  ${step.index}. [${step.kind}]${timing} ${step.content?.slice(0, 200) || "(no text)"}${tools ? ` | ${tools}` : ""}`;
     })
     .join("\n");
+}
+
+/**
+ * @param {Oracle|null|undefined} oracle
+ */
+export function formatOracleForPrompt(oracle) {
+  if (!oracle || oracle.pass == null) {
+    return [
+      "No mechanical check exists for this task. Your outcome score stands on its own — grade what the workspace and final answer actually deliver.",
+    ].join("\n");
+  }
+  const label = oracle.source === "harbor" ? "Harbor hidden tests" : `${oracle.source}`;
+  const verdict = oracle.pass ? "PASS" : "FAIL";
+  const band = oracle.pass
+    ? `Outcome band is fixed at ${ORACLE_PASS_FLOOR}–100: rank quality inside it (completeness, correctness beyond the tests, instruction following).`
+    : `Outcome band is fixed at 0–${ORACLE_FAIL_CEILING}: rank how close the attempt got (partial deliverable vs. nothing). Only note if the tests look flaky; do not override them.`;
+  return [
+    `${label}: ${verdict}.${oracle.detail ? ` ${String(oracle.detail).slice(0, 1500)}` : ""}`,
+    band,
+  ].join("\n");
 }
 
 /**
@@ -129,10 +226,14 @@ function formatAgentStepsForJudge(agentResult) {
  * @param {import("./scenarios.mjs").BenchScenario} input.scenario
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {Awaited<ReturnType<typeof captureWorkspaceSnapshot>>} input.snapshot
+ * @param {import("./change-set.mjs").ChangeSet} [input.changeSet]
+ * @param {import("./efficiency.mjs").EfficiencyMetrics} [input.efficiency]
+ * @param {Oracle|null} [input.oracle]
  */
-function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
+function buildJudgeGradingContext({ scenario, agentResult, snapshot, changeSet, efficiency, oracle }) {
   const steps = formatAgentStepsForJudge(agentResult);
   const stepSummary = formatStepSummary(agentResult);
+  const metrics = efficiency ?? computeEfficiency(agentResult);
   return [
     "## Task",
     scenario.followUp
@@ -148,9 +249,15 @@ function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
     "## Rubric",
     scenario.rubric,
     "",
+    "## Ground truth",
+    formatOracleForPrompt(oracle),
+    "",
+    "## Efficiency metrics (computed from the trace — treat as facts)",
+    formatEfficiencyForPrompt(metrics),
+    "",
     "## Agent step summary",
     stepSummary,
-    `(Full trace: read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT} in the workspace snapshot below.)`,
+    `(Full trace: read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT} in the workspace.)`,
     "",
     "## Agent final answer",
     agentAnswerText(agentResult) || "(empty)",
@@ -159,27 +266,40 @@ function buildJudgeGradingContext({ scenario, agentResult, snapshot }) {
     `## Agent steps (${agentResult.steps?.length ?? 0}):`,
     steps || "  (none)",
     "",
+    "## Files changed by the agent",
+    formatChangeSetForPrompt(changeSet),
+    "",
     "## Workspace snapshot",
     formatSnapshotForPrompt(snapshot),
   ].join("\n");
 }
+
+const SCORING_GUIDE = [
+  "Score two things independently:",
+  "- outcome.score (0–100): does the deliverable satisfy the task? Use the ground-truth band when one is given. Judge the workspace and final answer, not your own ability to fix it.",
+  "- process.score (0–100): was the path proportionate to the task? Reward reading before editing, running the relevant command after changes, and stopping when done. Penalize repeated failing commands, redundant reads, blind edits, unverified changes, and burning the budget. The efficiency metrics are computed facts; use them, and list wasted steps by their step number from the trace.",
+  "A run can score high on outcome and low on process, or the reverse. Do not blend them.",
+];
 
 /**
  * @param {object} input
  * @param {import("./scenarios.mjs").BenchScenario} input.scenario
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {Awaited<ReturnType<typeof captureWorkspaceSnapshot>>} input.snapshot
+ * @param {import("./change-set.mjs").ChangeSet} [input.changeSet]
+ * @param {import("./efficiency.mjs").EfficiencyMetrics} [input.efficiency]
+ * @param {Oracle|null} [input.oracle]
  * @param {string} [input.priorRaw]
  * @param {string} [input.preamble]
  */
-export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRaw, preamble }) {
+export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, changeSet, efficiency, oracle, priorRaw, preamble }) {
   return [
     ...(preamble ? [preamble, ""] : []),
     "Your previous grading response was invalid or incomplete.",
     "Reply with ONLY a single JSON object matching the schema below — no markdown fences, no placeholders.",
-    "Use the full agent artifacts below to grade outcome and process.",
+    ...SCORING_GUIDE,
     "",
-    buildJudgeGradingContext({ scenario, agentResult, snapshot }),
+    buildJudgeGradingContext({ scenario, agentResult, snapshot, changeSet, efficiency, oracle }),
     "",
     "Previous invalid response:",
     String(priorRaw ?? "").slice(0, 1500),
@@ -194,16 +314,19 @@ export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, priorRa
  * @param {import("./scenarios.mjs").BenchScenario} input.scenario
  * @param {import("../src/agent-loop.mjs").AgentRunResult} input.agentResult
  * @param {Awaited<ReturnType<typeof captureWorkspaceSnapshot>>} input.snapshot
+ * @param {import("./change-set.mjs").ChangeSet} [input.changeSet]
+ * @param {import("./efficiency.mjs").EfficiencyMetrics} [input.efficiency]
+ * @param {Oracle|null} [input.oracle]
  * @param {string} [input.preamble]
  */
-export function buildJudgePrompt({ scenario, agentResult, snapshot, preamble }) {
+export function buildJudgePrompt({ scenario, agentResult, snapshot, changeSet, efficiency, oracle, preamble }) {
   return [
     ...(preamble ? [preamble, ""] : []),
     "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
-    "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
-    `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering and process criteria.`,
+    ...SCORING_GUIDE,
+    `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering.`,
     "",
-    buildJudgeGradingContext({ scenario, agentResult, snapshot }),
+    buildJudgeGradingContext({ scenario, agentResult, snapshot, changeSet, efficiency, oracle }),
     "",
     "Respond with a single JSON object and no markdown fences. Schema:",
     JSON.stringify(JUDGE_RESPONSE_SCHEMA, null, 2),
@@ -211,35 +334,98 @@ export function buildJudgePrompt({ scenario, agentResult, snapshot, preamble }) 
 }
 
 /**
+ * The mechanical ground truth handed to the judge for a dev-bench scenario.
+ * Precheck is the task's own test; an integrity miss (unexpected writes or
+ * deletes) is a hard fail regardless of what the precheck says.
+ *
+ * @param {{pass: boolean|null, detail: string}|null|undefined} precheck
+ * @param {{pass: boolean|null, detail: string}|null|undefined} integrity
+ * @returns {Oracle|null}
+ */
+export function buildOracle(precheck, integrity) {
+  if (integrity?.pass === false) {
+    return { pass: false, source: "integrity", detail: `integrity FAIL: ${integrity.detail}` };
+  }
+  if (precheck?.pass == null) return null;
+  return {
+    pass: precheck.pass,
+    source: "precheck",
+    detail: `precheck ${precheck.pass ? "PASS" : "FAIL"}: ${precheck.detail}`,
+  };
+}
+
+/**
+ * Pin the judge's outcome score to the mechanical result when there is one.
+ * @param {number} judgeScore
+ * @param {Oracle|null|undefined} oracle
+ */
+export function anchorOutcome(judgeScore, oracle) {
+  const score = clampScore(judgeScore);
+  if (!oracle || oracle.pass == null) {
+    return { score, judgeScore: score, oracle: null, source: "judge", agreesWithOracle: null };
+  }
+  const agrees = oracle.pass ? score >= AGREEMENT_THRESHOLD : score < AGREEMENT_THRESHOLD;
+  const anchored = oracle.pass
+    ? Math.max(ORACLE_PASS_FLOOR, score)
+    : Math.min(ORACLE_FAIL_CEILING, score);
+  return {
+    score: anchored,
+    judgeScore: score,
+    oracle: oracle.pass,
+    source: "oracle-anchored",
+    agreesWithOracle: agrees,
+  };
+}
+
+/**
  * @param {string} text
+ * @param {{oracle?: Oracle|null}} [context]
  * @returns {JudgeVerdict}
  */
-export function parseJudgeResponse(text) {
+export function parseJudgeResponse(text, { oracle = null } = {}) {
   const parsed = extractJsonObject(String(text ?? ""));
   if (!parsed) {
     return {
       score: 0,
       grade: "?",
-      summary: "Judge response was not valid JSON.",
-      criteria: [],
+      outcome: { score: 0, judgeScore: 0, oracle: oracle?.pass ?? null, source: "judge", agreesWithOracle: null, notes: "" },
+      process: { score: null, grade: null, notes: "", wastedSteps: [], missing: [] },
+      summary: INVALID_SUMMARY,
       strengths: [],
       weaknesses: [],
       agentImprovements: [],
       raw: String(text ?? ""),
     };
   }
-  return {
-    score: clampScore(parsed.score),
-    grade: String(parsed.grade ?? "?"),
-    summary: String(parsed.summary ?? ""),
-    criteria: Array.isArray(parsed.criteria)
-      ? parsed.criteria.map((c) => ({
-          name: String(c.name ?? ""),
-          score: Number(c.score) || 0,
-          max: Number(c.max) || 10,
-          notes: String(c.notes ?? ""),
-        }))
+
+  // Accept the legacy single-score shape so old artifacts still parse.
+  const outcomeRaw = parsed.outcome && typeof parsed.outcome === "object" ? parsed.outcome : null;
+  const outcomeScore = outcomeRaw?.score ?? parsed.score;
+  const outcome = {
+    ...anchorOutcome(outcomeScore, oracle),
+    notes: String(outcomeRaw?.notes ?? ""),
+  };
+
+  const processRaw = parsed.process && typeof parsed.process === "object" ? parsed.process : null;
+  const processScore = processRaw && processRaw.score != null ? clampScore(processRaw.score) : null;
+  const process = {
+    score: processScore,
+    grade: processScore == null ? null : scoreToGrade(processScore),
+    notes: String(processRaw?.notes ?? ""),
+    wastedSteps: Array.isArray(processRaw?.wastedSteps)
+      ? processRaw.wastedSteps
+          .map((w) => ({ step: Number(w?.step) || 0, why: String(w?.why ?? "") }))
+          .filter((w) => w.why)
       : [],
+    missing: Array.isArray(processRaw?.missing) ? processRaw.missing.map(String).filter(Boolean) : [],
+  };
+
+  return {
+    score: outcome.score,
+    grade: typeof parsed.grade === "string" && parsed.grade.trim() ? parsed.grade : scoreToGrade(outcome.score),
+    outcome,
+    process,
+    summary: String(parsed.summary ?? ""),
     strengths: Array.isArray(parsed.strengths) ? parsed.strengths.map(String) : [],
     weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses.map(String) : [],
     agentImprovements: Array.isArray(parsed.agentImprovements)
@@ -287,13 +473,28 @@ function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+/** @param {number} score */
+export function scoreToGrade(score) {
+  if (score >= 93) return "A";
+  if (score >= 90) return "A-";
+  if (score >= 87) return "B+";
+  if (score >= 83) return "B";
+  if (score >= 80) return "B-";
+  if (score >= 77) return "C+";
+  if (score >= 73) return "C";
+  if (score >= 70) return "C-";
+  if (score >= 67) return "D+";
+  if (score >= 60) return "D";
+  return "F";
+}
+
 /** Short CLI prompt — full grading context lives in {@link ARTIFACTS_JUDGE_PROMPT}. */
 export function buildJudgeInvocationPrompt() {
   return [
     "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
-    `Read the full grading instructions, rubric, agent trace, and workspace snapshot from ${ARTIFACTS_JUDGE_PROMPT} in this workspace.`,
+    `Read the full grading instructions, rubric, ground truth, efficiency metrics, agent trace, and file changes from ${ARTIFACTS_JUDGE_PROMPT} in this workspace.`,
     `For detailed tool-call traces, also read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT}.`,
-    "Evaluate the OUTCOME in the workspace and the agent's process, not your own ability to fix it.",
+    "Score outcome (did it satisfy the task) and process (was the path efficient) independently.",
     "Reply with ONLY a single JSON object matching the schema described in the prompt file — no markdown fences.",
   ].join("\n");
 }

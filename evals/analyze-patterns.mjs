@@ -4,8 +4,8 @@
  * patterns — approach-level levers, not tip-style fixes.
  *
  *   node evals/analyze-patterns.mjs
- *   node evals/analyze-patterns.mjs --report bench-H2.json
- *   node evals/analyze-patterns.mjs --scoreboard evals/scoreboard-history.jsonl
+ *   node evals/analyze-patterns.mjs --report ../halo-agent-benchmark/local/latest.json
+ *   node evals/analyze-patterns.mjs --scoreboard ../halo-agent-benchmark/local/scoreboard-history.jsonl
  *   node evals/analyze-patterns.mjs --json patterns.json --markdown patterns.md
  */
 
@@ -54,7 +54,7 @@ function printHelp() {
   --help                Show this help
 
 Reads telemetry patterns across a run and/or scoreboard A/B history.
-Emits architectural levers (acceptance, escalation, memory, critique) —
+Emits architectural levers (tool feedback, prompt, compaction, routing) —
 not hard-coded tip-style recommendations.`);
 }
 

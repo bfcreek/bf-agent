@@ -25,9 +25,7 @@ import path from "node:path";
 import { createAgent } from "../src/index.mjs";
 import { OllamaClient } from "../src/ollama-client.mjs";
 import { resolveModelAuto } from "../src/model-routing.mjs";
-import { resolveModelWithEscalation } from "../src/escalation.mjs";
 import { loadBenchOptions, resolveTierModel, uniqueTierModels } from "./config.mjs";
-import { getTierPresetPolicy } from "../src/tier-models.mjs";
 import {
   DEFAULT_CHECKPOINT_REL,
   buildCheckpointRecord,
@@ -49,8 +47,9 @@ import {
   buildPublicBenchmark,
   evaluateGates,
 } from "./gates.mjs";
+import { computeEfficiency } from "./efficiency.mjs";
 import { captureIntegritySnapshot, checkScenarioIntegrity } from "./integrity.mjs";
-import { judgeRun } from "./judge.mjs";
+import { buildOracle, judgeRun } from "./judge.mjs";
 import { appendScoreboardEntry, computeRunMetrics, loadScoreboardHistory } from "./scoreboard.mjs";
 import { mergePhaseResults, scenarioPhases } from "./phases.mjs";
 import { buildAssessmentReport, formatReportConsole, formatReportMarkdown } from "./report.mjs";
@@ -99,23 +98,17 @@ function tierAverage(results) {
 }
 
 async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSteps, signal }) {
-  const policy = getTierPresetPolicy(options.tierPreset);
   const agent = await createAgent({
     model,
     baseUrl: options.baseUrl,
     workspaceRoot: dir,
     maxSteps,
     projectIndex: false,
-    planning: options.planning,
+    // Checkpoints give the judge an exact before/after of every file the
+    // agent touched (see change-set.mjs). They live under .halo-agent/,
+    // which integrity and snapshots already skip.
+    checkpoints: true,
     think: options.think ?? undefined,
-    taskHints: options.taskHints,
-    memory: options.memory !== false,
-    memoryReadonly: options.memoryReadonly === true,
-    acceptance: options.noAcceptance !== true,
-    critique: options.noCritique !== true,
-    escalation: options.escalation !== false,
-    escalationCloud: options.escalationCloud === true || policy.cloudOnly,
-    cloudOnly: policy.cloudOnly,
     onStep: options.verbose
       ? (step) => {
           for (const call of step.toolCalls) {
@@ -194,6 +187,7 @@ async function runScenario({ scenario, model, options }) {
     const precheck = scenario.precheck
       ? await scenario.precheck(dir, agentResult)
       : { pass: null, detail: "no precheck" };
+    const efficiency = computeEfficiency(agentResult, { maxSteps: options.maxSteps });
 
     const shouldJudge =
       !options.skipJudge && !scenario.skipJudge && scenario.tier !== 0;
@@ -207,10 +201,13 @@ async function runScenario({ scenario, model, options }) {
           scenario,
           agentResult,
           workspaceDir: dir,
+          oracle: buildOracle(precheck, integrity),
           options: {
             model: options.judgeModel,
             timeoutSeconds: options.judgeTimeoutSeconds,
             retries: options.judgeRetries,
+            efficiency,
+            maxSteps: options.maxSteps,
           },
         });
       } catch (err) {
@@ -230,12 +227,11 @@ async function runScenario({ scenario, model, options }) {
       agent: {
         stopReason: agentResult.stopReason,
         steps: agentResult.steps.length,
-        phases: agentResult.phases ?? null,
+        toolCalls: efficiency.toolCalls,
+        elapsedMs: agentResult.elapsedMs ?? null,
+        wallClockExhausted: agentResult.wallClockExhausted === true,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
-        escalationCount: agentResult.escalationCount ?? 0,
-        cloudUsed: agentResult.cloudUsed ?? false,
-        verificationPassed: agentResult.verification?.passed ?? null,
-        memoryEnabled: options.memory !== false,
+        efficiency,
       },
       verdict,
       judgeError,
@@ -274,12 +270,11 @@ async function runScenario({ scenario, model, options }) {
       agent: {
         stopReason: agentResult.stopReason ?? "error",
         steps: agentResult.steps?.length ?? 0,
-        phases: agentResult.phases ?? null,
+        toolCalls: null,
+        elapsedMs: agentResult.elapsedMs ?? null,
+        wallClockExhausted: agentResult.wallClockExhausted === true,
         answerPreview: agentAnswerText(agentResult).slice(0, 300),
-        escalationCount: agentResult.escalationCount ?? 0,
-        cloudUsed: agentResult.cloudUsed ?? false,
-        verificationPassed: agentResult.verification?.passed ?? null,
-        memoryEnabled: options.memory !== false,
+        efficiency: computeEfficiency(agentResult, { maxSteps: options.maxSteps }),
       },
       verdict: null,
       judgeError: null,
@@ -295,13 +290,7 @@ async function logResolvedModel(model, options) {
   if (options.judgeOnly) return model;
   try {
     const client = new OllamaClient({ baseUrl: options.baseUrl, model });
-    // Escalation-first routing starts on the weakest capable local model and
-    // climbs on struggle. Resolving "auto" the strongest-model way here would
-    // pin every scenario to the top rung and the ladder would never be used.
-    const routed =
-      options.escalation !== false && model === "auto"
-        ? await resolveModelWithEscalation({ requested: model, client, escalationEnabled: true })
-        : await resolveModelAuto({ requested: model, client });
+    const routed = await resolveModelAuto({ requested: model, client });
     console.error(`  resolved Ollama model: ${routed.model}`);
     return routed.model;
   } catch (err) {
@@ -346,18 +335,27 @@ function printProgress(row) {
       : row.integrity.pass
         ? "integrity ok"
         : "integrity FAIL";
+  const tools =
+    row.agent.toolCalls != null ? `${row.agent.steps} steps/${row.agent.toolCalls} tools` : `${row.agent.steps} steps`;
+  const flags = row.agent.efficiency?.flags?.length ? `  [${row.agent.efficiency.flags.join(", ")}]` : "";
   if (row.verdict) {
+    const proc = row.verdict.process?.score != null ? `  process ${row.verdict.process.score}` : "";
     console.error(
-      `  ${row.verdict.score} (${row.verdict.grade})  ${row.scenario}  ${pre}  ${integ}  ${row.agent.steps} steps  ${row.seconds.toFixed(1)}s`,
+      `  outcome ${row.verdict.score} (${row.verdict.grade})${proc}  ${row.scenario}  ${pre}  ${integ}  ${tools}  ${row.seconds.toFixed(1)}s${flags}`,
     );
   } else {
     console.error(
-      `  ${row.scenario}  ${pre}  ${integ}  ${row.agent.steps} steps  ${row.seconds.toFixed(1)}s`,
+      `  ${row.scenario}  ${pre}  ${integ}  ${tools}  ${row.seconds.toFixed(1)}s${flags}`,
     );
   }
   if (row.error) console.error(`    error: ${row.error}`);
   if (row.judgeError) console.error(`    judge: ${row.judgeError}`);
   if (row.integrity?.pass === false) console.error(`    integrity: ${row.integrity.detail}`);
+  if (row.verdict?.outcome?.agreesWithOracle === false) {
+    console.error(
+      `    judge disagreed with ground truth (judge ${row.verdict.outcome.judgeScore}, anchored to ${row.verdict.score})`,
+    );
+  }
 }
 
 function printTierProgress(tier, tierResults, avg) {
@@ -768,13 +766,8 @@ async function main() {
   });
 
   const flags = {
-    planning: options.planning === true,
-    memory: options.memory !== false,
-    memoryReadonly: options.memoryReadonly === true,
-    acceptance: options.noAcceptance !== true,
-    critique: options.noCritique !== true,
-    escalation: options.escalation !== false,
-    escalationCloud: options.escalationCloud === true,
+    think: options.think ?? null,
+    tierPreset: options.tierPreset ?? null,
   };
 
   const history = await loadScoreboardHistory().catch(() => []);
@@ -801,6 +794,7 @@ async function main() {
     label: options.label ?? null,
     models: reportModels,
     ...flags,
+    maxSteps: options.maxSteps ?? null,
     scenarios: allResults.length,
     ...metrics,
     avgScore: report.overall.avgScore,

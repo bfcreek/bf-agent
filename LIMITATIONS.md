@@ -5,7 +5,7 @@ local agent (via Aura Wire) or running it standalone.
 
 ## What it is
 
-- A **local agent runtime** for Ollama: plan → tool calls → observe → repeat.
+- A **local agent runtime** for Ollama: tool calls → observe → repeat until the model stops, in a thin Cursor-style harness.
 - **CLI, SDK, and `serve`** (OpenAI-compatible `/v1` facade).
 - **Free** — you pay only for your hardware and whichever Ollama model you run.
 
@@ -15,6 +15,7 @@ local agent (via Aura Wire) or running it standalone.
 - **Not frontier-class** on hard multi-file tasks — quality depends heavily on your local model.
 - **Not a sandbox** — tools are workspace-scoped, but the agent can still write and run commands in that workspace when unattended (`serve` mode, `--mode agent`).
 - **Not RAG/memory** — private corpora stay with Terran (via Aura Wire / MCP); sessions + compaction handle conversation state. Public web lookup is built in as `web_search`.
+- **Not a supervisor** — the loop does not plan for the model, grade its work, nudge it, or swap models mid-run. A weak model that stops early stops early; put that policy in rules files or SDK hooks (`stop`, `beforeToolCall`) rather than expecting the runtime to compensate.
 
 ## Model quality
 
@@ -24,7 +25,7 @@ Benchmark reference model: **`gpt-oss:20b`**. Scores vary by model, hardware, an
 | --- | --- | --- |
 | 0 | Safety / integrity | Must not corrupt unrelated files |
 | 1 | Everyday (read, small edit) | Target for built-in agent |
-| 2 | Routine dev (tests, flags, renames) | Local-first with cloud escalation |
+| 2 | Routine dev (tests, flags, renames) | Local-first; pick a cloud model (`--tier-preset cloud`) when local models are too weak |
 | 3+ | Small builds, refactors, APIs | Often needs a stronger model or cloud |
 
 Run `npm run bench` to measure your setup. Gates define minimum acceptable scores — see `evals/PLAN.md`.
@@ -36,6 +37,7 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 - **Deletion gate**: in unattended runs, shell deletion commands (`rm`, `del`, `Remove-Item`, `git clean`, `find -delete`, …) only run when the user's request explicitly names every deletion target. Unnamed targets, protected files ("do not delete X"), wildcards without a named fixed part, and indirect deletes are refused, and the agent is instructed to ask the user. The same rule applies to `write_file` / `edit_file` on cleanup-style goals so the model cannot empty or rewrite files as a delete workaround. Detection is best-effort — an inline script that deletes files would not be caught — so this complements (not replaces) upstream guardrails.
 - **Path confinement**: file and shell tools cannot escape the workspace root.
 - **Edit safety**: failed or ambiguous `edit_file` calls do not modify the file (see `test/fs-edit-safety.test.mjs`).
+- **Checkpoints**: every file is snapshotted before its first `write_file` / `edit_file` in a run; `bf-agent checkpoints restore <run-id>` undoes the run's file changes. Shell commands that modify files are not checkpointed.
 - **Integrity bench (tier 0)**: verifies the agent does not corrupt unrelated files on read-only and narrow-edit tasks.
 
 ## Wire pairing
@@ -43,8 +45,8 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 Bitfield Agent is designed to pair with **Aura Wire**:
 
 - Wire routes IDE traffic; Bitfield Agent is the **built-in local tier** for simple work.
-- Wire reads `bench-capability.json` (from a gated bench run) to set routing defaults.
-- Complex tasks should escalate to cloud providers automatically.
+- Wire reads `../halo-agent-benchmark/local/capability.json` (from a gated bench run) to set routing defaults.
+- Complex tasks should be routed to cloud providers by Wire; the runtime itself does not escalate mid-run.
 
 ## Reporting issues
 

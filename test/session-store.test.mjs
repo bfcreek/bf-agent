@@ -111,20 +111,17 @@ test("merge persists stopReason and error from failed runs", () => {
   assert.equal(merged.error, "error parsing tool call");
 });
 
-test("merge persists closed-loop telemetry from a run", () => {
+test("merge persists the checkpoint run id from a run", () => {
   const store = new SessionStore({ workspaceRoot: root });
   const merged = store.merge("tb", null, {
     messages: [],
     steps: [{ index: 1 }],
     stopReason: "completed",
-    escalationCount: 2,
-    cloudUsed: true,
-    verification: { passed: false, missing: ["write output"] },
+    checkpointRunId: "run-1",
   });
-  assert.equal(merged.escalationCount, 2);
-  assert.equal(merged.cloudUsed, true);
-  assert.equal(merged.verificationPassed, false);
-  assert.equal(merged.verification.passed, false);
+  assert.equal(merged.checkpointRunId, "run-1");
+  const next = store.merge("tb", merged, { messages: [], steps: [], stopReason: "completed" });
+  assert.equal(next.checkpointRunId, "run-1");
 });
 
 test("mid-run flush keeps growing steps under stopReason running", async () => {

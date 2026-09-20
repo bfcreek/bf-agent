@@ -10,14 +10,9 @@ import {
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
-/** Closed-loop flags the Harbor adapter actually runs with. */
+/** Runtime settings the Harbor adapter runs with (see adapters/halo_agent.py). */
 export const HARBOR_RUN_FLAGS = {
-  planning: true,
-  memory: true,
-  acceptance: true,
-  critique: true,
-  escalation: true,
-  escalationCloud: true,
+  think: "max",
 };
 
 /**
@@ -54,10 +49,14 @@ export function buildRecognizedReport(input) {
       resolveRate: overall.resolveRate ?? 0,
       judged: overall.judged ?? 0,
       judgeAvg: overall.judgeAvg ?? null,
+      processAvg: overall.processAvg ?? null,
       totalSeconds: overall.totalSeconds ?? 0,
       avgSteps: overall.avgSteps ?? null,
-      cloudRate: overall.cloudRate ?? null,
-      avgEscalations: overall.avgEscalations ?? null,
+      avgToolCalls: overall.avgToolCalls ?? null,
+      avgPromptTokens: overall.avgPromptTokens ?? null,
+      verifiedRate: overall.verifiedRate ?? null,
+      avgHeuristicScore: overall.avgHeuristicScore ?? null,
+      flagCounts: overall.flagCounts ?? {},
     },
     tasks: tasks.map((task) => ({
       name: task.name,
@@ -69,6 +68,9 @@ export function buildRecognizedReport(input) {
       trialDir: task.trialDir,
       score: task.verdict?.score ?? task.score ?? null,
       grade: task.verdict?.grade ?? task.grade ?? null,
+      outcome: task.verdict?.outcome ?? task.outcome ?? null,
+      processScore: task.verdict?.process?.score ?? task.processScore ?? null,
+      process: task.verdict?.process ?? task.process ?? null,
       summary: task.verdict?.summary ?? task.summary ?? null,
       strengths: task.verdict?.strengths ?? task.strengths ?? [],
       weaknesses: task.verdict?.weaknesses ?? task.weaknesses ?? [],
@@ -76,9 +78,11 @@ export function buildRecognizedReport(input) {
       judgeError: task.judgeError ?? null,
       steps: task.steps ?? task.stepCount ?? 0,
       stopReason: task.stopReason ?? null,
-      escalationCount: task.escalationCount ?? 0,
-      cloudUsed: task.cloudUsed ?? false,
-      verificationPassed: task.verificationPassed ?? null,
+      toolCalls: task.efficiency?.toolCalls ?? task.toolCalls ?? null,
+      promptTokens: task.efficiency?.tokens?.prompt ?? task.promptTokens ?? null,
+      efficiencyFlags: task.efficiency?.flags ?? task.efficiencyFlags ?? [],
+      heuristicScore: task.efficiency?.heuristicScore ?? task.heuristicScore ?? null,
+      efficiency: task.efficiency ?? null,
     })),
     recommendations: collectRecommendations(tasks),
   };
@@ -112,12 +116,13 @@ export function formatRecognizedMarkdown(report) {
   );
   if (o.judgeAvg != null) {
     lines.push(
-      `**Cursor judge average:** ${o.judgeAvg.toFixed(1)}/100 — ${o.judged}/${o.tasks} tasks graded`,
+      `**Cursor judge — outcome:** ${o.judgeAvg.toFixed(1)}/100${o.processAvg != null ? `  |  **process:** ${o.processAvg.toFixed(1)}/100` : ""} — ${o.judged}/${o.tasks} tasks graded`,
     );
   } else {
     lines.push("**Cursor judge:** not run");
   }
   lines.push(`**Errors:** ${o.errors}  |  **Duration:** ${formatDuration(o.totalSeconds)}`);
+  lines.push(formatEfficiencyLine(o));
   if (report.harborJobDir) lines.push(`**Harbor job:** \`${report.harborJobDir}\``);
   lines.push("");
 
@@ -138,22 +143,35 @@ export function formatRecognizedMarkdown(report) {
   lines.push(
     "## Tasks",
     "",
-    "| Task | Harbor | Judge | Grade | Seconds | Summary |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| Task | Harbor | Outcome | Process | Steps | Tools | Flags | Seconds | Summary |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   );
   for (const task of report.tasks) {
     const harbor = task.resolved ? "pass" : task.exception ? "error" : "fail";
-    const score = task.score != null ? String(task.score) : "—";
-    const grade = task.grade ?? "—";
+    const score = task.score != null ? `${task.score} (${task.grade ?? "—"})` : "—";
+    const proc = task.processScore != null ? String(task.processScore) : "—";
+    const tools = task.toolCalls != null ? String(task.toolCalls) : "—";
+    const flags = task.efficiencyFlags?.length ? task.efficiencyFlags.join(", ") : "—";
     const seconds = task.seconds != null ? formatDuration(task.seconds) : "—";
     const summary = (task.judgeError || task.summary || task.exception || "")
       .replaceAll("|", "\\|")
       .replaceAll("\n", " ");
     lines.push(
-      `| ${task.name} | ${harbor} | ${score} | ${grade} | ${seconds} | ${summary.slice(0, 160)} |`,
+      `| ${task.name} | ${harbor} | ${score} | ${proc} | ${task.steps ?? "—"} | ${tools} | ${flags} | ${seconds} | ${summary.slice(0, 160)} |`,
     );
   }
   lines.push("");
+
+  const wasted = report.tasks.filter((t) => t.process?.wastedSteps?.length);
+  if (wasted.length) {
+    lines.push("## Wasted steps (judge)", "");
+    for (const task of wasted) {
+      lines.push(`- **${task.name}**`);
+      for (const w of task.process.wastedSteps.slice(0, 6)) lines.push(`  - step ${w.step}: ${w.why}`);
+      for (const m of task.process.missing ?? []) lines.push(`  - missing: ${m}`);
+    }
+    lines.push("");
+  }
 
   if (report.recommendations.length > 0) {
     lines.push("## Recommendations for Bitfield Agent", "");
@@ -189,14 +207,19 @@ export function formatRecognizedConsole(report) {
     `  Harbor: ${o.resolved}/${o.tasks} resolved (${pct(o.resolveRate)})  |  errors ${o.errors}  |  ${formatDuration(o.totalSeconds)}`,
   ];
   if (o.judgeAvg != null) {
-    lines.push(`  Judge:  ${o.judgeAvg.toFixed(1)}/100 average  (${o.judged}/${o.tasks} graded)`);
+    lines.push(
+      `  Judge:  outcome ${o.judgeAvg.toFixed(1)}/100${o.processAvg != null ? `  |  process ${o.processAvg.toFixed(1)}/100` : ""}  (${o.judged}/${o.tasks} graded)`,
+    );
   }
+  lines.push(`  ${formatEfficiencyLine(o).replaceAll("**", "")}`);
   lines.push("");
   for (const task of report.tasks) {
     const harbor = task.resolved ? "PASS" : task.exception ? "ERR " : "fail";
     const score = task.score != null ? String(task.score).padStart(3) : " --";
-    const grade = (task.grade ?? "").padEnd(3);
-    lines.push(`  ${harbor}  ${score} ${grade}  ${task.name}`);
+    const proc = task.processScore != null ? `p${String(task.processScore).padStart(3)}` : "p --";
+    const tools = task.toolCalls != null ? `${task.steps} steps/${task.toolCalls} tools` : `${task.steps} steps`;
+    const flags = task.efficiencyFlags?.length ? `  [${task.efficiencyFlags.join(", ")}]` : "";
+    lines.push(`  ${harbor}  ${score} ${proc}  ${task.name}  ${tools}${flags}`);
     if (task.summary) lines.push(`         ${task.summary.slice(0, 100)}`);
     if (task.judgeError) lines.push(`         judge: ${task.judgeError}`);
   }
@@ -245,6 +268,19 @@ function collectRecommendations(tasks) {
 
 function pct(rate) {
   return `${(rate * 100).toFixed(1)}%`;
+}
+
+/** One line of deterministic efficiency aggregates for the report header. */
+function formatEfficiencyLine(o) {
+  const parts = [];
+  if (o.avgSteps != null) parts.push(`**Avg steps:** ${o.avgSteps.toFixed(1)}`);
+  if (o.avgToolCalls != null) parts.push(`**Avg tool calls:** ${o.avgToolCalls.toFixed(1)}`);
+  if (o.avgPromptTokens != null) parts.push(`**Avg prompt tokens:** ${Math.round(o.avgPromptTokens)}`);
+  if (o.verifiedRate != null) parts.push(`**Verified after last change:** ${pct(o.verifiedRate)}`);
+  if (o.avgHeuristicScore != null) parts.push(`**Heuristic efficiency:** ${o.avgHeuristicScore.toFixed(0)}/100`);
+  const flags = Object.entries(o.flagCounts ?? {}).sort((a, b) => b[1] - a[1]);
+  if (flags.length) parts.push(`**Flags:** ${flags.map(([f, n]) => `${f}×${n}`).join(", ")}`);
+  return parts.length ? parts.join("  |  ") : "**Efficiency:** no trace telemetry";
 }
 
 function formatDuration(seconds) {
