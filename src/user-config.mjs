@@ -44,6 +44,11 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 #
 # mcp:
 #   - "npx -y some-mcp-server"
+#
+# Persistent user instructions (Cursor-style user rules): create
+# instructions.md in this same directory. It is prepended to every system
+# prompt. Workspace AGENTS.md, CLAUDE.md, .cursorrules, and always-apply
+# .cursor/rules/*.mdc are loaded from the project root.
 `;
 
 /** @returns {string} */

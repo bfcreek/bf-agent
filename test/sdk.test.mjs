@@ -43,6 +43,7 @@ test("the SDK exports the full public surface", () => {
     "registerProjectSearchTool",
     "buildSystemPrompt",
     "buildEnvironmentContext",
+    "loadAppliedInstructions",
     "buildProjectContext",
     "gatherFirstTurnProjectContext",
     "ensureProjectIndex",

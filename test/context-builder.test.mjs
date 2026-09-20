@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 
-import { buildEnvironmentContext, buildSystemPrompt } from "../src/context-builder.mjs";
+import {
+  buildEnvironmentContext,
+  buildSystemPrompt,
+  loadAppliedInstructions,
+  parseRuleFrontmatter,
+  shouldAlwaysApplyRule,
+} from "../src/context-builder.mjs";
 import { truncateMiddle } from "../src/tools/fs.mjs";
 
 let root;
@@ -65,7 +71,11 @@ test("environment context notes git merge discipline when .git is present", asyn
 });
 
 test("buildSystemPrompt prepends the base prompt", async () => {
-  const prompt = await buildSystemPrompt({ basePrompt: "BASE RULES", workspaceRoot: root });
+  const prompt = await buildSystemPrompt({
+    basePrompt: "BASE RULES",
+    workspaceRoot: root,
+    userConfigDir: root,
+  });
   assert.ok(prompt.startsWith("BASE RULES\n\n"));
   assert.match(prompt, /## Environment/);
 });
@@ -74,6 +84,7 @@ test("buildSystemPrompt appends project context when provided", async () => {
   const prompt = await buildSystemPrompt({
     basePrompt: "BASE",
     workspaceRoot: root,
+    userConfigDir: root,
     projectContext: "## Project context\n\noverview",
   });
   assert.match(prompt, /## Project context/);
@@ -97,4 +108,75 @@ test("truncateMiddle notes JSON keys when truncating objects", () => {
   const obj = { alpha: "x".repeat(4000), beta: 1, gamma: true };
   const out = truncateMiddle(JSON.stringify(obj), 80);
   assert.match(out, /JSON keys \(3\): alpha, beta, gamma/);
+});
+
+test("parseRuleFrontmatter reads alwaysApply and globs", () => {
+  const { attributes, body } = parseRuleFrontmatter(`---
+description: TypeScript conventions
+globs: **/*.ts
+alwaysApply: true
+---
+
+Use strict TypeScript.
+`);
+  assert.equal(attributes.alwaysApply, true);
+  assert.equal(attributes.globs, "**/*.ts");
+  assert.match(body, /strict TypeScript/);
+  assert.equal(shouldAlwaysApplyRule({ alwaysApply: true }), true);
+  assert.equal(shouldAlwaysApplyRule({ alwaysApply: false, globs: "**/*.ts" }), false);
+  assert.equal(shouldAlwaysApplyRule({ globs: "**/*.ts" }), false);
+  assert.equal(shouldAlwaysApplyRule({}), true);
+});
+
+test("loadAppliedInstructions injects AGENTS.md, user instructions, and always-apply rules", async () => {
+  const ws = await mkdtemp(path.join(os.tmpdir(), "halo-agent-instr-"));
+  const userDir = await mkdtemp(path.join(os.tmpdir(), "halo-agent-user-instr-"));
+  try {
+    await writeFile(path.join(ws, "AGENTS.md"), "Prefer list_dir over guessing paths.", "utf8");
+    await writeFile(path.join(userDir, "instructions.md"), "Use PowerShell ';' not '&&'.", "utf8");
+    await mkdir(path.join(ws, ".cursor", "rules"), { recursive: true });
+    await writeFile(
+      path.join(ws, ".cursor", "rules", "always.mdc"),
+      `---
+alwaysApply: true
+---
+
+Never rewrite git history.
+`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(ws, ".cursor", "rules", "scoped.mdc"),
+      `---
+globs: "**/*.ts"
+alwaysApply: false
+---
+
+This should not appear.
+`,
+      "utf8",
+    );
+
+    const text = await loadAppliedInstructions({
+      workspaceRoot: ws,
+      userConfigDir: userDir,
+    });
+    assert.match(text, /User instructions \(from instructions\.md\)/);
+    assert.match(text, /Use PowerShell/);
+    assert.match(text, /Workspace instructions \(from AGENTS\.md\)/);
+    assert.match(text, /Prefer list_dir/);
+    assert.match(text, /\.cursor\/rules\/always\.mdc/);
+    assert.match(text, /Never rewrite git history/);
+    assert.doesNotMatch(text, /This should not appear/);
+
+    const prompt = await buildSystemPrompt({
+      basePrompt: "BASE",
+      workspaceRoot: ws,
+      userConfigDir: userDir,
+    });
+    assert.ok(prompt.indexOf("Prefer list_dir") < prompt.indexOf("## Environment"));
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+    await rm(userDir, { recursive: true, force: true });
+  }
 });

@@ -57,6 +57,10 @@ test("system prompt covers build pipelines, artifacts, and tool-call discipline"
   assert.match(DEFAULT_SYSTEM_PROMPT, /not app\/filter\.py/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Only use[\s\S]*search_project if that tool is listed/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Internal thinking\/reasoning never counts as task progress/i);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Communication:/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /final message must stand alone/i);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Change only what the task requires/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Only run git commit or git push when the user instruction asks/);
 });
 
 test("plain answer with no tool calls completes in one step", async () => {

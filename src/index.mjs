@@ -87,7 +87,13 @@ export {
   VRAM_FIT_FRACTION,
 } from "./hardware.mjs";
 
-export { buildEnvironmentContext, buildSystemPrompt } from "./context-builder.mjs";
+export {
+  buildEnvironmentContext,
+  buildSystemPrompt,
+  loadAppliedInstructions,
+  parseRuleFrontmatter,
+  shouldAlwaysApplyRule,
+} from "./context-builder.mjs";
 
 export {
   buildProjectContext,

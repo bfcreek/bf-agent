@@ -82,6 +82,7 @@ test("ensureConfigFile creates a commented template", async () => {
     assert.match(text, /Bitfield Agent user configuration/);
     assert.match(text, /base-url:/);
     assert.match(text, /show-plan:/);
+    assert.match(text, /instructions\.md/);
 
     await ensureConfigFile();
     const again = await readFile(configPath, "utf8");

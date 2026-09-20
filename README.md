@@ -208,9 +208,12 @@ named (a bare "clean up"), wildcard-only targets, and indirect deletes
 (`git clean`, piped `Remove-Item`). In `--mode ask` the y/N prompt decides,
 as for any shell command.
 
-The system prompt is built per run by the context builder: platform, shell,
-workspace root, and a top-level file listing, so the model starts oriented
-instead of spending steps exploring. On the first turn, a planning pre-pass
+The system prompt is built per run by the context builder: communication /
+scope / git rules (same shape Cursor applies to coding agents), then any
+user `instructions.md` and workspace `AGENTS.md` / always-apply
+`.cursor/rules`, then platform, shell, workspace root, and a top-level file
+listing, so the model starts oriented instead of spending steps exploring.
+On the first turn, a planning pre-pass
 asks the model for a short numbered plan before any tools run (skipped only
 for empty prompts and simple read-and-answer goals). During the run, the loop
 checkpoints plan progress near mid-budget and can replan remaining steps when
@@ -227,6 +230,63 @@ the system message and recent turns are kept verbatim. Compaction triggers on
 real token usage: every request carries an explicit `num_ctx` (default 16384,
 `--num-ctx` to change), and the loop watches the token counts Ollama reports
 to compact before the window overflows.
+
+## Instruction files
+
+Each run loads Cursor-style instruction files into the system prompt (after
+the built-in Communication / Scope / Git rules, before the environment
+snapshot). Missing files are skipped. Loaded text is capped at 4000
+characters per file and 8000 characters total.
+
+**Apply order**
+
+1. User `instructions.md` (if present)
+2. Workspace root files, in this order: `AGENTS.md`, `CLAUDE.md`, `.cursorrules`
+3. Always-apply rules from `.cursor/rules/` (`.mdc` or `.md`, sorted by name)
+
+**User instructions** — persistent personal rules, like Cursor user rules.
+Create `instructions.md` in the agent config directory (same folder as
+`config.yaml`):
+
+| Platform | Default path |
+| --- | --- |
+| Windows | `%APPDATA%\halo-agent\instructions.md` |
+| macOS / Linux | `~/.config/halo-agent/instructions.md` |
+
+Override the directory with `HALO_AGENT_CONFIG_DIR`. `bf-agent config edit`
+creates `config.yaml` there; `instructions.md` is optional and is not
+created automatically.
+
+**Workspace instructions** — project rules checked into the repo:
+
+| File | When it applies |
+| --- | --- |
+| `AGENTS.md` | Always, if present at the workspace root (`--cwd`) |
+| `CLAUDE.md` | Always, if present at the workspace root |
+| `.cursorrules` | Always, if present at the workspace root |
+| `.cursor/rules/*.mdc` or `*.md` | When the rule is always-apply (see below) |
+
+Cursor `.mdc` frontmatter is honored:
+
+```markdown
+---
+description: Core coding standards
+alwaysApply: true
+---
+
+Match existing style. Do not add docs the user did not ask for.
+```
+
+| Frontmatter | Loaded? |
+| --- | --- |
+| `alwaysApply: true` | Yes |
+| `alwaysApply: false` | No |
+| `globs:` (and no `alwaysApply: true`) | No — file-scoped; this runtime has no open-editor set |
+| No frontmatter / no globs | Yes |
+
+File-scoped rules (`globs: **/*.ts`) stay out until there is an editor
+session to match against. Put cross-cutting project rules in `AGENTS.md` or
+an `alwaysApply: true` `.mdc`.
 
 ## How the loop works
 
@@ -379,7 +439,7 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/agent-loop.mjs` | Core plan/act/observe loop |
 | `src/ollama-client.mjs` | Thin `/api/chat` client |
 | `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
-| `src/context-builder.mjs` | Environment + workspace snapshot for the system prompt |
+| `src/context-builder.mjs` | Environment snapshot plus Cursor-style AGENTS.md / rules injection |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
 | `src/prompt-enhancements.mjs` | Task hints, planning pre-pass, Ollama think resolution |
 | `src/openai-server.mjs` | `/v1/chat/completions` facade over the loop |
