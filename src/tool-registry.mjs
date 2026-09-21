@@ -51,6 +51,19 @@ export class ToolRegistry {
     /** @type {((request: {name: string, args: object}) => Promise<boolean>|boolean)|null} */
     this.approvalHandler = null;
     /**
+     * Tools to approve without prompting. `"all"` covers every gated tool;
+     * a Set names specific tools. Null means nothing is auto-approved.
+     * @type {"all"|Set<string>|null}
+     */
+    this.autoApprove = null;
+    /**
+     * True only while executing a gated call that was approved — by the
+     * handler or by auto-approve. Unattended runs leave this false so
+     * deletion and cleanup checks still apply.
+     * @type {boolean}
+     */
+    this.callApproved = false;
+    /**
      * Per-run context tools may consult for safety decisions — the agent
      * loop sets `{ goal }` at the start of each run so tools like
      * run_command can check what the user actually authorized.
@@ -73,6 +86,32 @@ export class ToolRegistry {
   setApprovalHandler(handler) {
     this.approvalHandler = handler;
     return this;
+  }
+
+  /**
+   * Approve gated tools without consulting the handler.
+   * `all` covers every gated tool; a list names specific tools; `off`
+   * clears the policy.
+   * @param {"all"|"off"|boolean|string[]|null} policy
+   */
+  setAutoApprove(policy) {
+    if (policy == null || policy === false || policy === "off") {
+      this.autoApprove = null;
+    } else if (policy === true || policy === "all") {
+      this.autoApprove = "all";
+    } else if (Array.isArray(policy)) {
+      this.autoApprove = new Set(policy);
+    } else {
+      throw new Error(`auto-approve policy must be all, off, or a list of tool names.`);
+    }
+    return this;
+  }
+
+  /** @param {string} name */
+  isAutoApproved(name) {
+    if (this.autoApprove === "all") return true;
+    if (this.autoApprove instanceof Set) return this.autoApprove.has(name);
+    return false;
   }
 
   /** @param {ToolDefinition} tool */
@@ -138,26 +177,86 @@ export class ToolRegistry {
       }
     }
 
-    if (tool.requiresApproval && this.approvalHandler) {
-      let approved;
-      try {
-        approved = await this.approvalHandler({ name, args: parsedArgs ?? {} });
-      } catch (err) {
-        return { ok: false, error: `Approval check failed: ${err?.message ?? err}` };
-      }
-      if (!approved) {
-        return {
-          ok: false,
-          error: `The user declined to allow '${name}'. Do not retry the same call; ask the user or find another way.`,
-        };
+    let approvedCall = false;
+    if (tool.requiresApproval) {
+      if (this.isAutoApproved(name)) {
+        approvedCall = true;
+      } else if (this.approvalHandler) {
+        let approved;
+        try {
+          approved = await this.approvalHandler({ name, args: parsedArgs ?? {} });
+        } catch (err) {
+          return { ok: false, error: `Approval check failed: ${err?.message ?? err}` };
+        }
+        if (!approved) {
+          return {
+            ok: false,
+            error: `The user declined to allow '${name}'. Do not retry the same call; ask the user or find another way.`,
+          };
+        }
+        approvedCall = true;
       }
     }
 
+    this.callApproved = approvedCall;
     try {
       const result = await tool.execute(parsedArgs ?? {});
       return { ok: true, result };
     } catch (err) {
       return { ok: false, error: `Tool '${name}' failed: ${err?.message ?? err}` };
+    } finally {
+      this.callApproved = false;
     }
   }
+}
+
+const AUTO_APPROVE_ON = new Set(["all", "on", "true", "yes", "*"]);
+const AUTO_APPROVE_OFF = new Set(["off", "none", "false", "no"]);
+
+/**
+ * Parse a CLI or config auto-approve value.
+ * `all` / `on` / `true` / `yes` / `*` approve every gated tool.
+ * `off` / `none` / `false` / `no` approve none.
+ * Anything else is a comma-separated tool list (`write_file,run_command`).
+ *
+ * @param {unknown} raw
+ * @param {string} [label] Used in error text (`--auto-approve`, config key).
+ * @returns {{ ok: true, policy: "all"|"off"|string[] } | { ok: false, error: string }}
+ */
+export function parseAutoApproveSpec(raw, label = "--auto-approve") {
+  if (raw === true) return { ok: true, policy: "all" };
+  if (raw === false) return { ok: true, policy: "off" };
+
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return { ok: true, policy: "off" };
+    if (raw.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+      return { ok: false, error: `${label} list entries must be tool names.` };
+    }
+    return parseAutoApproveSpec(raw.map((entry) => entry.trim()).join(","), label);
+  }
+
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return {
+      ok: false,
+      error: `${label} needs all, off, or a comma-separated tool list (e.g. write_file,run_command).`,
+    };
+  }
+
+  const token = raw.trim();
+  const keyword = token.toLowerCase();
+  if (AUTO_APPROVE_ON.has(keyword)) return { ok: true, policy: "all" };
+  if (AUTO_APPROVE_OFF.has(keyword)) return { ok: true, policy: "off" };
+
+  const names = token.split(",").map((part) => part.trim()).filter(Boolean);
+  const bad = names.filter((name) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(name));
+  if (names.length === 0 || bad.length > 0) {
+    return {
+      ok: false,
+      error:
+        `${label} needs all, off, or a comma-separated tool list (e.g. write_file,run_command)` +
+        (bad.length ? `, got '${bad.join(", ")}'` : "") +
+        ".",
+    };
+  }
+  return { ok: true, policy: names };
 }

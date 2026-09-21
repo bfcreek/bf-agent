@@ -69,6 +69,17 @@ test("num-ctx defaults to auto and accepts auto or a positive integer", () => {
   assert.ok(normalizeConfigValues({ "num-ctx": "lots" }).errors.some((e) => /num-ctx.*'auto'/.test(e)));
 });
 
+test("normalizeConfigValues accepts auto-approve policies", () => {
+  assert.equal(normalizeConfigValues({ "auto-approve": true }).values.autoApprove, "all");
+  assert.equal(normalizeConfigValues({ "auto-approve": "off" }).values.autoApprove, "off");
+  assert.deepEqual(normalizeConfigValues({ "auto-approve": "write_file,edit_file" }).values.autoApprove, [
+    "write_file",
+    "edit_file",
+  ]);
+  assert.deepEqual(normalizeConfigValues({ "auto-approve": ["run_command"] }).values.autoApprove, ["run_command"]);
+  assert.ok(normalizeConfigValues({ "auto-approve": "write file" }).errors.some((e) => e.includes("auto-approve")));
+});
+
 test("applyConfigToDefaults merges without mutating the base defaults", () => {
   const defaults = getBuiltinDefaults();
   const merged = applyConfigToDefaults(defaults, { model: "from-config", mcp: ["a"] });

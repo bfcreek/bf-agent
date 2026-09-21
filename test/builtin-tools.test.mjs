@@ -610,6 +610,31 @@ test("run_command allows any approved delete when an approval handler is set", a
   await assert.rejects(readFile(path.join(root, "approved.txt"), "utf8"));
 });
 
+test("run_command allows a delete that was auto-approved", async () => {
+  await writeFile(path.join(root, "auto.txt"), "bye", "utf8");
+  registry.setRunContext({ goal: "Clean up unused files." });
+  registry.setAutoApprove("all");
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item auto.txt" : "rm auto.txt",
+  });
+  assert.equal(run.ok, true);
+  await assert.rejects(readFile(path.join(root, "auto.txt"), "utf8"));
+});
+
+test("run_command still blocks deletes when a different tool is auto-approved", async () => {
+  await writeFile(path.join(root, "kept.txt"), "stay", "utf8");
+  registry.setRunContext({ goal: "Clean up unused files." });
+  registry.setAutoApprove(["write_file"]);
+
+  const run = await registry.execute("run_command", {
+    command: IS_WINDOWS ? "Remove-Item kept.txt" : "rm kept.txt",
+  });
+  assert.equal(run.ok, false);
+  assert.match(run.error, /did not explicitly name/);
+  assert.equal(await readFile(path.join(root, "kept.txt"), "utf8"), "stay");
+});
+
 test("run_command still runs non-deletion commands without any authorization", async () => {
   const run = await registry.execute("run_command", {
     command: `node -e "console.log('harmless')"`,

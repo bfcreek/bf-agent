@@ -27,7 +27,7 @@ import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./mo
 import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
-import { ToolRegistry } from "./tool-registry.mjs";
+import { parseAutoApproveSpec, ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 import {
   applyConfigToDefaults,
@@ -158,6 +158,17 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         else if (mode !== undefined) options.errors.push(`--mode must be 'ask' or 'agent', got '${mode}'.`);
         break;
       }
+      case "--auto-approve": {
+        const next = argv[i + 1];
+        const raw = next !== undefined && !next.startsWith("-") ? argv[++i] : "all";
+        const parsed = parseAutoApproveSpec(raw);
+        if (parsed.ok) options.autoApprove = parsed.policy;
+        else options.errors.push(parsed.error);
+        break;
+      }
+      case "--no-auto-approve":
+        options.autoApprove = "off";
+        break;
       case "--session": {
         const name = value(arg, ++i);
         if (name !== undefined) options.session = name;
@@ -292,7 +303,14 @@ Options:
                        remains, and the loop wraps up before the deadline instead of being killed
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
-                       agent: run them unattended (default when not a TTY, and in serve mode)
+                       agent: run them unattended (default when not a TTY, and in serve mode).
+                       Unattended runs still block deletes and cleanup writes
+                       unless the call is auto-approved
+  --auto-approve [p]   Approve gated tools without a prompt. Bare flag or 'all':
+                       every gated tool. 'off': none. Or a list: write_file,run_command.
+                       Auto-approved calls count as approved, including deletes.
+                       In ask mode, tools outside the list still prompt
+  --no-auto-approve    Do not auto-approve tools (overrides config)
   --session <name>     Persist/resume this conversation (.halo-agent/sessions/ in the workspace)
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --embed-model <name> Embedding model for project index (default nomic-embed-text)
@@ -312,6 +330,8 @@ Examples:
   bf-agent "what time is it?"
   bf-agent "summarize src/agent-loop.mjs" --model qwen3-coder:30b
   bf-agent "fix the failing test" --session fix-tests --mode agent
+  bf-agent "delete the scratch files I named" --auto-approve
+  bf-agent "edit the readme" --mode ask --auto-approve write_file,edit_file
   bf-agent serve --port 11435
   bf-agent models
   bf-agent models config edit
@@ -324,6 +344,24 @@ Examples:
 Exit codes:
   0  success        1  usage error      2  stopped at max steps
   3  Ollama error   4  MCP attach failed`);
+}
+
+function promptsForApproval(options) {
+  return options.mode === "ask" && options.autoApprove !== "all";
+}
+
+/**
+ * Install the auto-approve policy. Ask-mode prompting is separate: it is
+ * skipped entirely when every gated tool is auto-approved.
+ * @param {ToolRegistry} registry
+ * @param {{autoApprove?: "all"|"off"|string[], quiet?: boolean}} options
+ */
+function applyAutoApprove(registry, options) {
+  const policy = options.autoApprove ?? "off";
+  if (policy === "all" || Array.isArray(policy)) registry.setAutoApprove(policy);
+  if (options.quiet || policy === "off" || policy == null) return;
+  const which = policy === "all" ? "all gated tools" : policy.join(", ");
+  console.error(`[approval] auto-approving ${which}`);
 }
 
 function makeApprovalPrompt() {
@@ -748,6 +786,8 @@ async function main() {
     extraContext: formatMcpToolIndex(registry),
   });
 
+  applyAutoApprove(registry, options);
+
   if (options.serve) {
     let serveTierModels = null;
     try {
@@ -782,10 +822,10 @@ async function main() {
   let interactivePrompt;
   if (options.interactive) {
     interactivePrompt = makeInteractivePrompt();
-    if (options.mode === "ask") {
+    if (promptsForApproval(options)) {
       registry.setApprovalHandler(interactivePrompt.approve);
     }
-  } else if (options.mode === "ask") {
+  } else if (promptsForApproval(options)) {
     approval = makeApprovalPrompt();
     registry.setApprovalHandler(approval.handler);
   }

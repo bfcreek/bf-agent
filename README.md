@@ -79,7 +79,9 @@ Options:
 | `--wall-clock <sec>` | off | Wall-clock budget for the run; the loop wraps up before the deadline instead of being killed |
 | `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
-| `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
+| `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended. Deletes and cleanup writes still need an explicit approval |
+| `--auto-approve [policy]` | `off` | Approve gated tools without a prompt. Bare flag or `all`: every gated tool. `off`: none. Or a comma-separated list such as `write_file,run_command`. Those calls count as approved, including deletes. In ask mode, tools outside the list still prompt |
+| `--no-auto-approve` | | Force auto-approve off (overrides config) |
 | `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); tools are listed by name and fetched on demand |
 | `--no-checkpoints` | off | Do not snapshot files before `write_file` / `edit_file` |
@@ -143,7 +145,9 @@ Exposes the agent loop behind the standard OpenAI API so any existing client
 - `GET /v1/models` — installed Ollama models.
 
 Serve mode always runs unattended (`agent` mode): there is no terminal to
-prompt for approvals. Put Wire's guardrails in front if you need policy.
+prompt for approvals. `--auto-approve` still applies, so a listed tool counts
+as approved (including deletes). Put Wire's guardrails in front if you need
+policy.
 
 ## Docker Compose
 

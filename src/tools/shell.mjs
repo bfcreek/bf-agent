@@ -3,9 +3,9 @@
  * workspace. Guardrails: workspace-bound cwd, a hard timeout, output spilled
  * to a file when long, and a deletion gate. Safety wins over task
  * instructions: deletion runs only when the user explicitly named the target
- * files in their request (or approved the call at the ask-mode prompt);
- * anything broader — "clean up", wildcards, files the user said to keep — is
- * refused so the agent asks the user instead.
+ * files in their request (or approved the call — ask-mode prompt or
+ * --auto-approve); anything broader — "clean up", wildcards, files the user
+ * said to keep — is refused so the agent asks the user instead.
  */
 
 import { spawn } from "node:child_process";
@@ -299,9 +299,9 @@ export function registerShellTools(registry, { workspaceRoot }) {
         );
       }
       const { command: shellCommand, adapted, note: adaptNote } = adaptPowerShellCommand(command);
-      // Deletion gate for unattended runs (in ask mode, reaching execute
-      // means the human already approved this exact call).
-      if (!registry.approvalHandler) {
+      // Deletion gate for unattended runs. An approved call (ask-mode yes,
+      // or --auto-approve) skips it — the user already allowed this call.
+      if (!registry.callApproved) {
         const { verdict, segment, target } = classifyDeleteCommand(command, registry.runContext?.goal);
         if (verdict === "protected") {
           throw new Error(

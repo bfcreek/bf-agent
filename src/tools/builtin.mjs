@@ -3,8 +3,8 @@
  * access, code search, web access, shell execution, and rule fetching — the
  * file and shell tools scoped to a workspace root. Write/shell tools are
  * approval-gated; shell deletion commands and write_file/edit_file under
- * vague cleanup goals are blocked outright when no approval handler is
- * available (unattended runs).
+ * vague cleanup goals are blocked outright unless this call was approved
+ * (ask-mode prompt or auto-approve).
  */
 
 import { listRules } from "../context-builder.mjs";

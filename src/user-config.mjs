@@ -11,6 +11,7 @@ import path from "node:path";
 
 import { DEFAULT_MAX_STEPS } from "./agent-loop.mjs";
 import { DEFAULT_NUM_CTX, DEFAULT_THINK } from "./ollama-client.mjs";
+import { parseAutoApproveSpec } from "./tool-registry.mjs";
 
 export const CONFIG_FILE_NAME = "config.yaml";
 
@@ -24,6 +25,7 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
 # cwd: .
 # mode: ask
+# auto-approve: off   # all, off, or a tool list: write_file,edit_file,run_command
 # port: 11435
 # session: my-session
 # embed-model: nomic-embed-text
@@ -238,6 +240,12 @@ export function normalizeConfigValues(raw) {
         if (typeof value === "boolean") values[configKeyToOption(key)] = value;
         else errors.push(`config '${key}' must be true or false.`);
         break;
+      case "auto-approve": {
+        const parsed = parseAutoApproveSpec(value, "config 'auto-approve'");
+        if (parsed.ok) values.autoApprove = parsed.policy;
+        else errors.push(parsed.error);
+        break;
+      }
       case "mcp":
         if (!Array.isArray(value)) {
           errors.push(`config 'mcp' must be a list of command strings.`);
@@ -379,6 +387,7 @@ export function getBuiltinDefaults() {
     cwd: process.cwd(),
     port: 11435,
     mode: process.stdin.isTTY && process.stderr.isTTY ? "ask" : "agent",
+    autoApprove: "off",
     mcp: [],
     embedModel: "nomic-embed-text",
     noIndex: false,

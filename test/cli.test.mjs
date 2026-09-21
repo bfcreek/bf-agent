@@ -46,7 +46,7 @@ test("--help prints usage, options, examples, and exit codes", () => {
   assert.match(run.stdout, /Interactive terminal mode/);
   assert.match(run.stdout, /bf-agent serve/);
   assert.match(run.stdout, /bf-agent models/);
-  for (const flag of ["--model", "--session", "--mcp", "--mode", "--version", "--json", "--no-checkpoints"]) {
+  for (const flag of ["--model", "--session", "--mcp", "--mode", "--auto-approve", "--no-auto-approve", "--version", "--json", "--no-checkpoints"]) {
     assert.ok(run.stdout.includes(flag), `help should document ${flag}`);
   }
   assert.match(run.stdout, /Examples:/);
@@ -188,6 +188,34 @@ test("multiple usage errors are all reported at once", () => {
   assert.equal(run.status, 1);
   assert.match(run.stderr, /--mode must be/);
   assert.match(run.stderr, /--max-steps needs/);
+});
+
+test("--auto-approve accepts all, a tool list, or off", () => {
+  const all = cli("hello", "--auto-approve", "--no-index", "--base-url", "http://127.0.0.1:9");
+  assert.equal(all.status, 3);
+  assert.match(all.stderr, /auto-approving all gated tools/);
+
+  const listed = cli(
+    "hello",
+    "--auto-approve",
+    "write_file,run_command",
+    "--no-index",
+    "--base-url",
+    "http://127.0.0.1:9",
+  );
+  assert.equal(listed.status, 3);
+  assert.match(listed.stderr, /auto-approving write_file, run_command/);
+
+  const off = cli("hello", "--auto-approve", "--no-auto-approve", "--no-index", "--base-url", "http://127.0.0.1:9");
+  assert.equal(off.status, 3);
+  assert.doesNotMatch(off.stderr, /auto-approving/);
+});
+
+test("--auto-approve rejects a policy that is not all, off, or tool names", () => {
+  const run = cli("hello", "--auto-approve", "write file");
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /--auto-approve needs all, off/);
+  assert.match(run.stderr, /write file/);
 });
 
 test("an unreachable Ollama exits with code 3 and a clear message", () => {

@@ -473,11 +473,11 @@ export async function pathExists(absPath) {
 
 /**
  * Unattended cleanup/delete goals: refuse write/edit unless the path was
- * explicitly named (and not protected). Ask-mode approvals skip this —
- * the human already confirmed the call.
+ * explicitly named (and not protected). An approved call (ask-mode yes,
+ * or --auto-approve) skips this — the user already confirmed the call.
  */
 function assertCleanupMutationAllowed(registry, filePath, toolName) {
-  if (registry.approvalHandler) return;
+  if (registry.callApproved) return;
   const { verdict, target } = classifyCleanupFileMutation(filePath, registry.runContext?.goal);
   if (verdict === "protected" || verdict === "unauthorized") {
     throw new Error(cleanupMutationBlockMessage(verdict, target, toolName));

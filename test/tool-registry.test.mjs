@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ToolRegistry, suggestSimilarTools } from "../src/tool-registry.mjs";
+import { ToolRegistry, parseAutoApproveSpec, suggestSimilarTools } from "../src/tool-registry.mjs";
 import { registerBuiltinTools } from "../src/tools/builtin.mjs";
 
 test("schemas render in OpenAI function shape", () => {
@@ -117,6 +117,38 @@ test("approval handler errors are reported, not thrown", async () => {
   const outcome = await registry.execute("danger", {});
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /Approval check failed: prompt unavailable/);
+});
+
+test("auto-approve skips the handler for named tools and still gates the rest", async () => {
+  const registry = new ToolRegistry();
+  registry.register({ name: "write_file", requiresApproval: true, execute: () => "wrote" });
+  registry.register({ name: "run_command", requiresApproval: true, execute: () => "ran" });
+  registry.setAutoApprove(["write_file"]);
+  const seen = [];
+  registry.setApprovalHandler((request) => {
+    seen.push(request.name);
+    return false;
+  });
+
+  const write = await registry.execute("write_file", { path: "a.txt" });
+  assert.deepEqual(write, { ok: true, result: "wrote" });
+  const shell = await registry.execute("run_command", { command: "echo hi" });
+  assert.equal(shell.ok, false);
+  assert.match(shell.error, /declined/);
+  assert.deepEqual(seen, ["run_command"]);
+  assert.equal(registry.callApproved, false);
+});
+
+test("parseAutoApproveSpec accepts all, off, and tool lists", () => {
+  assert.deepEqual(parseAutoApproveSpec("all"), { ok: true, policy: "all" });
+  assert.deepEqual(parseAutoApproveSpec(true), { ok: true, policy: "all" });
+  assert.deepEqual(parseAutoApproveSpec("off"), { ok: true, policy: "off" });
+  assert.deepEqual(parseAutoApproveSpec("write_file, run_command"), {
+    ok: true,
+    policy: ["write_file", "run_command"],
+  });
+  assert.equal(parseAutoApproveSpec("write file").ok, false);
+  assert.match(parseAutoApproveSpec("write file").error, /write file/);
 });
 
 test("ungated tools never consult the approval handler", async () => {
