@@ -95,9 +95,8 @@ export async function loadTrialJudgeInput(task, { maxSteps = null } = {}) {
 
   const preamble = [
     "You are grading Bitfield Agent on a Terminal-Bench task that already ran inside Harbor/Docker.",
-    "The workspace is the Harbor trial directory: instruction, agent logs, verifier output, and any downloaded /app artifacts.",
     "Harbor's hidden tests already produced a mechanical pass/fail (reward); it fixes the outcome band.",
-    "Your job is qualitative: whether the artifacts match the instruction, how efficiently the agent worked, and what to change in the Bitfield Agent runtime.",
+    "Everything you need is in this prompt: the instruction, the reward, the step trace, and the file diff. Do not open other files and do not re-run tests.",
   ].join(" ");
 
   // Checkpoints live in the container's /app; when Harbor collected that

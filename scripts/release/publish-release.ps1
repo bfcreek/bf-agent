@@ -9,7 +9,7 @@
 # After upload:
 #   1. Verify staging at https://halo-agent-releases.halosoftworks.com/staging/latest.yml
 #   2. Promote at https://www.halosoftworks.com/admin/releases
-#   3. Publish npm (production only): .\scripts\release\publish-production.ps1
+#   3. Publish npm (production only): .\scripts\commands\ha-release-npm.ps1
 
 param(
     [switch] $SkipTests,
@@ -94,4 +94,4 @@ $pkg = Get-Content -Raw -Path $PkgPath | ConvertFrom-Json
 $version = [string]$pkg.version
 
 Write-Host ""
-Write-Host "halo-agent v$version uploaded to R2 staging/. Next: promote at https://www.halosoftworks.com/admin/releases, then run publish-production.ps1 for npm." -ForegroundColor Green
+Write-Host "halo-agent v$version uploaded to R2 staging/. Next: promote at https://www.halosoftworks.com/admin/releases, then run .\scripts\commands\ha-release-npm.ps1 for npm." -ForegroundColor Green

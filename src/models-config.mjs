@@ -26,7 +26,7 @@ const MODELS_CONFIG_TEMPLATE = `# Bitfield Agent model routing
 # Used by the CLI and dev-bench to pick easy / medium / hard models.
 # Run: bf-agent models config edit
 
-# Preset: auto (detect local models), cloud (no GPU), cloud-max (flagship cloud, max think), hybrid, local
+# Preset: auto (detect local models), cloud (pinned cloud model), cloud-max (same model, max think), hybrid, local
 preset: auto
 
 # Default task difficulty for a single CLI run (0=safety … 6=hardest).
@@ -35,9 +35,6 @@ default-tier: ${DEFAULT_TASK_TIER}
 # Optional explicit bands (override preset).
 # \`vision\` is used when the request includes image attachments.
 # bands:
-#   - through-tier: 1
-#     model: qwen3-coder:14b
-#     vision: devstral-small-2
 #   - through-tier: 3
 #     model: qwen3-coder:30b
 #     vision: devstral-small-2

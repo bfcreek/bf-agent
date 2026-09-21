@@ -14,6 +14,7 @@ import {
   resolveTierPreset,
   TIER_PRESET_HELP,
   TIER_PRESETS,
+  PINNED_MODELS,
   uniqueTierModels,
 } from "../src/tier-models.mjs";
 
@@ -117,15 +118,13 @@ test("coerceTierPresetModel treats Harbor's model string as a preset", () => {
   assert.equal(ordinary.model, "gpt-oss:20b");
 });
 
-test("cloud-max preset uses flagship cloud models at every band", () => {
+test("cloud-max preset is the pinned cloud model at every band", () => {
   const bands = getTierPresetBands("cloud-max");
-  assert.ok(bands.length >= 1);
-  assert.ok(bands.every((band) => band.model.includes(":cloud")));
-  assert.ok(bands.every((band) => band.vision.includes(":cloud")));
-  assert.equal(resolveTierModel(0, bands, "fallback"), "glm-5.3:cloud");
-  assert.equal(resolveTierModel(3, bands, "fallback"), "glm-5.3:cloud");
-  assert.equal(resolveTierModel(4, bands, "fallback"), "kimi-k3:cloud");
-  assert.equal(resolveTierModel(6, bands, "fallback", { requireVision: true }), "kimi-k3:cloud");
+  assert.equal(bands.length, 1);
+  assert.equal(bands[0].model, PINNED_MODELS.cloud);
+  assert.equal(bands[0].vision, PINNED_MODELS.cloud);
+  assert.equal(resolveTierModel(0, bands, "fallback"), PINNED_MODELS.cloud);
+  assert.equal(resolveTierModel(6, bands, "fallback", { requireVision: true }), PINNED_MODELS.cloud);
   assert.deepEqual(
     bands.map((band) => band.model),
     TIER_PRESETS["cloud-max"].map((band) => band.model),

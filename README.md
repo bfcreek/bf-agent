@@ -27,7 +27,7 @@ Product shape:
 
 - Node.js 20+
 - [Ollama](https://ollama.com) running locally (default `http://127.0.0.1:11434`)
-- A tool-capable model installed, e.g. `ollama pull llama3.2` or `ollama pull qwen3-coder:30b`
+- The pinned local model, `ollama pull qwen3-coder:30b` (or the cloud pin, `ollama pull kimi-k2.7-code:cloud`, when there is no GPU)
 
 No npm dependencies — the runtime uses only Node built-ins.
 
@@ -106,12 +106,12 @@ Ollama versions. `bf-agent models` shows the classification and what
 
 **Why a pin.** The harness is tuned against one local line and one cloud
 line so that bench history stays comparable and fixes target a known model's
-quirks instead of the average of several. The pins came out of a 2026-09
-bake-off on Terminal-Bench 2.1 samples (`qwen3-coder:30b` vs `gpt-oss:20b`
-vs `devstral-small-2`): only the coder resolved a task, and it had the best
-process scores. The tier presets are built from the pins (`local`, `hybrid`,
-`cloud`); `cloud-max` is the one preset that reaches past them to flagship
-cloud models. Recognized-benchmark runs default to the local pin at
+quirks instead of the average of several. The pins came out of a 2026-09 bake-off on the same Terminal-Bench 2.1
+samples. Locally, `qwen3-coder:30b` was the only model to resolve a task,
+ahead of `gpt-oss:20b` and `devstral-small-2`. On the cloud line,
+`kimi-k2.7-code:cloud` resolved 2/4 (including the FEAL attack) against
+`glm-5.3:cloud` at 1/4; glm spent the hard tasks inside the output cap and
+then the wall clock. The tier presets (`local`, `hybrid`, `cloud`, `cloud-max`) all use those two models; `cloud-max` is the cloud pin at maximum reasoning effort, not a different model. Local image turns still use `devstral-small-2`, because the local pin has no vision. The Cursor judge is separate: it grades from one prompt file and does not run an Ollama model. Recognized-benchmark runs default to the local pin at
 `--num-ctx 24576` (the spec's recommendation for a non-thinking model; on a
 24 GB GPU that costs ~16% decode speed versus a fully-resident 16k window and
 saves a compaction every few steps). Change a pin deliberately, and start a
@@ -392,10 +392,10 @@ Staging (R2 zip upload only — no npm):
 Production (after [admin promote](https://www.bitfieldcreek.com/admin/releases)):
 
 ```powershell
-.\scripts\release\publish-production.ps1
+.\scripts\commands\ha-release-npm.ps1
 ```
 
-`publish-production.ps1` verifies production `latest.yml` matches `package.json`, then runs `npm publish`. Credentials: `scripts/release/.env.release` (`R2_*` for staging, `NPM_TOKEN` for production npm).
+`ha-release-npm` verifies production `latest.yml` matches `package.json`, then runs `npm publish`. Credentials: `scripts/release/.env.release` (`R2_*` for staging, `NPM_TOKEN` for production npm).
 
 ## Tests
 

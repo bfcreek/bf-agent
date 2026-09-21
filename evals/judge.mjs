@@ -1,6 +1,8 @@
 /**
  * Grade halo-agent runs with the Cursor CLI agent (default model: auto).
- * Read-only ask mode — the judge inspects artifacts, it does not edit them.
+ * Read-only ask mode, and the grading packet is one file. The invocation
+ * tells the judge not to open anything else: exploring a trial workspace
+ * (sequence dumps, verifier logs) is what blows the judge timeout.
  *
  * The verdict has two independent scores:
  *
@@ -20,9 +22,7 @@
 import { spawn } from "node:child_process";
 
 import {
-  ARTIFACTS_JSON,
   ARTIFACTS_JUDGE_PROMPT,
-  ARTIFACTS_STEPS_TXT,
   formatStepSummary,
   persistAgentArtifacts,
   persistJudgePrompt,
@@ -177,6 +177,11 @@ const JUDGE_RESPONSE_SCHEMA = {
   ],
 };
 
+function truncateForJudge(text, max = 180) {
+  const value = String(text ?? "");
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
 /**
  * @param {import("../src/agent-loop.mjs").AgentRunResult} agentResult
  */
@@ -184,7 +189,7 @@ function formatAgentStepsForJudge(agentResult) {
   return (agentResult.steps ?? [])
     .map((step) => {
       const tools = (step.toolCalls ?? [])
-        .map((c) => `${c.name}(${JSON.stringify(c.args)}) -> ${c.ok ? "ok" : c.error}`)
+        .map((c) => `${c.name}(${truncateForJudge(JSON.stringify(c.args))}) -> ${c.ok ? "ok" : c.error}`)
         .join("; ");
       const timing =
         typeof step.durationMs === "number" || typeof step.promptTokens === "number"
@@ -257,7 +262,6 @@ function buildJudgeGradingContext({ scenario, agentResult, snapshot, changeSet, 
     "",
     "## Agent step summary",
     stepSummary,
-    `(Full trace: read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT} in the workspace.)`,
     "",
     "## Agent final answer",
     agentAnswerText(agentResult) || "(empty)",
@@ -324,7 +328,7 @@ export function buildJudgePrompt({ scenario, agentResult, snapshot, changeSet, e
     ...(preamble ? [preamble, ""] : []),
     "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
     ...SCORING_GUIDE,
-    `Use the agent step summary and ${ARTIFACTS_JSON} for tool-call ordering.`,
+    `Use the step list in this prompt. Do not open other files.`,
     "",
     buildJudgeGradingContext({ scenario, agentResult, snapshot, changeSet, efficiency, oracle }),
     "",
@@ -488,14 +492,13 @@ export function scoreToGrade(score) {
   return "F";
 }
 
-/** Short CLI prompt — full grading context lives in {@link ARTIFACTS_JUDGE_PROMPT}. */
+/** Short CLI prompt. The grading packet is already one file; the judge must not explore the workspace. */
 export function buildJudgeInvocationPrompt() {
   return [
-    "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
-    `Read the full grading instructions, rubric, ground truth, efficiency metrics, agent trace, and file changes from ${ARTIFACTS_JUDGE_PROMPT} in this workspace.`,
-    `For detailed tool-call traces, also read ${ARTIFACTS_JSON} and ${ARTIFACTS_STEPS_TXT}.`,
-    "Score outcome (did it satisfy the task) and process (was the path efficient) independently.",
-    "Reply with ONLY a single JSON object matching the schema described in the prompt file — no markdown fences.",
+    "You are grading an AI coding agent (Bitfield Agent).",
+    `Read ${ARTIFACTS_JUDGE_PROMPT} and nothing else. It already contains the task, the ground truth, the efficiency metrics, the step trace, and the file changes.`,
+    "Do not use tools. Do not open any other file. Do not re-run tests.",
+    "Reply with ONLY a single JSON object matching the schema in that file — no markdown fences.",
   ].join("\n");
 }
 

@@ -18,19 +18,18 @@ export const DEFAULT_TIER_PRESET = "auto";
 
 /**
  * Presets are built from the two pinned lines (PINNED_MODELS): the local pin
- * wherever local is allowed, the cloud pin wherever cloud is allowed. Only
- * `cloud-max` reaches past the pins, to flagship models at max think.
+ * wherever local is allowed, the cloud pin wherever cloud is allowed.
+ * `cloud-max` is the same cloud pin at maximum reasoning effort — not a
+ * different model. A 2026-09 bake-off measured glm-5.3:cloud as worse on
+ * this harness, so it is not a preset.
  *
  * @type {Record<string, TierModelBand[]>}
  */
 export const TIER_PRESETS = {
   /** Ollama cloud only — no local GPU or RAM required. */
   cloud: [{ model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud }],
-  /** Flagship Ollama cloud only — planning, tools, and escalation stay remote at max think. */
-  "cloud-max": [
-    { throughTier: 3, model: "glm-5.3:cloud", vision: "kimi-k3:cloud" },
-    { model: "kimi-k3:cloud", vision: "kimi-k3:cloud" },
-  ],
+  /** Cloud pin only, at max think (see getTierPresetPolicy). */
+  "cloud-max": [{ model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud }],
   /** Pinned local model for easy/medium work; pinned cloud model for hard tiers. */
   hybrid: [
     { throughTier: 3, model: PINNED_MODELS.local, vision: "devstral-small-2" },
@@ -69,7 +68,7 @@ export function parseTierPresetArg(raw) {
 
 /**
  * Quality / routing policy implied by a named preset.
- * `cloud-max` keeps the run on flagship cloud models at maximum reasoning effort.
+ * `cloud-max` keeps the run on the pinned cloud model at maximum reasoning effort.
  *
  * @param {string|null|undefined} preset
  * @returns {{think: string|null, cloudOnly: boolean}}

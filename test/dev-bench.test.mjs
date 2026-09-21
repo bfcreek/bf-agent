@@ -180,7 +180,7 @@ test("loadBenchOptions file tierPreset overrides user models.yaml", async () => 
     const { options } = await loadBenchOptions(["--config", benchConfigPath, "--flat"]);
     assert.equal(options.tierPreset, "cloud-max");
     assert.ok(options.tierModels?.every((band) => band.model.includes(":cloud")));
-    assert.equal(options.tierModels.at(-1).model, "kimi-k3:cloud");
+    assert.equal(options.tierModels.at(-1).model, PINNED_MODELS.cloud);
   } finally {
     process.env = previous;
     await rm(dir, { recursive: true, force: true });
@@ -431,11 +431,12 @@ test("buildCursorAgentArgs keeps invocation under Windows command-line limit", (
   assert.match(args.at(-1), /judge-prompt\.txt/);
 });
 
-test("buildJudgeInvocationPrompt references artifact files", () => {
+test("buildJudgeInvocationPrompt points at the prompt file and forbids other reads", () => {
   const invocation = buildJudgeInvocationPrompt();
   assert.match(invocation, /\.halo-bench\/judge-prompt\.txt/);
-  assert.match(invocation, /\.halo-bench\/agent-artifacts\.json/);
+  assert.match(invocation, /Do not use tools/);
   assert.match(invocation, /JSON object/);
+  assert.doesNotMatch(invocation, /agent-artifacts\.json/);
 });
 
 test("buildJudgePrompt includes goal, rubric, workspace, and step summary", async () => {
@@ -461,7 +462,19 @@ test("buildJudgePrompt includes goal, rubric, workspace, and step summary", asyn
   assert.match(prompt, /Workspace snapshot/);
   assert.match(prompt, /## Agent step summary/);
   assert.match(prompt, /write_file/);
-  assert.match(prompt, /\.halo-bench\/agent-artifacts\.json/);
+  assert.match(prompt, /Do not open other files/);
+  assert.doesNotMatch(prompt, /agent-artifacts\.json/);
+  const long = "A".repeat(500);
+  const bloated = buildJudgePrompt({
+    scenario,
+    agentResult: {
+      ...agentResult,
+      steps: [{ index: 1, kind: "tool-calls", content: "", toolCalls: [{ name: "run_command", args: { command: long }, ok: true }] }],
+    },
+    snapshot,
+  });
+  assert.doesNotMatch(bloated, new RegExp(long));
+  assert.match(bloated, /…/);
 });
 
 test("buildJudgeRetryPrompt includes full grading context and step trace", async () => {

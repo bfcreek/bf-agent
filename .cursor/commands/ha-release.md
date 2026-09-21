@@ -2,7 +2,7 @@
 
 Bump the package patch version, run tests, build the release zip, and upload it to **R2 staging**.
 
-This does **not** promote to production or publish to npm. After staging succeeds, production promote is manual at the admin releases page, then `.\scripts\release\publish-production.ps1`.
+This does **not** promote to production or publish to npm. After staging succeeds, production promote is manual at the admin releases page, then `/ha-release-npm`.
 
 ## Run
 
@@ -38,7 +38,7 @@ Report to the user:
 
 - New version from `package.json`
 - Staging manifest: https://halo-agent-releases.halosoftworks.com/staging/latest.yml
-- Next steps: promote at https://www.halosoftworks.com/admin/releases, then `.\scripts\release\publish-production.ps1` for npm
+- Next steps: promote at https://www.halosoftworks.com/admin/releases, then `/ha-release-npm`
 
 Do **not** commit the version bump unless the user explicitly asks.
 
@@ -54,4 +54,4 @@ On failure, stop and report the failing step; do not continue to upload.
 ## Related
 
 - Staging only (no bump): `.\scripts\release\publish-release.ps1`
-- Production npm after admin promote: `.\scripts\release\publish-production.ps1`
+- Production npm after admin promote: `/ha-release-npm`

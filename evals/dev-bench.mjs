@@ -6,7 +6,7 @@
  *   npm run bench
  *   node evals/dev-bench.mjs --tier 3          # auto-loads bench.config.json if present
  *   node evals/dev-bench.mjs --tier-preset cloud   # cloud-only models (no GPU)
- *   node evals/dev-bench.mjs --tier-preset cloud-max  # flagship cloud models
+ *   node evals/dev-bench.mjs --tier-preset cloud-max  # pinned cloud model, max think
  *   node evals/dev-bench.mjs --scenario greet-module
  *   node evals/dev-bench.mjs --language csharp --flat
  *   node evals/dev-bench.mjs --list-scenarios

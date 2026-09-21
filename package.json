@@ -1,6 +1,6 @@
 {
   "name": "@bitfieldcreek/bf-agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local agent runtime for Ollama: plan/act/observe loop, tools, and an OpenAI-compatible facade.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -63,6 +63,7 @@
     "release:upload": "node scripts/release/upload-r2-release.cjs",
     "release:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-release.ps1",
     "release:ha": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ha-release.ps1",
+    "release:ha-npm": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/commands/ha-release-npm.ps1",
     "release:npm": "node scripts/release/publish-npm.cjs",
     "release:production": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/publish-production.ps1"
   },
