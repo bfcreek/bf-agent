@@ -44,6 +44,8 @@ const BUDGET_BURN_RATIO = 0.75;
  * @property {number|null} heuristicScore
  * @property {number|null} budgetUsed
  * @property {number|null} compactions
+ * @property {number|null} compactionFailures
+ * @property {number|null} truncatedTurns
  * @property {boolean|null} agreesWithOracle Judge outcome vs. oracle.
  * @property {string|null} error
  */
@@ -86,6 +88,8 @@ export function normalizeScenarioMetrics(rows) {
       heuristicScore: row.heuristicScore ?? efficiency?.heuristicScore ?? null,
       budgetUsed: efficiency?.budgetUsed ?? null,
       compactions: efficiency?.compactions ?? null,
+      compactionFailures: efficiency?.compactionFailures ?? null,
+      truncatedTurns: efficiency?.truncatedTurns ?? null,
       agreesWithOracle: row.outcome?.agreesWithOracle ?? row.verdict?.outcome?.agreesWithOracle ?? null,
       error: row.error ?? row.exception ?? null,
     };
@@ -124,14 +128,16 @@ export function detectRunPatterns(results, meta = {}) {
 
   const failed = scenarios.filter((s) => s.precheck === false || (s.precheck == null && s.score != null && s.score < LOW_SCORE));
   const passed = scenarios.filter((s) => s.precheck === true || (s.precheck == null && s.score != null && s.score >= LOW_SCORE));
-  const completed = scenarios.filter((s) => s.stopReason === "completed");
+  const completed = scenarios.filter((s) => s.stopReason === "completed" || s.stopReason === "empty");
   const mutated = scenarios.filter((s) => (s.mutations ?? 0) > 0);
 
   // --- Stopping shapes ----------------------------------------------------
 
-  // Stopped as "completed" having barely touched the workspace, and failed.
+  // Stopped as "completed"/"empty" having barely touched the workspace, and failed.
   const hollow = completed.filter(
-    (s) => failed.includes(s) && ((s.toolCalls ?? s.steps) <= 1 || has(s, "no-tool-use")),
+    (s) =>
+      failed.includes(s) &&
+      ((s.toolCalls ?? s.steps) <= 1 || has(s, "no-tool-use") || has(s, "empty-retries")),
   );
   if (hollow.length >= 1) {
     insights.push({
@@ -270,6 +276,27 @@ export function detectRunPatterns(results, meta = {}) {
         "This is the model misunderstanding the tool surface. Check the per-model overlay and tool descriptions for this model family, tighten argument error messages to name the expected shape, and consider whether this tier should route to a model with better tool calling.",
       scenarios: namesOf(failingTools),
       evidence: { count: failingTools.length },
+    });
+  }
+
+  // The model ran the context window dry mid-turn, or compaction was due and
+  // silently produced nothing. Both mean the window was never really managed.
+  const overflow = scenarios.filter((s) => has(s, "truncated-turns") || has(s, "compaction-failed"));
+  if (overflow.length >= 1) {
+    insights.push({
+      id: "context-overflow",
+      source: "run",
+      priority: "high",
+      pattern:
+        "Model calls ended on the output limit before a tool call or answer, and/or compaction was due but produced no summary — the context window was exhausted rather than managed.",
+      lever:
+        "Check numCtx against this model's reasoning appetite (a thinking model can spend the whole window in its thinking channel), that the compaction summarizer runs with minimal thinking and a num_predict cap, and that truncated turns are re-asked with thinking reduced. If the window is simply too small for the model, raise numCtx or route to a model that fits.",
+      scenarios: namesOf(overflow),
+      evidence: {
+        count: overflow.length,
+        truncatedTurns: overflow.reduce((n, s) => n + (s.truncatedTurns ?? 0), 0),
+        compactionFailures: overflow.reduce((n, s) => n + (s.compactionFailures ?? 0), 0),
+      },
     });
   }
 

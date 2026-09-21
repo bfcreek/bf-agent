@@ -4,7 +4,9 @@
  * deltas (and still returns a complete message for the agent loop).
  */
 
-import { resolveThinkSetting } from "./model-tuning.mjs";
+import { DEFAULT_NUM_CTX, resolveThinkSetting } from "./model-tuning.mjs";
+
+export { DEFAULT_NUM_CTX };
 
 export class OllamaClientError extends Error {
   constructor(message, { status, cause } = {}) {
@@ -13,14 +15,6 @@ export class OllamaClientError extends Error {
     this.status = status ?? null;
   }
 }
-
-/**
- * Ollama's server-side default context window is small (4096 tokens unless
- * configured), and overflow is silent: the front of the prompt — system
- * message and tool schemas — is dropped without an error. Always sending an
- * explicit num_ctx keeps the agent's instructions in context.
- */
-export const DEFAULT_NUM_CTX = 16_384;
 
 /**
  * Low sampling temperature by default: agentic tool calling needs faithful
@@ -36,8 +30,11 @@ export class OllamaClient {
    * @param {object} [options]
    * @param {string} [options.baseUrl] Ollama server root, default local install.
    * @param {string} [options.model] Default model when a call omits one.
-   * @param {number|null} [options.numCtx] Context window (tokens) sent as
-   *   `options.num_ctx` on every chat call. Pass null to use Ollama's default.
+   * @param {number|null|"auto"} [options.numCtx] Context window (tokens) sent
+   *   as `options.num_ctx` on every chat call. `auto` (default) starts at
+   *   DEFAULT_NUM_CTX and is raised by configureClientModel to what the
+   *   model and this machine's memory support. Pass null to use Ollama's
+   *   default.
    * @param {boolean|string} [options.think] Ollama native thinking: `auto`
    *   (default), `true`/`false`, or a level (`low`, `medium`, `high`, `max`).
    * @param {object} [options.modelOptions] Extra Ollama options (temperature,
@@ -47,14 +44,20 @@ export class OllamaClient {
   constructor({
     baseUrl = "http://127.0.0.1:11434",
     model = "llama3.2",
-    numCtx = DEFAULT_NUM_CTX,
+    numCtx = "auto",
     think = DEFAULT_THINK,
     modelOptions,
     fetchImpl,
   } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.model = model;
-    this.numCtx = numCtx;
+    /** @type {boolean} True until an explicit numCtx is given; lets configureClientModel size the window. */
+    this.numCtxAuto = numCtx === "auto" || numCtx === undefined;
+    this.numCtx = this.numCtxAuto ? DEFAULT_NUM_CTX : numCtx;
+    /** @type {string|null} Why the auto window landed where it did. */
+    this.numCtxReason = null;
+    /** @type {string[]} Spec warnings for the configured window (context-spec.mjs). */
+    this.numCtxWarnings = [];
     this.think = think;
     /** @type {boolean|null} Set via configureClientModel after model resolution. */
     this.thinkingCapable = null;
@@ -213,6 +216,15 @@ export class OllamaClient {
 
     try {
       for await (const chunk of readNdjson(response.body, signal)) {
+        if (typeof chunk?.error === "string" && chunk.error) {
+          // Streaming responses are HTTP 200 even when generation fails;
+          // the failure arrives as an in-band error frame (e.g. "error
+          // parsing tool call"). Surface it like the non-streaming 500 so
+          // parse recovery and transient retry see the same error shape.
+          throw new OllamaClientError(`Ollama /api/chat returned 500: ${chunk.error}`, {
+            status: 500,
+          });
+        }
         if (chunk?.message && typeof chunk.message === "object") {
           sawMessage = true;
           mergeStreamMessage(accumulated, chunk.message, onDelta);

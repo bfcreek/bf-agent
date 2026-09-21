@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import os from "node:os";
 import { test } from "node:test";
 
 import {
   describeFitBudget,
   detectVramBytes,
+  hostTotalMemBytes,
   resetHardwareProbe,
   resolveModelFitBudget,
   VRAM_FIT_FRACTION,
@@ -39,6 +41,12 @@ test("HALO_VRAM_BYTES overrides the probe", async () => {
   const bytes = await detectVramBytes({ execFileImpl, env: { HALO_VRAM_BYTES: String(8 * GB) } });
 
   assert.equal(bytes, 8 * GB);
+});
+
+test("HALO_TOTAL_MEM_BYTES overrides the RAM probe (containerized agent, host Ollama)", () => {
+  assert.equal(hostTotalMemBytes({ HALO_TOTAL_MEM_BYTES: String(64 * GB) }), 64 * GB);
+  assert.equal(hostTotalMemBytes({ HALO_TOTAL_MEM_BYTES: "nonsense" }), os.totalmem());
+  assert.equal(hostTotalMemBytes({}), os.totalmem());
 });
 
 test("VRAM caps the fit budget below what system RAM alone would allow", async () => {

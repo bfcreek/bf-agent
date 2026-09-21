@@ -15,6 +15,11 @@ import path from "node:path";
  * @property {Array<object>} messages Transcript, replayable as loop history.
  * @property {Array<object>} steps Step log accumulated across all runs.
  * @property {string[]} changedFiles Workspace-relative paths written or edited.
+ * @property {string|null} [model] Model used by the most recent run.
+ * @property {number|null} [numCtx] Context window sent to Ollama by the most recent run.
+ * @property {number} [compactions]
+ * @property {number} [compactionFailures]
+ * @property {number} [truncatedTurns]
  */
 
 export class SessionStore {
@@ -73,7 +78,11 @@ export class SessionStore {
       stopReason: runResult.stopReason ?? existing?.stopReason,
       error: runResult.error ?? existing?.error,
       elapsedMs: (existing?.elapsedMs ?? 0) + (runResult.elapsedMs ?? 0),
+      model: runResult.model ?? existing?.model ?? null,
+      numCtx: runResult.numCtx ?? existing?.numCtx ?? null,
       compactions: (existing?.compactions ?? 0) + (runResult.compactions ?? 0),
+      compactionFailures: (existing?.compactionFailures ?? 0) + (runResult.compactionFailures ?? 0),
+      truncatedTurns: (existing?.truncatedTurns ?? 0) + (runResult.truncatedTurns ?? 0),
       checkpointRunId: runResult.checkpointRunId ?? existing?.checkpointRunId ?? null,
     };
   }

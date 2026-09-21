@@ -64,7 +64,7 @@ export function findHarbor() {
  * @param {number} [input.nConcurrent]
  * @param {number} [input.nAttempts]
  * @param {number} [input.maxSteps]
- * @param {number} [input.numCtx]
+ * @param {number|"auto"} [input.numCtx] Explicit window, or auto (default).
  * @param {number} [input.commandTimeoutSeconds]
  * @param {number} [input.maxCommandTimeoutSeconds]
  * @param {number} [input.timeoutMultiplier]
@@ -100,15 +100,21 @@ export function buildHarborArgs(input) {
   for (const name of input.excludeTaskNames ?? []) {
     args.push("--exclude-task-name", toHarborTaskFilter(name));
   }
+  // Harbor parses `--ak key=value` with the value as a JSON/Python literal, so
+  // bare integers arrive typed. (An older `key:int=value` spelling made the
+  // suffix part of the key, and every kwarg silently fell back to the
+  // adapter's default — num_ctx among them.)
   args.push(
     "--ak",
-    `max_steps:int=${input.maxSteps ?? 80}`,
+    `max_steps=${input.maxSteps ?? 80}`,
+    // 0 = auto: the CLI sizes the window to the model and the Ollama host's
+    // memory (passed in through buildHarborEnv).
     "--ak",
-    `num_ctx:int=${input.numCtx ?? 16384}`,
+    `num_ctx=${typeof input.numCtx === "number" && input.numCtx > 0 ? input.numCtx : 0}`,
     "--ak",
-    `command_timeout:int=${input.commandTimeoutSeconds ?? 120}`,
+    `command_timeout=${input.commandTimeoutSeconds ?? 120}`,
     "--ak",
-    `max_command_timeout:int=${input.maxCommandTimeoutSeconds ?? 1800}`,
+    `max_command_timeout=${input.maxCommandTimeoutSeconds ?? 1800}`,
   );
   return args;
 }
@@ -116,6 +122,10 @@ export function buildHarborArgs(input) {
 /**
  * Env for the Harbor process so the Python adapter can find this repo.
  * @param {object} input
+ * @param {{totalMemBytes?: number, vramBytes?: number}} [input.hostMemory]
+ *   This machine's memory, where Ollama runs. The adapter forwards it into
+ *   the task container so the CLI's model routing and context sizing judge
+ *   fit against the host rather than the container's own limits.
  */
 export function buildHarborEnv(input) {
   const env = { ...process.env };
@@ -126,6 +136,13 @@ export function buildHarborEnv(input) {
   env.HALO_AGENT_VERSION = input.agentVersion ?? "0.1.0";
   env.HALO_AGENT_MODEL = input.model;
   env.HALO_AGENT_BASE_URL = input.containerBaseUrl;
+  const mem = input.hostMemory ?? {};
+  if (Number.isFinite(mem.totalMemBytes) && mem.totalMemBytes > 0) {
+    env.HALO_HOST_TOTAL_MEM_BYTES = String(Math.round(mem.totalMemBytes));
+  }
+  if (Number.isFinite(mem.vramBytes) && mem.vramBytes >= 0) {
+    env.HALO_HOST_VRAM_BYTES = String(Math.round(mem.vramBytes));
+  }
   // The adapter derives the agent's wall-clock budget from the task's
   // [agent] timeout_sec; Harbor scales that by the multiplier, so must we.
   env.HALO_AGENT_TIMEOUT_MULTIPLIER = String(input.timeoutMultiplier ?? 1);

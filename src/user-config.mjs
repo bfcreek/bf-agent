@@ -21,7 +21,7 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # model: auto
 # base-url: http://127.0.0.1:11434
 # max-steps: ${DEFAULT_MAX_STEPS}
-# num-ctx: ${DEFAULT_NUM_CTX}
+# num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
 # cwd: .
 # mode: ask
 # port: 11435
@@ -216,9 +216,13 @@ export function normalizeConfigValues(raw) {
         break;
       }
       case "num-ctx": {
+        if (String(value).trim().toLowerCase() === "auto") {
+          values.numCtx = "auto";
+          break;
+        }
         const n = Number(value);
         if (Number.isFinite(n) && n > 0) values.numCtx = n;
-        else errors.push(`config 'num-ctx' needs a positive integer, got '${value}'.`);
+        else errors.push(`config 'num-ctx' needs a positive integer or 'auto', got '${value}'.`);
         break;
       }
       case "port": {
@@ -370,7 +374,7 @@ export function getBuiltinDefaults() {
     model: "auto",
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: DEFAULT_MAX_STEPS,
-    numCtx: DEFAULT_NUM_CTX,
+    numCtx: "auto",
     quiet: false,
     cwd: process.cwd(),
     port: 11435,

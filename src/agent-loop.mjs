@@ -16,6 +16,17 @@
  */
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
+import { minimalThinkSetting } from "./model-tuning.mjs";
+
+/**
+ * Default per-call output cap (`num_predict`), thinking included. Equal to
+ * the window's output reserve for thinking models — `OUTPUT_RESERVE.thinking`
+ * in context-spec.mjs (not imported: that module reaches back here via
+ * context-builder → user-config; a test pins the two values together).
+ * Observed without it: gpt-oss:20b spent 56k tokens and six minutes reciting
+ * a data file in its reasoning channel until the window ran out.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 12_000;
 
 /**
  * Core instructions. Short on purpose: task knowledge belongs in rules files
@@ -40,6 +51,8 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Keep going until the task is complete, then reply to the user in plain",
   "  text with no tool calls. If you cannot finish, say what was done and what",
   "  remains.",
+  "- Never end a turn with only internal reasoning. If the next action is a",
+  "  tool call, emit it in that same turn.",
   "",
   "Communication:",
   "- Answer the user's actual question first, then give supporting detail.",
@@ -54,7 +67,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "  published history, skip hooks, or change git config unless asked.",
   "- Deleting files is destructive: delete only files the user explicitly named.",
   "  If a task implies deleting something unnamed, stop and ask.",
-  "- Refuse requests whose intent is malware, exploits, or other harm.",
+  "- Refuse requests whose intent is to harm others: malware, unauthorized access",
+  "  to systems you were not given, attacks on real targets. Security analysis of",
+  "  code in the workspace — cryptanalysis, CTF-style exercises, fuzzing, writing",
+  "  a proof-of-concept against the user's own program — is legitimate work; do it.",
 ].join("\n");
 
 /** Safety cap on model round-trips per turn. Cursor has no cap; ours is generous. */
@@ -66,7 +82,20 @@ export const DEFAULT_MAX_STOP_HOOK_LOOPS = 5;
 /** Empty assistant turns (no text, no tool calls) re-asked before giving up. */
 const MAX_EMPTY_RETRIES = 2;
 export const EMPTY_RETRY_PROMPT =
-  "Your last message was empty. Reply to the user in plain text, or call a tool.";
+  "Your last message was empty. Call a tool to make progress, or reply to the user in plain text. Do not end the turn with only reasoning.";
+/**
+ * Sent instead of EMPTY_RETRY_PROMPT when the turn was cut off by the output
+ * limit (`done_reason: "length"`) before any tool call or text — typically a
+ * thinking model that reasoned until the context window ran out. The retry
+ * also drops thinking to the model's minimum so the budget goes to the action.
+ * Worded as "continue", not "answer": offered a plain-text exit, gpt-oss:20b
+ * at low thinking took it as an apology in 2 of 6 replays of a cut-off turn.
+ */
+export const TRUNCATED_RETRY_PROMPT =
+  "Your last response was cut off by the output limit before it reached a tool call. " +
+  "Do not start over and do not apologize: keep reasoning brief and take the next concrete step now by calling a tool " +
+  "(for example, write the file you were working on with write_file, then run it). " +
+  "Only if the task needs no tool at all, give the answer in plain text.";
 
 /**
  * Wall-clock budget policy (only when `wallClockMs` is set): stop the loop a
@@ -93,30 +122,40 @@ const WRAP_UP_PROMPT = [
 const MAX_TOOL_CALL_PARSE_RECOVERIES = 2;
 const TOOL_CALL_PARSE_NUDGE = [
   "Your previous response could not be parsed as a tool call.",
-  "Call tools using native tool calling only: a function name plus a JSON",
+  "Call tools using native tool calling only: a function name plus a valid JSON",
   "arguments object matching the schema, with no prose in the call.",
+  "Keep arguments short: never paste file contents or long data into arguments.",
+  "Instead write a small script with write_file that reads the data from disk, then run it.",
   "Retry now.",
 ].join(" ");
 
 /**
  * @typedef {object} AgentStep
  * @property {number} index 1-based model round-trip number within the turn.
- * @property {"tool-calls"|"final"|"steer"|"tool-parse-error"|"failed"} kind
+ * @property {"tool-calls"|"final"|"empty"|"steer"|"tool-parse-error"|"compaction"|"failed"} kind
+ *   `empty`: a model round-trip that produced neither text nor a tool call
+ *   (re-asked up to MAX_EMPTY_RETRIES times). `compaction`: the transcript
+ *   was over budget; content says whether the summarizer succeeded and why not.
  * @property {string} content Assistant (or injected user) text for this step.
  * @property {Array<{name: string, args: object, ok: boolean, result?: unknown, error?: string, durationMs?: number}>} toolCalls
  * @property {number} [durationMs] Wall time of the model call that produced this step.
  * @property {number} [promptTokens] Prompt tokens reported by the model for this call.
  * @property {number} [completionTokens] Completion tokens reported by the model for this call.
+ * @property {boolean} [truncated] The model call ended on the output limit (`done_reason: "length"`).
  */
 
 /**
  * @typedef {object} AgentRunResult
  * @property {string} text Final assistant answer ("" if the loop was cut off).
- * @property {"completed"|"max-steps"|"aborted"|"failed"} stopReason
+ * @property {"completed"|"empty"|"max-steps"|"aborted"|"failed"} stopReason
  * @property {AgentStep[]} steps
  * @property {Array<object>} messages Full transcript, replayable into another run.
  * @property {number} elapsedMs
+ * @property {string} [model] Model the client was configured with when the run started.
+ * @property {number} [numCtx] Context window (tokens) the client sent to Ollama.
  * @property {number} compactions How many times the transcript was compacted.
+ * @property {number} compactionFailures Compactions that were due but produced no usable summary.
+ * @property {number} truncatedTurns Model calls cut off by the output limit before a tool call or text.
  * @property {boolean} [wallClockExhausted]
  * @property {string} [error] Why a "failed" run stopped.
  */
@@ -153,6 +192,11 @@ export class AgentLoop {
    * @param {AgentHooks} [options.hooks]
    * @param {number} [options.maxStopHookLoops]
    * @param {number} [options.wallClockMs] Wall-clock budget for one run (0 = none).
+   * @param {number} [options.maxOutputTokens] Per-call output cap (`num_predict`),
+   *   thinking included. Defaults to the context spec's output reserve: a
+   *   turn that needs more than the reserve has already broken the window
+   *   accounting, so cut it off early and re-ask instead of letting a runaway
+   *   reasoning channel run the window dry. 0 disables the cap.
    * @param {() => number} [options.now] Clock for the wall-clock budget (tests).
    */
   constructor({
@@ -166,6 +210,7 @@ export class AgentLoop {
     hooks = {},
     maxStopHookLoops = DEFAULT_MAX_STOP_HOOK_LOOPS,
     wallClockMs = 0,
+    maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
     now = Date.now,
   } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
@@ -180,6 +225,7 @@ export class AgentLoop {
     this.hooks = hooks ?? {};
     this.maxStopHookLoops = maxStopHookLoops;
     this.wallClockMs = Number.isFinite(wallClockMs) && wallClockMs > 0 ? wallClockMs : 0;
+    this.maxOutputTokens = Number.isFinite(maxOutputTokens) && maxOutputTokens > 0 ? Math.floor(maxOutputTokens) : 0;
     this.now = typeof now === "function" ? now : Date.now;
     /** @type {string[]} Messages delivered at the next tool boundary. */
     this._steering = [];
@@ -269,13 +315,27 @@ export class AgentLoop {
       this.onStep?.(step);
       return step;
     };
-    const finish = (result) => ({ ...result, steps, messages, elapsedMs: elapsed(), compactions });
+    const finish = (result) => ({
+      ...result,
+      steps,
+      messages,
+      elapsedMs: elapsed(),
+      ...(typeof this.client?.model === "string" ? { model: this.client.model } : {}),
+      ...(Number.isFinite(this.client?.numCtx) && this.client.numCtx > 0 ? { numCtx: this.client.numCtx } : {}),
+      compactions,
+      compactionFailures,
+      truncatedTurns,
+    });
 
     let observedTokens = 0;
     let stepIndex = 0;
     let stopHookLoops = 0;
     let emptyRetries = 0;
     let compactions = 0;
+    let compactionFailures = 0;
+    let truncatedTurns = 0;
+    /** Per-call think override for the next model call (set after a truncated turn). */
+    let nextThink;
     let currentGoal = goal;
     let wallClockExhausted = false;
 
@@ -289,6 +349,7 @@ export class AgentLoop {
 
       if (this.compaction) {
         const { historyPath, ...compactionOptions } = this.compaction;
+        const before = messages.length;
         const compacted = await compactMessages({
           client: this.client,
           messages,
@@ -296,8 +357,25 @@ export class AgentLoop {
           historyPath,
           ...compactionOptions,
           observedTokens,
+          onFailure: ({ reason, error }) => {
+            compactionFailures += 1;
+            // Trace why the window was not reclaimed: an errored summarizer
+            // and one that returned nothing call for different fixes.
+            record({
+              index: stepIndex,
+              kind: "compaction",
+              content: `failed (${reason})${error ? `: ${String(error.message ?? error).slice(0, 300)}` : ""} at ~${observedTokens} tokens`,
+              toolCalls: [],
+            });
+          },
         });
         if (compacted !== messages) {
+          record({
+            index: stepIndex,
+            kind: "compaction",
+            content: `ok: ${before} -> ${compacted.length} messages at ~${observedTokens} tokens`,
+            toolCalls: [],
+          });
           observedTokens = 0;
           compactions += 1;
         }
@@ -307,18 +385,28 @@ export class AgentLoop {
       const index = stepIndex + 1;
       let chatResult;
       try {
+        const think = nextThink;
+        nextThink = undefined;
         chatResult = await timedTurn(() =>
           chatWithParseRecovery(
             this.client,
-            { messages, tools, signal, onDelta: this.onDelta },
             {
-              onParseError: ({ recovery, error }) =>
+              messages,
+              tools,
+              signal,
+              onDelta: this.onDelta,
+              ...(think !== undefined ? { think } : {}),
+              ...(this.maxOutputTokens > 0 ? { options: { num_predict: this.maxOutputTokens } } : {}),
+            },
+            {
+              onParseError: ({ recovery, error, repaired }) =>
                 record({
                   index,
                   kind: "tool-parse-error",
                   content: String(error?.message ?? "error parsing tool call"),
                   toolCalls: [],
                   recoveries: recovery,
+                  ...(repaired ? { repaired } : {}),
                 }),
             },
           ),
@@ -341,25 +429,76 @@ export class AgentLoop {
       if (usedTokens > 0) observedTokens = usedTokens;
       // Per-step telemetry for efficiency analysis: how long the model took
       // and how much context it was carrying.
+      const truncated = raw?.done_reason === "length";
       const turnMeta = {
         durationMs: Math.round(turnDurations.at(-1) ?? 0),
         ...(typeof raw?.prompt_eval_count === "number" ? { promptTokens: raw.prompt_eval_count } : {}),
         ...(typeof raw?.eval_count === "number" ? { completionTokens: raw.eval_count } : {}),
+        ...(truncated ? { truncated: true } : {}),
       };
       messages.push(normalizeAssistantMessage(message));
       stepIndex += 1;
 
-      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      let toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
 
       if (toolCalls.length === 0) {
         const text = textOf(message.content).trim();
-        if (!text) {
+        // A tool call the model wrote into its text instead of the tool-call
+        // channel (qwen3-coder's `<function=…>` form, or a name+arguments JSON
+        // object). Same class of failure as an Ollama parse error: recover it
+        // rather than accept it as the final answer.
+        const textCall = text && !truncated ? parseTextToolCall(text, tools) : null;
+        if (textCall) {
+          record({
+            index,
+            kind: "tool-parse-error",
+            content: `tool call written as text: ${text.slice(0, 200)}`,
+            toolCalls: [],
+            recoveries: 0,
+            repaired: textCall.name,
+          });
+          messages[messages.length - 1] = { role: "assistant", content: "", tool_calls: [{ function: textCall }] };
+          toolCalls = [{ function: textCall }];
+        } else if (!text || truncated) {
+          // Nothing actionable: no text at all, or text cut off by the output
+          // limit before it reached a tool call (a cut-off answer is not an
+          // answer — it is usually a script or a data dump the model should
+          // have written to a file).
           emptyRetries += 1;
+          if (truncated) truncatedTurns += 1;
+          // Empty turns are model round-trips too; record them so the trace
+          // shows where the time and tokens went.
+          record({ index, kind: "empty", content: text.slice(0, 500), toolCalls: [], ...turnMeta });
           if (emptyRetries <= MAX_EMPTY_RETRIES) {
-            messages.push({ role: "user", content: EMPTY_RETRY_PROMPT });
+            if (truncated) {
+              // The model ran out of output budget mid-reasoning. Its partial
+              // thinking never reached an action, so it is dead weight: keeping
+              // it would inflate the token estimate (forcing a compaction whose
+              // summarizer then chokes on the same text) and would seed the
+              // retry with the loop that overran. Drop it and re-ask with the
+              // cheapest thinking the model honors so the budget goes to the
+              // action. One-shot: the override applies to the next call only.
+              messages.pop();
+              messages.push({ role: "user", content: TRUNCATED_RETRY_PROMPT });
+              nextThink = minimalThinkSetting(this.client?.model);
+            } else {
+              messages.push({ role: "user", content: EMPTY_RETRY_PROMPT });
+            }
             continue;
           }
+          // Exhausted empty retries: do not treat silence as a clean finish.
+          return finish({
+            text: "",
+            stopReason: "empty",
+            error: truncated
+              ? "model output was cut off by the context window before acting, repeatedly"
+              : "model returned empty responses repeatedly",
+          });
         }
+      }
+
+      if (toolCalls.length === 0) {
+        const text = textOf(message.content).trim();
         emptyRetries = 0;
 
         // The model ended its turn. A stop hook may keep it going.
@@ -505,22 +644,157 @@ async function chatWithRetry(client, request) {
 }
 
 /**
- * When Ollama rejects a malformed tool call, correct the model and retry
- * instead of aborting the run. `request.messages` is mutated in place.
+ * Ollama's parse error carries the model's raw arguments text verbatim
+ * (`raw='{...}', err=...`), but not the function name. When the damage is a
+ * single stray `]` closing a string value (`"]` where `"` belongs — gpt-oss
+ * does this after long multi-line script arguments), drop it, parse, and
+ * identify the tool by the one schema whose parameters fit the argument keys.
+ * Anything less clear-cut returns null and the model is asked to retry.
+ *
+ * @param {Error} err
+ * @param {Array<object>} tools Schemas in the OpenAI function shape.
+ * @returns {{name: string, arguments: object}|null}
+ */
+export function repairToolCallParseError(err, tools) {
+  const text = String(err?.message ?? "");
+  if (!/invalid character '\]' after object key:value pair/.test(text)) return null;
+  const start = text.indexOf("raw='");
+  const end = text.lastIndexOf("', err=");
+  if (start < 0 || end <= start) return null;
+  const raw = text.slice(start + 5, end);
+
+  const candidates = [];
+  for (let i = 1; i < raw.length; i++) {
+    if (raw[i] === "]" && raw[i - 1] === '"' && /[,}]/.test(raw[i + 1] ?? "")) candidates.push(i);
+  }
+  if (candidates.length !== 1) return null;
+  let args;
+  try {
+    args = JSON.parse(raw.slice(0, candidates[0]) + raw.slice(candidates[0] + 1));
+  } catch {
+    return null;
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const fit = uniqueToolForArgs(args, tools);
+  return fit ? { name: fit.function.name, arguments: args } : null;
+}
+
+/** The one schema whose properties cover `args` and whose required keys `args` has, else null. */
+function uniqueToolForArgs(args, tools) {
+  const keys = Object.keys(args);
+  const fits = (tools ?? []).filter((t) => {
+    const params = t?.function?.parameters ?? {};
+    const props = Object.keys(params.properties ?? {});
+    const required = Array.isArray(params.required) ? params.required : [];
+    return keys.every((k) => props.includes(k)) && required.every((k) => keys.includes(k));
+  });
+  return fits.length === 1 ? fits[0] : null;
+}
+
+/**
+ * Recognize a tool call the model wrote as message text. Two shapes seen in
+ * traces: qwen3-coder's XML form —
+ *
+ *     <function=read_file>
+ *     <parameter=path>
+ *     out.txt
+ *     </parameter>
+ *     </function>
+ *
+ * (optionally inside `<tool_call>`), and a JSON object with `name` and
+ * `arguments`. The whole message must be the call; prose around it means the
+ * model was talking, not acting. XML parameter values are coerced to the
+ * schema's declared number/boolean types. Returns null unless the tool exists.
+ *
+ * @param {string} text
+ * @param {Array<object>} tools Schemas in the OpenAI function shape.
+ * @returns {{name: string, arguments: object}|null}
+ */
+export function parseTextToolCall(text, tools) {
+  const body = String(text ?? "").trim();
+  if (!body || body.length > 20_000) return null;
+  const schemaFor = (name) => (tools ?? []).find((t) => t?.function?.name === name);
+
+  const xml = /^(?:<tool_call>\s*)?<function=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/function>\s*(?:<\/tool_call>\s*)?$/.exec(body);
+  if (xml) {
+    const schema = schemaFor(xml[1]);
+    if (!schema) return null;
+    const props = schema.function.parameters?.properties ?? {};
+    const args = {};
+    const param = /<parameter=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/parameter>/g;
+    let m;
+    let sawAny = false;
+    while ((m = param.exec(xml[2])) !== null) {
+      sawAny = true;
+      args[m[1]] = coerceByType(m[2].replace(/^\r?\n/, "").replace(/\r?\n$/, ""), props[m[1]]?.type);
+    }
+    if (!sawAny && xml[2].trim()) return null;
+    return { name: xml[1], arguments: args };
+  }
+
+  if (body.startsWith("{") && body.endsWith("}")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return null;
+    }
+    const name = parsed?.name ?? parsed?.function?.name ?? parsed?.tool;
+    const args = parsed?.arguments ?? parsed?.function?.arguments ?? parsed?.parameters ?? parsed?.args;
+    if (typeof name === "string" && schemaFor(name) && args && typeof args === "object" && !Array.isArray(args)) {
+      return { name, arguments: args };
+    }
+  }
+  return null;
+}
+
+function coerceByType(value, type) {
+  if (type === "integer" || type === "number") {
+    const n = Number(value.trim());
+    return Number.isFinite(n) && value.trim() !== "" ? n : value;
+  }
+  if (type === "boolean") {
+    const v = value.trim().toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+  }
+  return value;
+}
+
+/**
+ * When Ollama rejects a malformed tool call, repair it locally if the damage
+ * is unambiguous; otherwise correct the model and retry instead of aborting
+ * the run. `request.messages` is mutated in place.
  *
  * @param {object} client
- * @param {{messages: Array<object>, tools?: Array<object>, signal?: AbortSignal, onDelta?: Function}} request
- * @param {{ onParseError?: (info: { recovery: number, error: Error }) => void }} [hooks]
+ * @param {{messages: Array<object>, tools?: Array<object>, signal?: AbortSignal, onDelta?: Function, think?: boolean|string, options?: object}} request
+ * @param {{ onParseError?: (info: { recovery: number, error: Error, repaired?: string }) => void }} [hooks]
  */
 async function chatWithParseRecovery(client, request, hooks = {}) {
-  const { messages, tools, signal, onDelta } = request;
+  const { messages, tools, signal, onDelta, think, options } = request;
   let recoveries = 0;
   while (true) {
     try {
-      return await chatWithRetry(client, { messages, tools, signal, onDelta });
+      return await chatWithRetry(client, {
+        messages,
+        tools,
+        signal,
+        onDelta,
+        ...(think !== undefined ? { think } : {}),
+        ...(options ? { options } : {}),
+      });
     } catch (err) {
       if (signal?.aborted || err?.name === "AbortError") throw err;
-      if (!isToolCallParseError(err) || recoveries >= MAX_TOOL_CALL_PARSE_RECOVERIES) throw err;
+      if (!isToolCallParseError(err)) throw err;
+      const repaired = repairToolCallParseError(err, tools);
+      if (repaired) {
+        hooks.onParseError?.({ recovery: recoveries, error: err, repaired: repaired.name });
+        return {
+          message: { role: "assistant", content: "", tool_calls: [{ function: repaired }] },
+          raw: { repaired: true },
+        };
+      }
+      if (recoveries >= MAX_TOOL_CALL_PARSE_RECOVERIES) throw err;
       recoveries += 1;
       hooks.onParseError?.({ recovery: recoveries, error: err });
       messages.push({ role: "user", content: TOOL_CALL_PARSE_NUDGE });

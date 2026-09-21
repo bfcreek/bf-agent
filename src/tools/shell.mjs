@@ -9,6 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 
 import { resolveWithinRoot } from "./fs.mjs";
@@ -75,18 +76,36 @@ const INTERACTIVE_ONLY_FLAGS = new Set(["-i", "--interactive"]);
  * @returns {string|null} The offending segment, or null when none found.
  */
 export function findInteractiveCommand(command) {
-  const segments = String(command ?? "").split(/(?:\|\||&&|[;|&\n(){}`]|\$\()/);
-  for (const raw of segments) {
-    const segment = raw.trim();
+  // Heredoc bodies are stdin data, not commands: `python3 - <<'PY' ... PY`
+  // must not have its body lines (or its terminator, e.g. `PY` → `py`)
+  // read as command segments.
+  const text = stripHeredocBodies(String(command ?? ""));
+  const parts = text.split(/(\|\||&&|[;|&\n(){}`]|\$\()/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const segment = parts[i].trim();
     if (!segment) continue;
     const base = commandBaseName(segment);
     if (!base || !REPL_COMMAND_NAMES.has(base)) continue;
+    // An interpreter on the receiving end of a pipe reads the pipe, not a TTY.
+    if (parts[i - 1] === "|") continue;
     const args = segmentWords(segment).slice(1);
     if (args.length === 0 || args.every((a) => INTERACTIVE_ONLY_FLAGS.has(a.toLowerCase()))) {
       return segment;
     }
   }
   return null;
+}
+
+/**
+ * Replace `<<TAG ... TAG` heredoc bodies with a placeholder so shell-segment
+ * scanners do not treat script lines as commands. The redirection itself is
+ * kept so the interpreter segment still shows it has stdin.
+ */
+export function stripHeredocBodies(command) {
+  return command.replace(
+    /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g,
+    "<<$2 HEREDOC$3",
+  );
 }
 
 /**
@@ -208,8 +227,19 @@ export function classifyDeleteCommand(command, goal) {
 
 // On Windows use PowerShell, not cmd.exe: models overwhelmingly write
 // PowerShell or POSIX-flavored commands, and cmd.exe chokes on both.
+// On POSIX prefer bash over /bin/sh: models write bash (process substitution,
+// [[ ]], arrays), and on Debian-family images /bin/sh is dash, which rejects
+// those with "Syntax error: "(" unexpected" — a wasted step every time.
 const IS_WINDOWS = process.platform === "win32";
-const SHELL_NAME = IS_WINDOWS ? "PowerShell" : "/bin/sh";
+const POSIX_SHELL = IS_WINDOWS ? null : pickPosixShell();
+const SHELL_NAME = IS_WINDOWS ? "PowerShell" : POSIX_SHELL;
+
+function pickPosixShell() {
+  for (const candidate of ["/bin/bash", "/usr/bin/bash"]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return "/bin/sh";
+}
 
 /**
  * Adapt bash-style && chains to PowerShell ; separators on Windows.
@@ -236,7 +266,7 @@ export function registerShellTools(registry, { workspaceRoot }) {
     name: "run_command",
     requiresApproval: true,
     description:
-      `Run a command through the system shell (${SHELL_NAME}; use ${IS_WINDOWS ? "PowerShell" : "POSIX sh"} syntax) ` +
+      `Run a command through the system shell (${SHELL_NAME}; use ${IS_WINDOWS ? "PowerShell" : POSIX_SHELL.endsWith("bash") ? "bash" : "POSIX sh"} syntax) ` +
       "in the workspace directory and return its status, exit code, stdout, and stderr. " +
       "Commands run with no input, so never launch a bare interpreter or shell (node, python, bash) " +
       "without a script or inline code. " +
@@ -335,7 +365,7 @@ function runCommand(command, { cwd, timeoutMs }) {
         )
       : spawn(command, {
           cwd,
-          shell: true,
+          shell: POSIX_SHELL,
           windowsHide: true,
           // POSIX: own process group so the timeout can kill the whole tree.
           detached: true,

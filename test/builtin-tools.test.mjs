@@ -356,9 +356,19 @@ test("findInteractiveCommand leaves script and inline invocations alone", () => 
     "npm test",
     "git status",
     "dotnet run",
+    // Heredoc-fed interpreters have stdin; the body and terminator (`PY` →
+    // basename `py`) must not be read as command segments.
+    "python3 - <<'PY'\nimport sys\nprint(sys.argv)\nPY",
+    "python - <<PY\nimport sys\nnode\nPY",
+    "cat <<EOF > notes.txt\nhello\nEOF",
+    // Piped interpreters read the pipe, not a TTY.
+    "echo 'print(1)' | python3",
+    "cat script.js | node",
   ]) {
     assert.equal(findInteractiveCommand(command), null, `should not flag: ${command}`);
   }
+  // A bare REPL after a heredoc-fed command is still flagged.
+  assert.ok(findInteractiveCommand("python3 - <<'PY'\nprint(1)\nPY\nnode"));
 });
 
 test("run_command refuses commands that would open an interactive REPL", async () => {

@@ -77,6 +77,21 @@ export async function detectVramBytes({ execFileImpl = execFileAsync, env = proc
 }
 
 /**
+ * System RAM for fit decisions. `HALO_TOTAL_MEM_BYTES` overrides the probe
+ * for the same reason `HALO_VRAM_BYTES` does: when the agent runs in a
+ * container but Ollama runs on the host, the container's own figures say
+ * nothing about what the models actually have to work with.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {number}
+ */
+export function hostTotalMemBytes(env = process.env) {
+  const override = Number(env.HALO_TOTAL_MEM_BYTES);
+  if (Number.isFinite(override) && override > 0) return override;
+  return os.totalmem();
+}
+
+/**
  * Largest model file size that should run locally on this machine.
  *
  * @param {object} [options]
@@ -86,7 +101,7 @@ export async function detectVramBytes({ execFileImpl = execFileAsync, env = proc
  * @returns {Promise<{budgetBytes: number, vramBytes: number, basis: "vram"|"ram"}>}
  */
 export async function resolveModelFitBudget({
-  totalMemBytes = os.totalmem(),
+  totalMemBytes = hostTotalMemBytes(),
   vramBytes,
   memoryFitFraction,
 } = {}) {

@@ -7,6 +7,7 @@ import {
   estimateTokens,
   extractOriginalInstruction,
   transcriptSize,
+  SUMMARY_MAX_TOKENS,
 } from "../src/compaction.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
@@ -125,15 +126,64 @@ test("token budget set and under it: no compaction, even past the char default",
   assert.equal(client.calls.length, 0);
 });
 
-test("summarizer failure leaves the transcript unchanged", async () => {
+test("summarizer failure leaves the transcript unchanged and reports it", async () => {
   const failing = {
     async chat() {
       throw new Error("model offline");
     },
   };
+  const failures = [];
   const messages = longTranscript();
-  const result = await compactMessages({ client: failing, messages, maxChars: 100 });
+  const result = await compactMessages({
+    client: failing,
+    messages,
+    maxChars: 100,
+    onFailure: (info) => failures.push(info),
+  });
   assert.equal(result, messages);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].reason, "summarizer-error");
+  assert.match(failures[0].error.message, /offline/);
+});
+
+test("an empty summary (thinking-only reply) is a reported failure, not a silent no-op", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "", thinking: "hmm ".repeat(2000) }]);
+  const failures = [];
+  const messages = longTranscript();
+
+  const result = await compactMessages({ client, messages, maxChars: 100, onFailure: (i) => failures.push(i) });
+
+  assert.equal(result, messages);
+  assert.deepEqual(failures, [{ reason: "empty-summary" }]);
+});
+
+test("the summarizer runs with minimal thinking and a hard output cap", async () => {
+  const client = new FakeClient([{ role: "assistant", content: "SUMMARY" }]);
+  client.model = "gpt-oss:20b";
+  await compactMessages({ client, messages: longTranscript(), maxChars: 100 });
+  assert.equal(client.calls[0].think, "low");
+  assert.equal(client.calls[0].options.num_predict, SUMMARY_MAX_TOKENS);
+
+  const other = new FakeClient([{ role: "assistant", content: "SUMMARY" }]);
+  other.model = "qwen3:14b";
+  await compactMessages({ client: other, messages: longTranscript(), maxChars: 100 });
+  assert.equal(other.calls[0].think, false);
+});
+
+test("agent loop counts compactions that produced nothing", async () => {
+  // Summarizer replies with thinking only -> compaction fails; the model then answers.
+  const client = new FakeClient([
+    { role: "assistant", content: "", thinking: "..." },
+    { role: "assistant", content: "final" },
+  ]);
+  const registry = new ToolRegistry();
+  const loop = new AgentLoop({ client, registry, compaction: { maxChars: 100 } });
+
+  const result = await loop.run("continue", { history: longTranscript() });
+
+  assert.equal(result.text, "final");
+  assert.equal(result.compactions, 0);
+  assert.equal(result.compactionFailures, 1);
 });
 
 test("agent loop compacts a long history before calling the model", async () => {

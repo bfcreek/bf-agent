@@ -18,6 +18,7 @@ import {
 } from "../evals/recognized/terminal-bench/sample.mjs";
 import { buildJudgePrompt } from "../evals/judge.mjs";
 import { defaultBenchmarkRoot } from "../evals/workspace-layout.mjs";
+import { PINNED_MODELS } from "../src/model-routing.mjs";
 
 test("terminal-bench is the ready suite; swe-bench is planned", () => {
   const tb = resolveSuite("tb");
@@ -45,22 +46,32 @@ test("parseRecognizedArgs keeps judging on by default and accepts includes", () 
   assert.equal(opts.model, "gpt-oss:20b");
 });
 
-test("parseRecognizedArgs inherits cloud-max tier preset", () => {
+test("parseRecognizedArgs defaults to the pinned local model with no tier preset", () => {
   const opts = parseRecognizedArgs(["terminal-bench"], defaultRecognizedConfig());
-  assert.equal(opts.tierPreset, "cloud-max");
-  assert.equal(opts.model, "auto");
+  assert.equal(opts.tierPreset, null);
+  assert.equal(opts.model, PINNED_MODELS.local);
 });
 
-test("loadRecognizedOptions resolves auto + cloud-max to the hard-band model", async () => {
+test("loadRecognizedOptions keeps the pinned local model when no tier preset is set", async () => {
   const { options } = await loadRecognizedOptions(["terminal-bench"]);
-  assert.equal(options.tierPreset, "cloud-max");
-  assert.equal(options.model, "kimi-k3:cloud");
+  assert.equal(options.tierPreset, null);
+  assert.equal(options.model, PINNED_MODELS.local);
 });
 
 test("loadRecognizedOptions honors explicit --model over the preset", async () => {
   const { options } = await loadRecognizedOptions(["terminal-bench", "--model", "gpt-oss:20b"]);
   assert.equal(options.model, "gpt-oss:20b");
+  assert.equal(options.tierPreset, null);
+});
+
+test("loadRecognizedOptions turns auto + --tier-preset into a tier-preset model string", async () => {
+  const { options } = await loadRecognizedOptions([
+    "terminal-bench",
+    "--tier-preset",
+    "cloud-max",
+  ]);
   assert.equal(options.tierPreset, "cloud-max");
+  assert.equal(options.model, "tier-preset cloud-max");
 });
 
 test("parseRecognizedArgs --skip-judge and --from-job", () => {
@@ -125,6 +136,37 @@ test("buildHarborEnv forces UTF-8 so Harbor does not crash on Windows cp1252", (
   assert.equal(env.PYTHONUTF8, "1");
   assert.equal(env.PYTHONIOENCODING, "utf-8");
   assert.equal(env.HALO_AGENT_REPO, "C:\\repo");
+  assert.equal(env.HALO_HOST_TOTAL_MEM_BYTES, undefined, "no host memory given, none forwarded");
+});
+
+test("buildHarborEnv forwards the Ollama host's memory so the containerized CLI sizes against it", () => {
+  const env = buildHarborEnv({
+    repoRoot: "C:\\repo",
+    model: "auto",
+    containerBaseUrl: "http://host.docker.internal:11434",
+    hostMemory: { totalMemBytes: 64 * 1024 ** 3, vramBytes: 24 * 1024 ** 3 },
+  });
+  assert.equal(env.HALO_HOST_TOTAL_MEM_BYTES, String(64 * 1024 ** 3));
+  assert.equal(env.HALO_HOST_VRAM_BYTES, String(24 * 1024 ** 3));
+});
+
+test("buildHarborArgs passes num_ctx 0 for auto and the number when explicit", () => {
+  const base = {
+    datasetId: "d",
+    model: "auto",
+    jobsDir: "C:\\out",
+    jobName: "harbor",
+    repoRoot: "C:\\repo",
+    containerBaseUrl: "http://host.docker.internal:11434",
+  };
+  assert.ok(buildHarborArgs({ ...base, numCtx: "auto" }).includes("num_ctx=0"));
+  assert.ok(buildHarborArgs(base).includes("num_ctx=0"));
+  assert.ok(buildHarborArgs({ ...base, numCtx: 32768 }).includes("num_ctx=32768"));
+  // Harbor types `--ak` values as literals; a `:int` suffix would become part
+  // of the key and the kwarg would never reach the adapter.
+  const args = buildHarborArgs({ ...base, numCtx: 32768, maxSteps: 40 });
+  assert.ok(args.every((a) => !/:int=/.test(a)), "no typed-kwarg suffixes");
+  assert.ok(args.includes("max_steps=40"));
 });
 
 test("buildHarborArgs uses custom halo-agent import and downloads /app for the judge", () => {

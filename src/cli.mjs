@@ -23,7 +23,7 @@ import {
   listClassifiedModelsDetected,
   suggestModel,
 } from "./model-routing.mjs";
-import { configureClientModel, modelPromptOverlay } from "./model-tuning.mjs";
+import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./model-tuning.mjs";
 import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { SessionStore } from "./session-store.mjs";
@@ -118,9 +118,13 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       }
       case "--num-ctx": {
         const raw = value(arg, ++i);
+        if (String(raw ?? "").trim().toLowerCase() === "auto") {
+          options.numCtx = "auto";
+          break;
+        }
         const n = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(n) && n > 0) options.numCtx = n;
-        else if (raw !== undefined) options.errors.push(`--num-ctx needs a positive integer, got '${raw}'.`);
+        else if (raw !== undefined) options.errors.push(`--num-ctx needs a positive integer or 'auto', got '${raw}'.`);
         break;
       }
       case "--wall-clock": {
@@ -281,7 +285,8 @@ Options:
   --tier <n>           Task difficulty 0–6 for model routing (default from models.yaml)
   --base-url <url>     Ollama server (default http://127.0.0.1:11434)
   --max-steps <n>      Max model round-trips (default ${DEFAULT_MAX_STEPS})
-  --num-ctx <n>        Context window in tokens sent to Ollama (default ${DEFAULT_NUM_CTX})
+  --num-ctx <n|auto>   Context window in tokens sent to Ollama. auto (default) sizes it to the
+                       model and this machine's memory: floor ${DEFAULT_NUM_CTX}, ceiling ${MAX_AUTO_NUM_CTX}
   --wall-clock <sec>   Wall-clock budget for the run (also HALO_WALL_CLOCK_SECONDS). Time spent
                        counts toward budget pressure, command timeouts are clamped to what
                        remains, and the loop wraps up before the deadline instead of being killed
@@ -672,6 +677,10 @@ async function main() {
       options.model = routed.model;
       await configureClientModel(client, routed.model);
     }
+    if (client.numCtxAuto && !options.quiet) {
+      console.error(`[context] ${client.numCtx} tokens — ${client.numCtxReason ?? "auto"}`);
+    }
+    for (const warning of client.numCtxWarnings ?? []) console.error(`[context] ${warning}`);
   } catch (err) {
     if (err instanceof ModelRoutingError) {
       console.error(err.message);

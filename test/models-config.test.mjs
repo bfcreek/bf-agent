@@ -10,7 +10,7 @@ import {
   normalizeModelsConfigValues,
   resolveCliModel,
 } from "../src/models-config.mjs";
-import { getTierPresetBands } from "../src/tier-models.mjs";
+import { getTierPresetBands, PINNED_MODELS } from "../src/tier-models.mjs";
 
 test("normalizeModelsConfigValues accepts preset, default-tier, and bands", () => {
   const { values, errors } = normalizeModelsConfigValues({
@@ -111,10 +111,10 @@ test("resolveCliModel honors explicit --model over tier routing", async () => {
 test("resolveCliModel --tier-preset overrides models.yaml bands", async () => {
   const client = {
     async listModelsDetailed() {
-      return [{ name: "qwen3-coder:14b", sizeBytes: 9e9, parameterSize: "14B" }];
+      return [{ name: PINNED_MODELS.local, sizeBytes: 18e9, parameterSize: "30.5B" }];
     },
     async show() {
-      return { capabilities: ["tools", "thinking"] };
+      return { capabilities: ["tools"] };
     },
   };
   const routed = await resolveCliModel(
@@ -128,8 +128,8 @@ test("resolveCliModel --tier-preset overrides models.yaml bands", async () => {
     normalizeModelsConfigValues({ preset: "cloud" }).values,
     true,
   );
-  assert.equal(routed.model, "qwen3-coder:14b");
-  assert.deepEqual(getTierPresetBands("hybrid")[0].model, "qwen3-coder:14b");
+  assert.equal(routed.model, PINNED_MODELS.local);
+  assert.deepEqual(getTierPresetBands("hybrid")[0].model, PINNED_MODELS.local);
 });
 
 test("resolveCliModel requireVision uses the band vision model", async () => {

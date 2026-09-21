@@ -68,6 +68,10 @@ test("the SDK exports the full public surface", () => {
     "resolveThinkSetting",
     "configureClientModel",
     "modelPromptOverlay",
+    "resolveAutoNumCtx",
+    "checkContextWindow",
+    "deriveMinimumContext",
+    "MIN_NUM_CTX",
   ]) {
     assert.ok(name in sdk, `missing export: ${name}`);
   }

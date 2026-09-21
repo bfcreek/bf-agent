@@ -103,7 +103,24 @@ export {
   suggestModel,
 } from "./model-routing.mjs";
 
-export { configureClientModel, isGptOssModel, modelPromptOverlay, resolveThinkSetting } from "./model-tuning.mjs";
+export {
+  configureClientModel,
+  isGptOssModel,
+  MAX_AUTO_NUM_CTX,
+  minimalThinkSetting,
+  modelPromptOverlay,
+  resolveAutoNumCtx,
+  resolveThinkSetting,
+  sizeContextWindow,
+} from "./model-tuning.mjs";
+
+export {
+  checkContextWindow,
+  deriveMinimumContext,
+  MIN_NUM_CTX,
+  RECOMMENDED_NUM_CTX,
+  RECOMMENDED_NUM_CTX_THINKING,
+} from "./context-spec.mjs";
 
 export {
   DEFAULT_NUM_CTX,

@@ -3,9 +3,12 @@ import { test } from "node:test";
 
 import {
   AgentLoop,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_STEPS,
   DEFAULT_SYSTEM_PROMPT,
   isToolCallParseError,
+  parseTextToolCall,
+  repairToolCallParseError,
   toolResultContent,
   WALL_CLOCK_RESERVE_MIN_MS,
 } from "../src/agent-loop.mjs";
@@ -66,6 +69,11 @@ test("system prompt is short and stays out of task specifics", () => {
   assert.match(DEFAULT_SYSTEM_PROMPT, /final message must[\s\S]*stand alone/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Change only what the task requires/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Only run git commit or git push when the user asked/);
+  // The safety line is about intent to harm others; security work on the
+  // user's own code must not read as a refusal trigger.
+  assert.match(DEFAULT_SYSTEM_PROMPT, /harm others/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /cryptanalysis, CTF-style exercises[\s\S]*is legitimate work/);
+  assert.doesNotMatch(DEFAULT_SYSTEM_PROMPT, /malware, exploits, or other harm/);
   // Task-type text (acceptance criteria, apt-get probes, Goals blocks) lives
   // in rules now, not here.
   assert.doesNotMatch(DEFAULT_SYSTEM_PROMPT, /Goals:/);
@@ -229,7 +237,7 @@ test("wrap-up failure still returns max-steps with empty text", async () => {
   assert.equal(result.steps.length, 1);
 });
 
-test("empty assistant turns are re-asked, then accepted", async () => {
+test("empty assistant turns are re-asked, then stop as empty", async () => {
   const client = new FakeClient([
     { role: "assistant", content: "" },
     { role: "assistant", content: "   " },
@@ -239,11 +247,94 @@ test("empty assistant turns are re-asked, then accepted", async () => {
 
   const result = await loop.run("say something");
 
-  assert.equal(result.stopReason, "completed");
+  assert.equal(result.stopReason, "empty");
   assert.equal(result.text, "");
+  assert.match(result.error ?? "", /empty responses/i);
   assert.equal(client.calls.length, 3);
   const retries = client.calls[2].messages.filter((m) => m.role === "user" && /was empty/.test(m.content));
   assert.equal(retries.length, 2);
+  // Every empty round-trip is visible in the trace, not just the last one.
+  assert.deepEqual(result.steps.map((s) => s.kind), ["empty", "empty", "empty"]);
+  assert.equal(result.truncatedTurns, 0);
+});
+
+test("a turn cut off by the output limit is re-asked with minimal thinking", async () => {
+  const requests = [];
+  const client = {
+    model: "gpt-oss:20b",
+    async chat(request) {
+      requests.push({ think: request.think, lastUser: request.messages.at(-1), messages: structuredClone(request.messages), options: request.options });
+      if (requests.length === 1) {
+        // Thinking ran the context window dry: no text, no tool call.
+        return {
+          message: { role: "assistant", content: "", thinking: "let me consider... ".repeat(500) },
+          raw: { done_reason: "length", prompt_eval_count: 3000, eval_count: 13000 },
+        };
+      }
+      return {
+        message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 2, b: 3 })] },
+        raw: { done_reason: "stop" },
+      };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 2 });
+
+  const result = await loop.run("add them");
+
+  assert.equal(requests[0].think, undefined, "first call uses the client default");
+  assert.equal(requests[0].options.num_predict, DEFAULT_MAX_OUTPUT_TOKENS, "every call carries the output cap");
+  assert.match(requests[1].lastUser.content, /cut off by the output limit/);
+  assert.equal(requests[1].think, "low", "gpt-oss retry drops to the low thinking level");
+  assert.ok(
+    !requests[1].messages.some((m) => m.role === "assistant" && /let me consider/.test(m.thinking ?? "")),
+    "the cut-off turn's partial thinking is not re-sent",
+  );
+  assert.ok(
+    !result.messages.some((m) => m.role === "assistant" && /let me consider/.test(m.thinking ?? "")),
+    "nor kept in the transcript",
+  );
+  assert.equal(result.truncatedTurns, 1);
+  assert.equal(result.model, "gpt-oss:20b");
+  assert.equal(result.steps[0].kind, "empty");
+  assert.equal(result.steps[0].truncated, true);
+  assert.equal(result.steps[0].completionTokens, 13000);
+  assert.equal(result.steps[1].kind, "tool-calls");
+  assert.equal(result.steps[1].truncated, undefined);
+});
+
+test("maxOutputTokens: 0 sends no num_predict cap", async () => {
+  let seen;
+  const client = {
+    async chat(request) {
+      seen = request.options;
+      return { message: { role: "assistant", content: "ok" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxOutputTokens: 0 });
+  await loop.run("hi");
+  assert.equal(seen, undefined);
+  assert.equal(DEFAULT_MAX_OUTPUT_TOKENS, 12_000);
+});
+
+test("non-gpt-oss thinking models get think:false on the truncated retry", async () => {
+  const thinks = [];
+  const client = {
+    model: "qwen3:14b",
+    async chat(request) {
+      thinks.push(request.think);
+      if (thinks.length === 1) {
+        return { message: { role: "assistant", content: "" }, raw: { done_reason: "length" } };
+      }
+      return { message: { role: "assistant", content: "done" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("go");
+
+  assert.deepEqual(thinks, [undefined, false]);
+  assert.equal(result.text, "done");
+  assert.equal(result.stopReason, "completed");
 });
 
 test("transient client errors are retried", async () => {
@@ -320,6 +411,218 @@ test("tool-call parse errors exhaust recoveries then throw", async () => {
 
   await assert.rejects(() => loop.run("go"), /error parsing tool call/);
   assert.equal(failing.attempts, 3);
+});
+
+// Captured from gpt-oss:20b via Ollama: a long script argument closed with `"]`.
+const STRAY_BRACKET_RAW =
+  `{"command":"python3 - <<'PY'\\nimport sys\\nfrom pathlib import Path\\nseq=Path('sequences.fasta').read_text().splitlines()[1]\\nprint(seq[:20])\\nPY"],"cwd":"/app","timeout_seconds":120}`;
+const strayBracketError = () =>
+  ollamaError(
+    `Ollama /api/chat returned 500: error parsing tool call: raw='${STRAY_BRACKET_RAW}', err=invalid character ']' after object key:value pair`,
+    500,
+  );
+const shellSchemas = () => [
+  {
+    type: "function",
+    function: {
+      name: "run_command",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" }, cwd: { type: "string" }, timeout_seconds: { type: "number" } },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_file",
+      parameters: { type: "object", properties: { path: {}, content: {} }, required: ["path", "content"] },
+    },
+  },
+];
+
+test("repairToolCallParseError drops a single stray ] and resolves the tool by schema", () => {
+  const repaired = repairToolCallParseError(strayBracketError(), shellSchemas());
+  assert.equal(repaired.name, "run_command");
+  assert.equal(repaired.arguments.cwd, "/app");
+  assert.equal(repaired.arguments.timeout_seconds, 120);
+  assert.match(repaired.arguments.command, /^python3 - <<'PY'\nimport sys\n/);
+  assert.match(repaired.arguments.command, /\[1\]\nprint\(seq\[:20\]\)\nPY$/);
+});
+
+test("repairToolCallParseError refuses ambiguous or unrelated damage", () => {
+  // Different parse error: unescaped quote / concatenation — not repairable.
+  assert.equal(
+    repairToolCallParseError(
+      ollamaError(`Ollama /api/chat returned 500: error parsing tool call: raw='{"command":"x"+y"}', err=invalid character '+' after object key:value pair`, 500),
+      shellSchemas(),
+    ),
+    null,
+  );
+  // Two stray brackets: ambiguous.
+  assert.equal(
+    repairToolCallParseError(
+      ollamaError(`Ollama /api/chat returned 500: error parsing tool call: raw='{"command":"a"],"cwd":"b"]}', err=invalid character ']' after object key:value pair`, 500),
+      shellSchemas(),
+    ),
+    null,
+  );
+  // Keys fit no registered tool.
+  assert.equal(
+    repairToolCallParseError(
+      ollamaError(`Ollama /api/chat returned 500: error parsing tool call: raw='{"pattern":"a"]}', err=invalid character ']' after object key:value pair`, 500),
+      shellSchemas(),
+    ),
+    null,
+  );
+  // Keys fit more than one tool.
+  const overlapping = [
+    { type: "function", function: { name: "t1", parameters: { properties: { x: {} }, required: ["x"] } } },
+    { type: "function", function: { name: "t2", parameters: { properties: { x: {}, y: {} }, required: [] } } },
+  ];
+  assert.equal(
+    repairToolCallParseError(
+      ollamaError(`Ollama /api/chat returned 500: error parsing tool call: raw='{"x":"a"]}', err=invalid character ']' after object key:value pair`, 500),
+      overlapping,
+    ),
+    null,
+  );
+});
+
+test("a repairable parse error executes the tool without a correction round-trip", async () => {
+  const registry = new ToolRegistry();
+  const seen = [];
+  registry.register({
+    name: "run_command",
+    description: "run",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string" }, cwd: { type: "string" }, timeout_seconds: { type: "number" } },
+      required: ["command"],
+    },
+    execute: (args) => {
+      seen.push(args);
+      return { exitCode: 0, stdout: "actcttcctttttcaatatt" };
+    },
+  });
+  let phase = 0;
+  const client = {
+    async chat({ messages }) {
+      phase++;
+      if (phase === 1) throw strayBracketError();
+      assert.ok(
+        !messages.some((m) => m.role === "user" && /could not be parsed/i.test(m.content ?? "")),
+        "repaired calls must not push the parse nudge",
+      );
+      const toolMsg = messages.filter((m) => m.role === "tool").at(-1);
+      assert.match(toolMsg.content, /actcttcc/);
+      return { message: { role: "assistant", content: "done" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry });
+
+  const result = await loop.run("compare the sequences");
+
+  assert.equal(result.text, "done");
+  assert.equal(phase, 2);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].cwd, "/app");
+  const parseStep = result.steps.find((s) => s.kind === "tool-parse-error");
+  assert.equal(parseStep.repaired, "run_command");
+  assert.equal(parseStep.recoveries, 0);
+  const callStep = result.steps.find((s) => s.kind === "tool-calls");
+  assert.equal(callStep.toolCalls[0].name, "run_command");
+  assert.equal(callStep.toolCalls[0].result.stdout, "actcttcctttttcaatatt");
+});
+
+test("parseTextToolCall reads qwen3-coder's XML form and the name+arguments JSON form", () => {
+  // Verbatim from a qwen3-coder:30b trace: the loop had accepted this as the final answer.
+  const xml = "<function=read_file>\n<parameter=path>\noutput_seq.txt\n</parameter>\n</function>\n</tool_call>";
+  assert.deepEqual(parseTextToolCall(xml, shellSchemas().concat(readSchema())), {
+    name: "read_file",
+    arguments: { path: "output_seq.txt" },
+  });
+  const typed = "<tool_call><function=run_command><parameter=command>ls -la</parameter><parameter=timeout_seconds>30</parameter></function></tool_call>";
+  assert.deepEqual(parseTextToolCall(typed, shellSchemas()), {
+    name: "run_command",
+    arguments: { command: "ls -la", timeout_seconds: 30 },
+  });
+  assert.deepEqual(parseTextToolCall('{"name":"run_command","arguments":{"command":"pwd"}}', shellSchemas()), {
+    name: "run_command",
+    arguments: { command: "pwd" },
+  });
+  // Not calls: prose, unknown tool, bare args (could be a JSON deliverable).
+  assert.equal(parseTextToolCall("I'll read the file next.", shellSchemas()), null);
+  assert.equal(parseTextToolCall("<function=nope><parameter=x>1</parameter></function>", shellSchemas()), null);
+  assert.equal(parseTextToolCall('{"command":"pwd"}', shellSchemas()), null);
+  assert.equal(parseTextToolCall("Done. <function=read_file><parameter=path>a</parameter></function>", shellSchemas()), null);
+});
+
+function readSchema() {
+  return {
+    type: "function",
+    function: { name: "read_file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  };
+}
+
+test("a tool call written as text is executed instead of ending the turn", async () => {
+  let phase = 0;
+  const client = {
+    async chat({ messages }) {
+      phase++;
+      if (phase === 1) {
+        return {
+          message: { role: "assistant", content: "<function=add>\n<parameter=a>\n2\n</parameter>\n<parameter=b>\n3\n</parameter>\n</function>" },
+          raw: {},
+        };
+      }
+      const echoed = messages.filter((m) => m.role === "assistant").at(-1);
+      assert.equal(echoed.content, "", "the text form is replaced by a real tool_calls message in the transcript");
+      assert.equal(echoed.tool_calls[0].function.name, "add");
+      assert.equal(messages.at(-1).role, "tool");
+      return { message: { role: "assistant", content: "5" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("add 2 and 3");
+
+  assert.equal(result.text, "5");
+  assert.equal(phase, 2);
+  const parseStep = result.steps.find((s) => s.kind === "tool-parse-error");
+  assert.equal(parseStep.repaired, "add");
+  assert.match(parseStep.content, /written as text/);
+  const callStep = result.steps.find((s) => s.kind === "tool-calls");
+  assert.equal(callStep.toolCalls[0].result, 5, "XML parameter values were coerced to the schema's number type");
+});
+
+test("a content-only turn cut off by the output limit is retried, not accepted as final", async () => {
+  const requests = [];
+  const client = {
+    model: "qwen3-coder:30b",
+    async chat(request) {
+      requests.push(structuredClone(request.messages));
+      if (requests.length === 1) {
+        return {
+          message: { role: "assistant", content: "Here is the script:\n" + "print(1)\n".repeat(2000) },
+          raw: { done_reason: "length", eval_count: 12000 },
+        };
+      }
+      return { message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 2 });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.truncatedTurns, 1);
+  assert.equal(result.steps[0].kind, "empty");
+  assert.equal(result.steps[0].truncated, true);
+  assert.match(result.steps[0].content, /^Here is the script/, "the cut-off text is kept in the trace");
+  assert.match(requests[1].at(-1).content, /cut off by the output limit/);
+  assert.ok(!requests[1].some((m) => /print\(1\)/.test(m.content ?? "")), "the cut-off text is not re-sent");
+  assert.equal(result.steps[1].kind, "tool-calls");
 });
 
 test("isToolCallParseError detects Ollama parse failures", () => {
@@ -668,6 +971,44 @@ test("compaction runs before each model call when enabled", async () => {
   assert.equal(result.stopReason, "completed");
   assert.equal(result.text, "done");
   assert.ok(result.messages.some((m) => /SUMMARY/.test(String(m.content ?? ""))), "transcript was summarized");
+  const trace = result.steps.filter((s) => s.kind === "compaction");
+  assert.equal(trace.length, 1);
+  assert.match(trace[0].content, /^ok: \d+ -> \d+ messages/);
+});
+
+test("a failed compaction is traced with its reason", async () => {
+  let summarizerCalls = 0;
+  const client = {
+    calls: 0,
+    async chat({ messages }) {
+      if (/compress an agent's conversation/i.test(messages[0]?.content ?? "")) {
+        summarizerCalls += 1;
+        // First: thinking ate the output budget, nothing came back. Then: a 500.
+        if (summarizerCalls === 1) return { message: { role: "assistant", content: "" }, raw: {} };
+        throw ollamaError("Ollama /api/chat returned 500: boom", 500);
+      }
+      this.calls += 1;
+      if (this.calls <= 2) {
+        return { message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] }, raw: {} };
+      }
+      return { message: { role: "assistant", content: "done" }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    compaction: { maxChars: 10, keepRecent: 1 },
+  });
+
+  const result = await loop.run("x".repeat(50));
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.compactions, 0);
+  assert.equal(result.compactionFailures, 2);
+  const trace = result.steps.filter((s) => s.kind === "compaction").map((s) => s.content);
+  assert.equal(trace.length, 2);
+  assert.match(trace[0], /^failed \(empty-summary\)/);
+  assert.match(trace[1], /^failed \(summarizer-error\): Ollama \/api\/chat returned 500: boom/);
 });
 
 // --- toolResultContent -------------------------------------------------------

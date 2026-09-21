@@ -30,7 +30,7 @@ class HaloAgent(BaseInstalledAgent):
         self,
         *args: Any,
         max_steps: int = 80,
-        num_ctx: int = 16384,
+        num_ctx: int = 0,
         command_timeout: int = 120,
         max_command_timeout: int = 1800,
         wall_clock: int = 0,
@@ -40,6 +40,8 @@ class HaloAgent(BaseInstalledAgent):
     ) -> None:
         super().__init__(*args, **kwargs)
         self._max_steps = int(max_steps)
+        # 0 = auto: the CLI sizes the window to the model and the Ollama
+        # host's memory (forwarded via HALO_HOST_* below).
         self._num_ctx = int(num_ctx)
         self._command_timeout = int(command_timeout)
         self._max_command_timeout = int(max_command_timeout)
@@ -70,9 +72,6 @@ class HaloAgent(BaseInstalledAgent):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await self.ensure_system_dependencies(
-            environment, ("curl", "bash", "tar", "ca_certificates")
-        )
         await self._install_node(environment)
         bundle = self._make_bundle()
         try:
@@ -109,7 +108,7 @@ class HaloAgent(BaseInstalledAgent):
         model = self.model_name or os.environ.get("HALO_AGENT_MODEL") or "auto"
         if "/" in model:
             model = model.split("/", 1)[1]
-        preset = "cloud-max"
+        preset = None
         lowered = model.strip().lower()
         if lowered.startswith("tier-preset "):
             token = lowered.split(None, 1)[1].strip()
@@ -123,19 +122,32 @@ class HaloAgent(BaseInstalledAgent):
             "HALO_COMMAND_TIMEOUT": str(self._command_timeout),
             "HALO_MAX_COMMAND_TIMEOUT": str(self._max_command_timeout),
         }
+        # The agent runs in the task container but Ollama runs on the host;
+        # hand the host's memory to the CLI so fit decisions are about the
+        # machine the models actually load on.
+        for src, dst in (
+            ("HALO_HOST_TOTAL_MEM_BYTES", "HALO_TOTAL_MEM_BYTES"),
+            ("HALO_HOST_VRAM_BYTES", "HALO_VRAM_BYTES"),
+        ):
+            value = os.environ.get(src)
+            if value:
+                env[dst] = value
+        num_ctx_flag = str(self._num_ctx) if self._num_ctx > 0 else "auto"
         wall_clock = self._resolve_wall_clock_seconds()
         wall_clock_flag = f"--wall-clock {wall_clock} " if wall_clock > 0 else ""
+        tier_flag = f"--tier-preset {shlex.quote(preset)} " if preset else ""
+        # Think mode follows CLI defaults / models.yaml; cloud-max policy sets
+        # --think max when an explicit --tier-preset cloud-max is passed.
         cmd = (
             "set -uo pipefail; "
             f"node {shlex.quote(CLI_PATH)} "
             f"--mode agent --quiet --no-index "
             f"--session harbor --cwd \"$PWD\" "
             f"--model {shlex.quote(model)} "
-            f"--tier-preset {shlex.quote(preset)} "
-            f"--think max "
+            f"{tier_flag}"
             f"--base-url {shlex.quote(self._base_url)} "
             f"--max-steps {self._max_steps} "
-            f"--num-ctx {self._num_ctx} "
+            f"--num-ctx {num_ctx_flag} "
             f"{wall_clock_flag}"
             f"-- \"$(cat {shlex.quote(remote_instruction)})\"; "
             "agent_code=$?; "
@@ -214,38 +226,92 @@ class HaloAgent(BaseInstalledAgent):
         return tmp
 
     async def _install_node(self, environment: BaseEnvironment) -> None:
+        """Put Node >= 20 in the container.
+
+        The tarball is fetched on the host (cached under the user's cache dir)
+        and uploaded, the same way the agent bundle is. Task images are not
+        reliable network clients: several are old Debian releases whose apt
+        pools have moved on, and some ship without curl — which is why the
+        earlier ``apt-get install curl`` step killed trials before the agent
+        ever ran. In-container download is only the fallback when the host
+        cannot fetch.
+        """
         check = await environment.exec(
             command=(
                 "if command -v node >/dev/null 2>&1; then "
                 "node -p \"parseInt(process.versions.node,10)>=20?'ok':'old'\"; "
-                "else echo missing; fi"
+                "else echo missing; fi; "
+                "uname -m; [ -f /etc/alpine-release ] && echo alpine || echo glibc"
             ),
             user="root",
         )
-        status = (check.stdout or "").strip()
+        lines = [line.strip() for line in (check.stdout or "").splitlines() if line.strip()]
+        status = lines[0] if lines else "missing"
+        arch = lines[1] if len(lines) > 1 else "x86_64"
+        libc = lines[2] if len(lines) > 2 else "glibc"
         if status == "ok":
             return
-        alpine = await environment.exec(
-            command="[ -f /etc/alpine-release ] && echo alpine || echo glibc",
-            user="root",
-        )
-        if (alpine.stdout or "").strip() == "alpine":
+        if libc == "alpine":
             await self.exec_as_root(
                 environment,
                 command="command -v apk >/dev/null && apk add --no-cache nodejs npm",
             )
             return
+        node_arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(arch)
+        if node_arch is None:
+            raise RuntimeError(f"unsupported container architecture for Node: {arch}")
+
+        tarball = self._host_node_tarball(node_arch)
+        if tarball is not None:
+            await environment.upload_file(tarball, "/tmp/halo-node.tar.gz")
+            await self.exec_as_root(
+                environment,
+                command=(
+                    "tar -xzf /tmp/halo-node.tar.gz -C /usr/local --strip-components=1 && "
+                    "rm -f /tmp/halo-node.tar.gz && node --version"
+                ),
+            )
+            return
+
         await self.exec_as_root(
             environment,
             command=(
                 "set -euo pipefail; "
-                "arch=$(uname -m); "
-                "case \"$arch\" in "
-                "x86_64) na=x64 ;; aarch64|arm64) na=arm64 ;; "
-                "*) echo \"unsupported arch $arch\" >&2; exit 1 ;; esac; "
-                f"ver={shlex.quote(NODE_VERSION)}; "
+                f"ver={shlex.quote(NODE_VERSION)}; na={node_arch}; "
                 "url=\"https://nodejs.org/dist/${ver}/node-${ver}-linux-${na}.tar.gz\"; "
-                "curl -fsSL \"$url\" | tar -xz -C /usr/local --strip-components=1; "
+                "if command -v curl >/dev/null 2>&1; then curl -fsSL \"$url\"; "
+                "elif command -v wget >/dev/null 2>&1; then wget -qO- \"$url\"; "
+                "else python3 -c 'import sys,urllib.request; sys.stdout.buffer.write(urllib.request.urlopen(sys.argv[1]).read())' \"$url\"; fi "
+                "| tar -xz -C /usr/local --strip-components=1; "
                 "node --version"
             ),
         )
+
+    def _host_node_tarball(self, node_arch: str) -> Path | None:
+        """Download (once) and return the Node tarball for ``node_arch``, or
+        None when the host cannot fetch it."""
+        cache_dir = Path(
+            os.environ.get("HALO_NODE_CACHE")
+            or Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "halo-agent" / "node"
+        )
+        name = f"node-{NODE_VERSION}-linux-{node_arch}.tar.gz"
+        target = cache_dir / name
+        if target.is_file() and target.stat().st_size > 1_000_000:
+            return target
+        url = f"https://nodejs.org/dist/{NODE_VERSION}/{name}"
+        try:
+            import urllib.request
+
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".part")
+            with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:
+                while True:
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            tmp.replace(target)
+            return target
+        except Exception as error:  # noqa: BLE001 — fall back to in-container download
+            self.logger.warning("host-side Node download failed (%s); trying inside the container", error)
+            return None

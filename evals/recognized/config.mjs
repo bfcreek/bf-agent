@@ -6,11 +6,9 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { PINNED_MODELS } from "../../src/model-routing.mjs";
 import {
-  getTierPresetBands,
   parseTierPresetArg,
-  resolveTierModel,
-  resolveTierPreset,
 } from "../../src/tier-models.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,7 +23,7 @@ export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
  * @property {number} nConcurrent
  * @property {number} nAttempts
  * @property {number} maxSteps
- * @property {number} numCtx
+ * @property {number|"auto"} numCtx Explicit window, or auto (CLI sizes it to model + host memory).
  * @property {number} commandTimeoutSeconds
  * @property {number} maxCommandTimeoutSeconds
  * @property {number} timeoutMultiplier
@@ -44,14 +42,16 @@ export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
 /** @returns {RecognizedConfig} */
 export function defaultRecognizedConfig() {
   return {
-    model: "auto",
-    tierPreset: "cloud-max",
+    // Pinned local line (see PINNED_MODELS): bench history is only comparable
+    // within a pin, so runs default to it rather than to `auto` routing.
+    model: PINNED_MODELS.local,
+    tierPreset: null,
     baseUrl: "http://127.0.0.1:11434",
     dataset: "2.1",
     nConcurrent: 1,
     nAttempts: 1,
     maxSteps: 80,
-    numCtx: 16384,
+    numCtx: "auto",
     commandTimeoutSeconds: 120,
     maxCommandTimeoutSeconds: 1800,
     timeoutMultiplier: 1,
@@ -76,11 +76,15 @@ export async function loadRecognizedOptions(argv, cwd = process.cwd()) {
   const resolved = await resolveConfigPath(argv, cwd);
   const fileConfig = resolved.path ? await loadConfigFile(resolved.path) : defaultRecognizedConfig();
   const options = parseRecognizedArgs(argv, fileConfig);
+  // A preset named on the command line without an explicit --model means
+  // "route by preset", even though the config's default model is the pin.
+  const modelExplicit = argv.includes("--model") || argv.includes("-m");
+  const presetExplicit = argv.includes("--tier-preset");
+  if (presetExplicit && !modelExplicit) options.model = "auto";
   if ((!options.model || options.model === "auto" || options.model === "tier") && options.tierPreset) {
-    const bands = options.tierPreset === "auto"
-      ? await resolveTierPreset("auto", { baseUrl: options.baseUrl })
-      : getTierPresetBands(options.tierPreset);
-    options.model = resolveTierModel(6, bands, options.model);
+    // Keep the preset as the model string so the Harbor adapter can pass
+    // --tier-preset through to the CLI (think / cloud policy applied there).
+    options.model = `tier-preset ${options.tierPreset}`;
   }
   return {
     options,
@@ -182,7 +186,10 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     else if (arg === "--n-concurrent" || arg === "--concurrent") cli.nConcurrent = Number.parseInt(take(), 10);
     else if (arg === "--attempts" || arg === "-k") cli.nAttempts = Number.parseInt(take(), 10);
     else if (arg === "--max-steps") cli.maxSteps = Number.parseInt(take(), 10);
-    else if (arg === "--num-ctx") cli.numCtx = Number.parseInt(take(), 10);
+    else if (arg === "--num-ctx") {
+      const raw = take();
+      cli.numCtx = raw.trim().toLowerCase() === "auto" ? "auto" : Number.parseInt(raw, 10);
+    }
     else if (arg === "--command-timeout") cli.commandTimeoutSeconds = Number.parseInt(take(), 10);
     else if (arg === "--max-command-timeout") cli.maxCommandTimeoutSeconds = Number.parseInt(take(), 10);
     else if (arg === "--timeout-multiplier") cli.timeoutMultiplier = Number.parseFloat(take());

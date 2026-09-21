@@ -4,12 +4,13 @@
  * tool support either reject the request or silently ignore tool schemas,
  * so detecting that up front beats a confusing mid-run failure.
  *
- * Auto-selection (`--model auto`, the default) goes further: it picks the
- * strongest installed model that is tool-capable AND thinking-capable, at
- * least MIN_EFFECTIVE_PARAMS_B parameters, and fits in memory. A weak model
- * that flails through an agent task wastes more than it saves, so when no
- * local model qualifies, installed Ollama cloud models are used instead —
- * local-first, cloud only when we must.
+ * Auto-selection (`--model auto`, the default) goes further: it takes the
+ * pinned local model (PINNED_MODELS) when installed and fitting in memory,
+ * otherwise the strongest installed model that is tool-capable and either
+ * thinking-capable or coding-tuned, at least MIN_EFFECTIVE_PARAMS_B
+ * parameters, and fits in memory. A weak model that flails through an agent
+ * task wastes more than it saves, so when no local model qualifies, installed
+ * Ollama cloud models are used instead — local-first, cloud only when we must.
  */
 
 import os from "node:os";
@@ -23,6 +24,31 @@ export class ModelRoutingError extends Error {
 
 /** Below this many billions of parameters, agent tasks mostly fail. */
 export const MIN_EFFECTIVE_PARAMS_B = 7;
+
+/**
+ * The models the harness is tuned against. Chosen by the 2026-09 bake-off
+ * (Terminal-Bench 2.1 samples; see the train log in halo-agent-benchmark):
+ * qwen3-coder:30b was the only local candidate to resolve a task and had the
+ * best process scores, ahead of gpt-oss:20b (runaway thinking, refusals) and
+ * devstral-small-2 (output-limit truncations). `auto` picks the local pin
+ * when it is installed and fits; the cloud pin is the hard-tier fallback.
+ * Change these deliberately — bench history is only comparable within a pin.
+ */
+export const PINNED_MODELS = Object.freeze({
+  local: "qwen3-coder:30b",
+  cloud: "kimi-k2.7-code:cloud",
+});
+
+/**
+ * Coding-tuned families. Most are non-thinking; they still make good agents
+ * because the tuning covers tool use, so `auto` accepts them without thinking.
+ */
+const CODING_TUNED = [/coder/i, /^devstral/i, /codestral/i, /^kimi-k[\d.]+-code/i];
+
+/** @param {string} name */
+export function isCodingModel(name) {
+  return CODING_TUNED.some((re) => re.test(String(name ?? "")));
+}
 
 /** A local model should fit in this share of total memory to run comfortably. */
 export const MEMORY_FIT_FRACTION = 0.5;
@@ -302,18 +328,22 @@ export async function suggestModel({
   const locals = [];
   const clouds = [];
 
+  const pinnedLocal = findInstalled(PINNED_MODELS.local, (models ?? []).map((m) => m.name));
+  const pinnedCloud = findInstalled(PINNED_MODELS.cloud, (models ?? []).map((m) => m.name));
+
   for (const entry of models ?? []) {
     if (cloudOnly && !isCloudModel(entry.name)) continue;
     const { tools, thinking, vision } = await detectCapabilities(client, entry.name);
     if (tools !== true) continue;
+    const pinned = entry.name === pinnedLocal || entry.name === pinnedCloud;
     if (requireVision) {
       if (vision !== true) continue;
-    } else if (thinking !== true) {
+    } else if (thinking !== true && !isCodingModel(entry.name) && !pinned) {
       continue;
     }
     const paramsB = parseParamsBillions(entry.parameterSize ?? "", entry.sizeBytes ?? 0);
     if (paramsB < MIN_EFFECTIVE_PARAMS_B) continue;
-    const candidate = { name: entry.name, paramsB, thinking: thinking === true };
+    const candidate = { name: entry.name, paramsB, thinking: thinking === true, pinned };
     if (isCloudModel(entry.name)) {
       clouds.push(candidate);
     } else if (!entry.sizeBytes || entry.sizeBytes <= memoryBudget) {
@@ -321,23 +351,27 @@ export async function suggestModel({
     }
   }
 
-  // Prefer thinking when vision made it optional; otherwise params decide.
+  // The pin wins outright. Otherwise prefer thinking (when vision or coding
+  // tuning made it optional), then size.
   const best = (list) =>
     list.sort(
       (a, b) =>
+        Number(b.pinned) - Number(a.pinned) ||
         Number(b.thinking) - Number(a.thinking) ||
         b.paramsB - a.paramsB ||
         a.name.localeCompare(b.name),
     )[0];
 
-  const capsLabel = requireVision ? "tools + vision" : "thinking + tools";
+  const capsLabel = requireVision ? "tools + vision" : "tools + thinking (or coding-tuned)";
   const local = best(locals);
   if (local) {
     return {
       model: local.name,
       paramsB: local.paramsB,
       cloud: false,
-      reason: `strongest local model with ${capsLabel} that fits in memory (${Math.round(local.paramsB)}B parameters)`,
+      reason: local.pinned
+        ? `pinned local model (${PINNED_MODELS.local}) is installed and fits in memory`
+        : `strongest local model with ${capsLabel} that fits in memory (${Math.round(local.paramsB)}B parameters)`,
     };
   }
   const cloud = best(clouds);
@@ -348,7 +382,8 @@ export async function suggestModel({
       cloud: true,
       reason:
         `no local model is strong enough (${capsLabel}, ` +
-        `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, fitting in memory); using an installed Ollama cloud model`,
+        `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, fitting in memory); using ` +
+        (cloud.pinned ? `the pinned cloud model (${PINNED_MODELS.cloud})` : "an installed Ollama cloud model"),
     };
   }
   return null;
@@ -364,10 +399,10 @@ function noSuitableModelHelp(requireVision) {
     );
   }
   return (
-    `No installed model is suitable for agent use (needs tool calling + thinking, ` +
+    `No installed model is suitable for agent use (needs tool calling plus thinking or coding tuning, ` +
     `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
-    "Pull a stronger local model (e.g. ollama pull qwen3:14b) or an Ollama cloud model " +
-    "(e.g. ollama pull gpt-oss:120b-cloud), or pass --model to override."
+    `Pull the pinned local model (ollama pull ${PINNED_MODELS.local}) or the pinned cloud model ` +
+    `(ollama pull ${PINNED_MODELS.cloud}), or pass --model to override.`
   );
 }
 

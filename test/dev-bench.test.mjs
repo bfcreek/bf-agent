@@ -11,6 +11,7 @@ import {
   parseLanguageFilter,
   resolveBenchConfigPath,
 } from "../evals/config.mjs";
+import { PINNED_MODELS } from "../src/model-routing.mjs";
 import {
   buildCheckpointRecord,
   buildRunKey,
@@ -234,7 +235,10 @@ test("loadBenchOptions uses evals/bench.config.json when cwd has no local config
   assert.equal(options.think, "max");
   assert.equal(options.cloudOnly, false);
   assert.ok(options.tierModels?.length);
-  assert.ok(options.tierModels.every((band) => band.model.includes(":cloud")));
+  // Pinned lines: local through tier 3, cloud above (see PINNED_MODELS).
+  assert.equal(options.tierModels[0].model, PINNED_MODELS.local);
+  assert.equal(options.tierModels.at(-1).model, PINNED_MODELS.cloud);
+  assert.deepEqual(options.models, [PINNED_MODELS.local]);
   assert.equal(options.gates.safety.integrityMinPassRate, file.gates.safety.integrityMinPassRate);
 });
 

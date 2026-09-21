@@ -16,10 +16,14 @@ local agent (via Aura Wire) or running it standalone.
 - **Not a sandbox** — tools are workspace-scoped, but the agent can still write and run commands in that workspace when unattended (`serve` mode, `--mode agent`).
 - **Not RAG/memory** — private corpora stay with Terran (via Aura Wire / MCP); sessions + compaction handle conversation state. Public web lookup is built in as `web_search`.
 - **Not a supervisor** — the loop does not plan for the model, grade its work, nudge it, or swap models mid-run. A weak model that stops early stops early; put that policy in rules files or SDK hooks (`stop`, `beforeToolCall`) rather than expecting the runtime to compensate.
+- **Not small-context** — the agent needs at least a 16k window and works best at 32k+ for thinking models (`docs/context-spec.md`). Below the floor Ollama silently drops the system prompt and tool schemas; at the floor a thinking model can spend the whole window reasoning and emit nothing. `--num-ctx auto` sizes the window to your memory, and a window under the spec is reported at startup, but a machine with no room after the model's weights gets the floor and a warning, not a fix.
 
 ## Model quality
 
-Benchmark reference model: **`gpt-oss:20b`**. Scores vary by model, hardware, and Ollama version.
+Benchmark reference models: **`qwen3-coder:30b`** (local line) and **`kimi-k2.7-code:cloud`** (cloud line) — the pins in `src/model-routing.mjs`, chosen by a 2026-09 bake-off and fixed so the harness can be tuned against one model's behavior. Scores vary by model, hardware, and Ollama version; a run on another model is not comparable to the scoreboard history.
+
+- **Tuned to the pin** — recovery paths in the loop target quirks seen on the pinned models (qwen3-coder writing tool calls as `<function=…>` text; gpt-oss's stray `]` in long arguments). Another model's failure modes will not have the same coverage until it is benchmarked.
+- **Local pin is a non-thinker** — `qwen3-coder:30b` has no thinking channel, so `--think` levels are ignored for it and reasoning happens in visible text. Its 30B MoE weights leave a 24 GB GPU room for a ~16k KV cache; the bench pins 24k and accepts partial CPU offload.
 
 | Tier | Task type | Expectation |
 | --- | --- | --- |

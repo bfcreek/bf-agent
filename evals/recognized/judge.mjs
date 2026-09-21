@@ -184,7 +184,11 @@ export async function agentResultFromTrial(trialDir) {
         steps: session.steps ?? [],
         messages,
         elapsedMs: typeof session.elapsedMs === "number" ? session.elapsedMs : null,
+        model: typeof session.model === "string" ? session.model : null,
+        numCtx: typeof session.numCtx === "number" ? session.numCtx : null,
         compactions: Number(session.compactions ?? 0) || 0,
+        compactionFailures: Number(session.compactionFailures ?? 0) || 0,
+        truncatedTurns: Number(session.truncatedTurns ?? 0) || 0,
         wallClockExhausted: session.wallClockExhausted === true,
       };
     } catch {
@@ -197,7 +201,11 @@ export async function agentResultFromTrial(trialDir) {
     steps: [],
     messages: [],
     elapsedMs: null,
+    model: null,
+    numCtx: null,
     compactions: 0,
+    compactionFailures: 0,
+    truncatedTurns: 0,
     wallClockExhausted: false,
   };
 }

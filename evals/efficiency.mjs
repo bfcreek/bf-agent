@@ -11,7 +11,7 @@
  * or *cheaply* wrong.
  */
 
-import { EMPTY_RETRY_PROMPT } from "../src/agent-loop.mjs";
+import { EMPTY_RETRY_PROMPT, TRUNCATED_RETRY_PROMPT } from "../src/agent-loop.mjs";
 
 export const READ_TOOLS = new Set(["read_file", "list_dir", "fetch_rule", "describe_tool"]);
 export const SEARCH_TOOLS = new Set([
@@ -35,10 +35,13 @@ export const FLAG_PENALTIES = {
   "edit-misses": 10,
   "no-exploration": 10,
   "high-failure-rate": 10,
-  "parse-recoveries": 5,
-  "heavy-compaction": 5,
-  "no-tool-use": 0,
-};
+    "parse-recoveries": 5,
+    "empty-retries": 10,
+    "truncated-turns": 10,
+    "compaction-failed": 10,
+    "heavy-compaction": 5,
+    "no-tool-use": 0,
+  };
 
 /** One-line meaning per flag, for reports and the judge prompt. */
 export const FLAG_DESCRIPTIONS = {
@@ -51,10 +54,13 @@ export const FLAG_DESCRIPTIONS = {
   "edit-misses": "edit_file failed to find its target more than once",
   "no-exploration": "wrote or edited files without reading or searching first",
   "high-failure-rate": "a large share of tool calls failed",
-  "parse-recoveries": "needed repeated tool-call parse corrections",
-  "heavy-compaction": "the transcript was compacted more than once",
-  "no-tool-use": "answered without calling any tool",
-};
+    "parse-recoveries": "needed repeated tool-call parse corrections",
+    "empty-retries": "returned empty assistant turns and exhausted empty-retry re-asks",
+    "truncated-turns": "model output hit the context window (done_reason length) before a tool call or answer",
+    "compaction-failed": "compaction was due but the summarizer produced nothing, so the transcript kept growing",
+    "heavy-compaction": "the transcript was compacted more than once",
+    "no-tool-use": "answered without calling any tool",
+  };
 
 /**
  * @param {string} name
@@ -73,7 +79,7 @@ export function classifyTool(name) {
  * @property {number} steps
  * @property {number} modelCalls
  * @property {number} toolCalls
- * @property {number} failedToolCalls
+ * @property {number} failedToolCalls Tool-level errors plus commands that exited non-zero or timed out.
  * @property {number} failedToolRate
  * @property {{read: number, search: number, mutate: number, exec: number, other: number}} byCategory
  * @property {number} explorationRatio (read + search) / toolCalls
@@ -95,10 +101,13 @@ export function classifyTool(name) {
  * @property {number} modelMs
  * @property {number} toolMs
  * @property {number} compactions
- * @property {number} parseRecoveries
- * @property {number} emptyRetries
+ * @property {number} compactionFailures Compactions that were due but produced no summary.
+ * @property {number} parseRecoveries Malformed tool calls that cost a correction round-trip.
+ * @property {number} parseRepairs Malformed tool calls the loop repaired locally (no round-trip).
+ * @property {number} emptyRetries Model round-trips with neither text nor a tool call.
+ * @property {number} truncatedTurns Model calls cut off by the context window (done_reason length).
  * @property {number} steers
- * @property {{prompt: number, completion: number, peakPrompt: number, perStep: number}|null} tokens
+ * @property {{prompt: number, completion: number, peakPrompt: number, perStep: number, window: number|null}|null} tokens
  * @property {string[]} flags
  * @property {number} heuristicScore 0–100, penalties from flags. A comparison aid, not a grade.
  */
@@ -121,14 +130,22 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
   let sawTokens = false;
   let modelCalls = 0;
   let parseRecoveries = 0;
+  let parseRepairs = 0;
   let steers = 0;
   let wrapUp = false;
+  let emptySteps = 0;
+  let truncatedTurns = 0;
 
   for (const step of steps) {
     const kind = step?.kind;
-    if (kind === "tool-parse-error") parseRecoveries += 1;
+    if (kind === "tool-parse-error") {
+      if (step?.repaired) parseRepairs += 1;
+      else parseRecoveries += 1;
+    }
     if (kind === "steer") steers += 1;
-    if (kind === "tool-calls" || kind === "final") modelCalls += 1;
+    if (kind === "tool-calls" || kind === "final" || kind === "empty") modelCalls += 1;
+    if (kind === "empty") emptySteps += 1;
+    if (step?.truncated === true) truncatedTurns += 1;
     if (step?.wrapUp) wrapUp = true;
     if (typeof step?.durationMs === "number") modelMs += step.durationMs;
     if (typeof step?.promptTokens === "number") {
@@ -159,7 +176,10 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
   }
 
   const toolCalls = calls.length;
-  const failedToolCalls = calls.filter((c) => !c.ok).length;
+  // A command that ran but exited non-zero (missing interpreter, syntax
+  // error, failing test) is a failed call from the agent's point of view,
+  // same as a tool-level error. `ok` alone only covers the latter.
+  const failedToolCalls = calls.filter((c) => c.failed).length;
   const byCategory = { read: 0, search: 0, mutate: 0, exec: 0, other: 0 };
   for (const c of calls) byCategory[c.category] += 1;
 
@@ -218,9 +238,16 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
   const verifiedAfterLastMutation =
     mutations === 0 ? null : calls.slice(lastMutationIndex + 1).some((c) => c.category === "exec");
 
-  const emptyRetries = messages.filter(
-    (m) => m?.role === "user" && m?.content === EMPTY_RETRY_PROMPT,
+  // Empty turns are recorded as `empty` steps; older traces only carry the
+  // re-ask prompts in the transcript, so take whichever signal is richer.
+  const emptyPrompts = messages.filter(
+    (m) =>
+      m?.role === "user" && (m?.content === EMPTY_RETRY_PROMPT || m?.content === TRUNCATED_RETRY_PROMPT),
   ).length;
+  const emptyRetries = Math.max(emptySteps, emptyPrompts);
+  if (truncatedTurns === 0 && typeof agentResult?.truncatedTurns === "number") {
+    truncatedTurns = agentResult.truncatedTurns;
+  }
 
   const stopReason = String(agentResult?.stopReason ?? "unknown");
   const wallClockExhausted = agentResult?.wallClockExhausted === true;
@@ -252,8 +279,11 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
     modelMs,
     toolMs,
     compactions: Number(agentResult?.compactions ?? 0) || 0,
+    compactionFailures: Number(agentResult?.compactionFailures ?? 0) || 0,
     parseRecoveries,
+    parseRepairs,
     emptyRetries,
+    truncatedTurns,
     steers,
     tokens: sawTokens
       ? {
@@ -261,6 +291,7 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
           completion: completionTokens,
           peakPrompt,
           perStep: modelCalls ? Math.round(promptTokens / modelCalls) : 0,
+          window: typeof agentResult?.numCtx === "number" && agentResult.numCtx > 0 ? agentResult.numCtx : null,
         }
       : null,
     flags: [],
@@ -287,8 +318,13 @@ export function deriveFlags(m) {
   if (m.wallClockExhausted) flags.push("wall-clock-exhausted");
   if (m.toolCalls >= 4 && m.failedToolRate >= 0.3) flags.push("high-failure-rate");
   if (m.parseRecoveries >= 2) flags.push("parse-recoveries");
+  if (m.emptyRetries >= 2 || m.stopReason === "empty") flags.push("empty-retries");
+  if (m.truncatedTurns >= 1) flags.push("truncated-turns");
+  if (m.compactionFailures >= 1) flags.push("compaction-failed");
   if (m.compactions >= 2) flags.push("heavy-compaction");
-  if (m.stopReason === "completed" && m.toolCalls === 0) flags.push("no-tool-use");
+  if ((m.stopReason === "completed" || m.stopReason === "empty") && m.toolCalls === 0) {
+    flags.push("no-tool-use");
+  }
   return flags;
 }
 
@@ -312,8 +348,8 @@ export function formatEfficiencyForPrompt(m) {
     `tool calls: ${m.toolCalls} — read ${m.byCategory.read}, search ${m.byCategory.search}, mutate ${m.byCategory.mutate}, exec ${m.byCategory.exec}, other ${m.byCategory.other}; failed ${m.failedToolCalls}`,
     `files touched: ${m.filesTouched.length ? m.filesTouched.join(", ") : "(none)"}`,
     `mutations: ${m.mutations}; first at step ${m.firstMutationStep ?? "—"}, last at step ${m.lastMutationStep ?? "—"}; command run after last change: ${m.verifiedAfterLastMutation == null ? "n/a" : m.verifiedAfterLastMutation ? "yes" : "NO"}`,
-    `waste signals: redundant reads ${m.redundantReads}, repeated failing commands ${m.repeatedFailingCommands}, blind edits ${m.blindEdits}, edit misses ${m.editMisses}, parse recoveries ${m.parseRecoveries}, empty retries ${m.emptyRetries}`,
-    `stop: ${m.stopReason}${m.wallClockExhausted ? " (wall clock)" : ""}${m.wrapUp ? ", wrap-up answer" : ""}; compactions ${m.compactions}`,
+    `waste signals: redundant reads ${m.redundantReads}, repeated failing commands ${m.repeatedFailingCommands}, blind edits ${m.blindEdits}, edit misses ${m.editMisses}, parse recoveries ${m.parseRecoveries} (repaired locally ${m.parseRepairs ?? 0}), empty retries ${m.emptyRetries}, truncated turns ${m.truncatedTurns ?? 0}`,
+    `stop: ${m.stopReason}${m.wallClockExhausted ? " (wall clock)" : ""}${m.wrapUp ? ", wrap-up answer" : ""}; compactions ${m.compactions}${m.compactionFailures ? ` (${m.compactionFailures} failed)` : ""}`,
   ];
   if (m.elapsedMs != null) {
     lines.push(
@@ -322,7 +358,7 @@ export function formatEfficiencyForPrompt(m) {
   }
   if (m.tokens) {
     lines.push(
-      `tokens: prompt ${m.tokens.prompt} (peak ${m.tokens.peakPrompt}, ~${m.tokens.perStep}/call), completion ${m.tokens.completion}`,
+      `tokens: prompt ${m.tokens.prompt} (peak ${m.tokens.peakPrompt}${m.tokens.window ? ` of a ${m.tokens.window} window` : ""}, ~${m.tokens.perStep}/call), completion ${m.tokens.completion}`,
     );
   }
   lines.push(

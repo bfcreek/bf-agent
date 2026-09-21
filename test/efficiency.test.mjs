@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EMPTY_RETRY_PROMPT } from "../src/agent-loop.mjs";
+import { EMPTY_RETRY_PROMPT, TRUNCATED_RETRY_PROMPT } from "../src/agent-loop.mjs";
 import {
   classifyTool,
   computeEfficiency,
@@ -52,7 +52,7 @@ test("a clean read → edit → verify run has no flags", () => {
   assert.equal(m.verifiedAfterLastMutation, true);
   assert.equal(m.budgetUsed, 0.2);
   assert.equal(m.modelMs, 2900);
-  assert.deepEqual(m.tokens, { prompt: 6200, completion: 150, peakPrompt: 1800, perStep: 1550 });
+  assert.deepEqual(m.tokens, { prompt: 6200, completion: 150, peakPrompt: 1800, perStep: 1550, window: null });
   assert.deepEqual(m.flags, []);
   assert.equal(m.heuristicScore, 100);
 });
@@ -117,6 +117,8 @@ test("wall-clock exhaustion, parse recoveries, empty retries, and compaction are
     steps: [
       { index: 1, kind: "tool-parse-error", content: "bad json", toolCalls: [] },
       { index: 1, kind: "tool-parse-error", content: "bad json", toolCalls: [] },
+      // Repaired locally: no correction round-trip, so not a recovery.
+      { index: 2, kind: "tool-parse-error", content: "stray ]", toolCalls: [], repaired: "run_command" },
       step(1, [call("list_dir", { path: "." })]),
       step(2, [call("grep_search", { pattern: "foo" })]),
       step(3, [call("read_file", { path: "b" })]),
@@ -129,6 +131,7 @@ test("wall-clock exhaustion, parse recoveries, empty retries, and compaction are
     ],
   });
   assert.equal(m.parseRecoveries, 2);
+  assert.equal(m.parseRepairs, 1);
   assert.equal(m.emptyRetries, 1);
   assert.equal(m.wrapUp, true);
   assert.equal(m.compactions, 2);
@@ -151,11 +154,64 @@ test("high failure rate needs enough calls to be meaningful", () => {
   assert.ok(many.flags.includes("high-failure-rate"));
 });
 
+test("commands that exit non-zero count as failed tool calls", () => {
+  const missing = call("run_command", { command: "python x.py" }, { result: { exitCode: 127, stdout: "", stderr: "python: command not found" } });
+  const fine = call("run_command", { command: "ls" }, { result: { exitCode: 0, stdout: "a", stderr: "" } });
+  const m = computeEfficiency({
+    stopReason: "completed",
+    steps: [step(1, [missing]), step(2, [call("read_file", { path: "a" })]), step(3, [fine]), step(4, [])],
+  });
+  assert.equal(m.toolCalls, 3);
+  assert.equal(m.failedToolCalls, 1, "exit 127 is a failure even though the tool itself returned ok");
+  assert.match(formatEfficiencyForPrompt(m), /failed 1/);
+});
+
 test("a plain answer with no tools is marked, not penalized", () => {
   const m = computeEfficiency({ stopReason: "completed", steps: [step(1, [])] });
   assert.deepEqual(m.flags, ["no-tool-use"]);
   assert.equal(m.heuristicScore, 100);
   assert.equal(heuristicScore(["spinning", "no-verification"]), 70);
+});
+
+test("empty stop reason and repeated empty retries are flagged", () => {
+  const m = computeEfficiency({
+    stopReason: "empty",
+    steps: [step(1, []), step(2, []), step(3, [])],
+    messages: [
+      { role: "user", content: EMPTY_RETRY_PROMPT },
+      { role: "user", content: EMPTY_RETRY_PROMPT },
+    ],
+  });
+  assert.ok(m.flags.includes("empty-retries"));
+  assert.ok(m.flags.includes("no-tool-use"));
+  assert.equal(m.emptyRetries, 2);
+});
+
+test("truncated turns and failed compactions are counted from the trace and flagged", () => {
+  const m = computeEfficiency({
+    stopReason: "empty",
+    compactions: 0,
+    compactionFailures: 3,
+    steps: [
+      step(1, [call("read_file", { path: "feal.py" })]),
+      { index: 2, kind: "empty", content: "", toolCalls: [], truncated: true, completionTokens: 13000 },
+      { index: 3, kind: "empty", content: "", toolCalls: [], truncated: true, completionTokens: 12000 },
+      { index: 4, kind: "empty", content: "", toolCalls: [], truncated: true },
+    ],
+    messages: [
+      { role: "user", content: TRUNCATED_RETRY_PROMPT },
+      { role: "user", content: TRUNCATED_RETRY_PROMPT },
+    ],
+  });
+  assert.equal(m.modelCalls, 4, "empty round-trips are model calls");
+  assert.equal(m.emptyRetries, 3, "empty steps beat the prompt count when richer");
+  assert.equal(m.truncatedTurns, 3);
+  assert.equal(m.compactionFailures, 3);
+  assert.ok(m.flags.includes("truncated-turns"));
+  assert.ok(m.flags.includes("compaction-failed"));
+  assert.ok(m.flags.includes("empty-retries"));
+  assert.match(formatEfficiencyForPrompt(m), /truncated turns 3/);
+  assert.match(formatEfficiencyForPrompt(m), /compactions 0 \(3 failed\)/);
 });
 
 test("formatEfficiencyForPrompt is a compact, flag-annotated block", () => {

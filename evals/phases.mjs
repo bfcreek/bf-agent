@@ -33,6 +33,10 @@ export function mergePhaseResults(phaseResults, phases = []) {
   const summaries = [];
   let elapsedMs = 0;
   let compactions = 0;
+  let compactionFailures = 0;
+  let truncatedTurns = 0;
+  let model = null;
+  let numCtx = null;
   let wallClockExhausted = false;
 
   for (let i = 0; i < phaseResults.length; i++) {
@@ -52,6 +56,10 @@ export function mergePhaseResults(phaseResults, phases = []) {
     });
     elapsedMs += result.elapsedMs ?? 0;
     compactions += result.compactions ?? 0;
+    compactionFailures += result.compactionFailures ?? 0;
+    truncatedTurns += result.truncatedTurns ?? 0;
+    if (typeof result.model === "string") model = result.model;
+    if (typeof result.numCtx === "number") numCtx = result.numCtx;
     if (result.wallClockExhausted) wallClockExhausted = true;
   }
 
@@ -66,7 +74,11 @@ export function mergePhaseResults(phaseResults, phases = []) {
     messages,
     phases: summaries,
     elapsedMs,
+    ...(model ? { model } : {}),
+    ...(numCtx ? { numCtx } : {}),
     compactions,
+    compactionFailures,
+    truncatedTurns,
     ...(wallClockExhausted ? { wallClockExhausted: true } : {}),
   };
 }

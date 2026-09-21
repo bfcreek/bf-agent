@@ -10,9 +10,9 @@ import {
 
 const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 };
 
-/** Runtime settings the Harbor adapter runs with (see adapters/halo_agent.py). */
+/** Runtime settings the Harbor adapter runs with unless overridden (see adapters/halo_agent.py). */
 export const HARBOR_RUN_FLAGS = {
-  think: "max",
+  think: "auto",
 };
 
 /**

@@ -8,37 +8,36 @@
  */
 
 import { DEFAULT_THINK, OllamaClient } from "./ollama-client.mjs";
-import { suggestModel } from "./model-routing.mjs";
+import { PINNED_MODELS, suggestModel } from "./model-routing.mjs";
+
+export { PINNED_MODELS };
 
 /** @typedef {{throughTier?: number, model: string, vision?: string}} TierModelBand */
 
 export const DEFAULT_TIER_PRESET = "auto";
 
-/** @type {Record<string, TierModelBand[]>} */
+/**
+ * Presets are built from the two pinned lines (PINNED_MODELS): the local pin
+ * wherever local is allowed, the cloud pin wherever cloud is allowed. Only
+ * `cloud-max` reaches past the pins, to flagship models at max think.
+ *
+ * @type {Record<string, TierModelBand[]>}
+ */
 export const TIER_PRESETS = {
   /** Ollama cloud only — no local GPU or RAM required. */
-  cloud: [
-    { throughTier: 1, model: "glm-4.6:cloud", vision: "kimi-k2.6:cloud" },
-    { throughTier: 3, model: "kimi-k2.6:cloud", vision: "kimi-k2.6:cloud" },
-    { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
-  ],
+  cloud: [{ model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud }],
   /** Flagship Ollama cloud only — planning, tools, and escalation stay remote at max think. */
   "cloud-max": [
     { throughTier: 3, model: "glm-5.3:cloud", vision: "kimi-k3:cloud" },
     { model: "kimi-k3:cloud", vision: "kimi-k3:cloud" },
   ],
-  /** Local models for easy/medium work; cloud for hard tiers. */
+  /** Pinned local model for easy/medium work; pinned cloud model for hard tiers. */
   hybrid: [
-    { throughTier: 1, model: "qwen3-coder:14b", vision: "devstral-small-2" },
-    { throughTier: 3, model: "qwen3-coder:30b", vision: "devstral-small-2" },
-    { model: "kimi-k2.7-code:cloud", vision: "kimi-k2.7-code:cloud" },
+    { throughTier: 3, model: PINNED_MODELS.local, vision: "devstral-small-2" },
+    { model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud },
   ],
-  /** Local models only — needs a capable GPU and enough RAM/VRAM. */
-  local: [
-    { throughTier: 1, model: "qwen3-coder:14b", vision: "devstral-small-2" },
-    { throughTier: 3, model: "qwen3-coder:30b", vision: "devstral-small-2" },
-    { model: "qwen3-coder:30b", vision: "devstral-small-2" },
-  ],
+  /** Pinned local model only — needs a capable GPU and enough RAM/VRAM. */
+  local: [{ model: PINNED_MODELS.local, vision: "devstral-small-2" }],
 };
 
 const VALID_PRESETS = new Set(["auto", ...Object.keys(TIER_PRESETS)]);

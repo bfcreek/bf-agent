@@ -10,10 +10,19 @@
  * Best-effort — if the summarization call fails, the transcript is untouched.
  */
 
+import { minimalThinkSetting } from "./model-tuning.mjs";
+
 export const DEFAULT_MAX_CHARS = 24_000;
 export const DEFAULT_KEEP_RECENT = 6;
 /** Compact when the transcript is estimated past this share of the context window. */
 export const DEFAULT_CONTEXT_FRACTION = 0.75;
+/**
+ * Output cap for the summarizer call. Without it a thinking model can spend
+ * the whole remaining context window reasoning about the summary, return an
+ * empty content string, and leave the transcript uncompacted — silently, and
+ * at full model-call cost, on every subsequent step.
+ */
+export const SUMMARY_MAX_TOKENS = 1_500;
 
 const SUMMARIZER_PROMPT = [
   "You compress an agent's conversation history into a brief it can use to",
@@ -24,20 +33,36 @@ const SUMMARIZER_PROMPT = [
   "done. Reduce dead ends to one line each. Reply with only the summary.",
 ].join(" ");
 
+/**
+ * Tokenizer density, measured on gpt-oss and qwen3 tokenizers: code and
+ * logs — which is what tool results are — run ~3 chars/token; prose ~5.
+ * Text (prompts, user turns, answers) uses a 4 blend. See context-spec.mjs.
+ */
+export const CHARS_PER_TOKEN_CODE = 3;
+export const CHARS_PER_TOKEN_TEXT = 4;
+
 /** Rough size proxy — characters, since we have no tokenizer. */
 export function transcriptSize(messages) {
   let size = 0;
   for (const m of messages) {
-    if (typeof m.content === "string") size += m.content.length;
-    if (m.tool_calls) size += JSON.stringify(m.tool_calls).length;
+    size += messageChars(m);
   }
+  return size;
+}
+
+function messageChars(m) {
+  let size = 0;
+  if (typeof m.content === "string") size += m.content.length;
+  if (m.tool_calls) size += JSON.stringify(m.tool_calls).length;
   return size;
 }
 
 /**
  * Estimate the transcript's token count: the best of what Ollama actually
- * reported for the last round-trip (observedTokens) and a chars/4 heuristic
- * that also covers content appended since.
+ * reported for the last round-trip (observedTokens) and a chars-per-token
+ * heuristic that also covers content appended since. Tool results are
+ * counted at code density — a chars/4 estimate undercounts a spilled build
+ * log by a quarter, which is the output reserve eaten before compaction fires.
  *
  * @param {Array<object>} messages
  * @param {number} [observedTokens] `prompt_eval_count + eval_count` from the
@@ -45,7 +70,11 @@ export function transcriptSize(messages) {
  * @returns {number}
  */
 export function estimateTokens(messages, observedTokens = 0) {
-  return Math.max(observedTokens, Math.ceil(transcriptSize(messages) / 4));
+  let tokens = 0;
+  for (const m of messages) {
+    tokens += messageChars(m) / (m.role === "tool" ? CHARS_PER_TOKEN_CODE : CHARS_PER_TOKEN_TEXT);
+  }
+  return Math.max(observedTokens, Math.ceil(tokens));
 }
 
 /**
@@ -62,6 +91,9 @@ export function estimateTokens(messages, observedTokens = 0) {
  * @param {string} [options.historyPath] Workspace-relative path of a file
  *   holding the full transcript; referenced in the summary so the model can
  *   look up dropped details.
+ * @param {(info: {reason: string, error?: Error}) => void} [options.onFailure]
+ *   Called when compaction was needed but the summarizer produced nothing
+ *   usable; the transcript is returned unchanged in that case.
  * @returns {Promise<Array<object>>} The original array when nothing was
  *   compacted, otherwise a new compacted array.
  */
@@ -73,6 +105,7 @@ export async function compactMessages({
   observedTokens = 0,
   keepRecent = DEFAULT_KEEP_RECENT,
   historyPath,
+  onFailure,
 }) {
   const overBudget = maxTokens
     ? estimateTokens(messages, observedTokens) > maxTokens
@@ -89,17 +122,25 @@ export async function compactMessages({
 
   let summary;
   try {
+    // A summary needs no reasoning channel; cap output so the call cannot
+    // run the context window dry (see SUMMARY_MAX_TOKENS).
     const { message } = await client.chat({
       messages: [
         { role: "system", content: SUMMARIZER_PROMPT },
         { role: "user", content: middle.map(renderMessage).join("\n") },
       ],
+      think: minimalThinkSetting(client?.model),
+      options: { num_predict: SUMMARY_MAX_TOKENS },
     });
     summary = typeof message.content === "string" ? message.content.trim() : "";
-  } catch {
+  } catch (error) {
+    onFailure?.({ reason: "summarizer-error", error });
     return messages;
   }
-  if (!summary) return messages;
+  if (!summary) {
+    onFailure?.({ reason: "empty-summary" });
+    return messages;
+  }
 
   const original = extractOriginalInstruction(messages);
   const parts = ["[Earlier conversation was compacted to save space. Summary:]"];

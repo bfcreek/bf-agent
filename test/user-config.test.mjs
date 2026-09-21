@@ -61,6 +61,14 @@ test("normalizeConfigValues reports invalid values", () => {
   assert.ok(errors.some((e) => e.includes("unknown")));
 });
 
+test("num-ctx defaults to auto and accepts auto or a positive integer", () => {
+  assert.equal(getBuiltinDefaults().numCtx, "auto");
+  assert.equal(normalizeConfigValues({ "num-ctx": "auto" }).values.numCtx, "auto");
+  assert.equal(normalizeConfigValues({ "num-ctx": "AUTO" }).values.numCtx, "auto");
+  assert.equal(normalizeConfigValues({ "num-ctx": 32768 }).values.numCtx, 32768);
+  assert.ok(normalizeConfigValues({ "num-ctx": "lots" }).errors.some((e) => /num-ctx.*'auto'/.test(e)));
+});
+
 test("applyConfigToDefaults merges without mutating the base defaults", () => {
   const defaults = getBuiltinDefaults();
   const merged = applyConfigToDefaults(defaults, { model: "from-config", mcp: ["a"] });

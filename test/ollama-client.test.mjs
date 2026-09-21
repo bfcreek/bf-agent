@@ -107,18 +107,39 @@ test("chat sends think when the model is thinking-capable", async () => {
   assert.equal(requests[0].body.think, true);
 });
 
-test("chat omits think when disabled or model lacks thinking", async () => {
-  const { fetchImpl, requests } = makeFetch([CHAT_REPLY, CHAT_REPLY]);
+test("think off is sent as false to thinking models and omitted for the rest", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY, CHAT_REPLY, CHAT_REPLY]);
+  // Thinking models reason by default when the field is omitted, so "off"
+  // must reach Ollama as an explicit false.
   const client = new OllamaClient({ fetchImpl, think: false });
   client.thinkingCapable = true;
-
   await client.chat({ messages: [{ role: "user", content: "hi" }] });
-  assert.equal(requests[0].body.think, undefined);
+  assert.equal(requests[0].body.think, false);
 
   const client2 = new OllamaClient({ fetchImpl, think: "auto" });
   client2.thinkingCapable = false;
   await client2.chat({ messages: [{ role: "user", content: "hi" }] });
   assert.equal(requests[1].body.think, undefined);
+
+  const client3 = new OllamaClient({ fetchImpl, think: false });
+  client3.thinkingCapable = false;
+  await client3.chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(requests[2].body.think, undefined);
+});
+
+test("an explicit think level is dropped for a model known not to think", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY, CHAT_REPLY]);
+  // A bench config can pin `think: max` for its cloud line while the local
+  // line is a non-thinker (qwen3-coder); the non-thinker must not get the field.
+  const coder = new OllamaClient({ fetchImpl, think: "max" });
+  coder.thinkingCapable = false;
+  await coder.chat({ messages: [{ role: "user", content: "hi" }], model: "qwen3-coder:30b" });
+  assert.equal(requests[0].body.think, undefined);
+
+  const unknown = new OllamaClient({ fetchImpl, think: "max" });
+  unknown.thinkingCapable = null;
+  await unknown.chat({ messages: [{ role: "user", content: "hi" }], model: "mystery:7b" });
+  assert.equal(requests[1].body.think, "max", "unverified capability still honors the explicit level");
 });
 
 test("chat uses gpt-oss think levels in auto mode for small models", async () => {
@@ -196,6 +217,30 @@ test("chatStream sends stream:true and accumulates content deltas", async () => 
   assert.equal(message.content, "Hello!");
   assert.equal(raw.prompt_eval_count, 10);
   assert.equal(raw.eval_count, 2);
+});
+
+test("chatStream surfaces an in-band error frame as a 500 OllamaClientError", async () => {
+  // Ollama streams HTTP 200 and reports generation failures (notably tool-call
+  // parse errors) as {"error": ...} frames after the thinking deltas.
+  const { fetchImpl } = makeStreamFetch([
+    [
+      { message: { role: "assistant", content: "", thinking: "Let's run a script." }, done: false },
+      {
+        model: "gpt-oss:20b",
+        error: "error parsing tool call: raw='{\"command\":\"python3 - <<PY\"]}', err=invalid character ']'",
+        done: false,
+      },
+    ],
+  ]);
+  const client = new OllamaClient({ fetchImpl });
+
+  await assert.rejects(
+    () => client.chatStream({ messages: [{ role: "user", content: "hi" }] }),
+    (err) =>
+      err.name === "OllamaClientError" &&
+      err.status === 500 &&
+      /error parsing tool call/.test(err.message),
+  );
 });
 
 test("chatStream wraps mid-stream transport failures as OllamaClientError", async () => {

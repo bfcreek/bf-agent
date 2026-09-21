@@ -77,7 +77,7 @@ Options:
 | `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server |
 | `--max-steps <n>` | `100` | Safety cap on model round-trips per turn (the model decides when it is done; this only stops runaways) |
 | `--wall-clock <sec>` | off | Wall-clock budget for the run; the loop wraps up before the deadline instead of being killed |
-| `--num-ctx <n>` | `16384` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently |
+| `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended |
 | `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
@@ -87,18 +87,35 @@ Options:
 | `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
 
 The model is resolved against Ollama's installed list at startup. With
-`auto` (the default), Bitfield Agent picks the strongest installed model that
-supports both tool calling and thinking, has at least 7B parameters, and
-fits comfortably in this machine's memory — a model too weak to finish agent
-tasks wastes more than it saves. When no local model qualifies, an installed
-[Ollama cloud](https://ollama.com/cloud) model is used instead: local-first,
-cloud only when we must. Explicit `--model` names are always honored
+`auto` (the default), Bitfield Agent first takes the **pinned local model**
+(`qwen3-coder:30b`, see `PINNED_MODELS` in `src/model-routing.mjs`) when it
+is installed and fits in memory. Otherwise it picks the strongest installed
+model that supports tool calling and is either thinking-capable or
+coding-tuned, has at least 7B parameters, and fits comfortably in this
+machine's memory — a model too weak to finish agent tasks wastes more than it
+saves. When no local model qualifies, an installed
+[Ollama cloud](https://ollama.com/cloud) model is used instead, the pinned
+cloud model (`kimi-k2.7-code:cloud`) first: local-first, cloud only when we
+must. Explicit `--model` names are always honored
 (untagged names match their tags, so `llama3.2` finds `llama3.2:latest`)
 with a warning when the choice looks too weak; missing names fall back to
 auto-selection. Capabilities are asked of Ollama itself (`/api/show`), so
 new models classify correctly; a family-name list is the fallback for older
 Ollama versions. `bf-agent models` shows the classification and what
 `auto` would pick.
+
+**Why a pin.** The harness is tuned against one local line and one cloud
+line so that bench history stays comparable and fixes target a known model's
+quirks instead of the average of several. The pins came out of a 2026-09
+bake-off on Terminal-Bench 2.1 samples (`qwen3-coder:30b` vs `gpt-oss:20b`
+vs `devstral-small-2`): only the coder resolved a task, and it had the best
+process scores. The tier presets are built from the pins (`local`, `hybrid`,
+`cloud`); `cloud-max` is the one preset that reaches past them to flagship
+cloud models. Recognized-benchmark runs default to the local pin at
+`--num-ctx 24576` (the spec's recommendation for a non-thinking model; on a
+24 GB GPU that costs ~16% decode speed versus a fully-resident 16k window and
+saves a compaction every few steps). Change a pin deliberately, and start a
+new scoreboard history when you do.
 
 Sessions store the full transcript, an accumulated step log, and the list of
 files the agent changed. Re-running with the same `--session` name continues
@@ -267,9 +284,16 @@ automatically — older turns are summarized by the model while the system
 message and recent turns are kept verbatim; the summary keeps the original
 request word for word and, with `--session`, points at the transcript file
 so dropped details can be re-read. Compaction triggers on real token usage:
-every request carries an explicit `num_ctx` (default 16384, `--num-ctx` to
-change), and the loop watches the token counts Ollama reports to compact
-before the window overflows.
+every request carries an explicit `num_ctx`, and the loop watches the token
+counts Ollama reports to compact before the window overflows.
+
+The window itself is sized automatically (`--num-ctx auto`, the default):
+the largest multiple of 4096 whose KV cache fits in the memory left after the
+model's weights, between a 16384 floor and a 65536 ceiling (or the model's own
+limit). The floor and the recommended minimums — 24k for a non-thinking model,
+32k for a thinking one — are derived from measured prompt costs in
+[`docs/context-spec.md`](docs/context-spec.md); a window under the spec for
+its model is reported at startup as a `[context]` warning.
 
 ## Instruction files
 

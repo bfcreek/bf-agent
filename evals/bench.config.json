@@ -1,6 +1,6 @@
 {
   "models": ["auto"],
-  "tierPreset": "cloud",
+  "tierPreset": "hybrid",
   "baseUrl": "http://127.0.0.1:11434",
   "maxSteps": 15,
   "timeoutSeconds": 480,

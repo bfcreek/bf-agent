@@ -7,6 +7,7 @@ import {
   detectToolCapable,
   detectVisionCapable,
   isCloudModel,
+  isCodingModel,
   isLikelyThinkingCapable,
   isLikelyToolCapable,
   isLikelyVisionCapable,
@@ -17,6 +18,7 @@ import {
   MIN_EFFECTIVE_PARAMS_B,
   ModelRoutingError,
   parseParamsBillions,
+  PINNED_MODELS,
   resolveModel,
   resolveModelAuto,
   resolveModelDetected,
@@ -292,8 +294,8 @@ test("suggestModel picks the strongest local thinking+tools model that fits", as
   const client = makeAutoClient([
     { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
     { name: "gpt-oss:20b", sizeBytes: 13 * GB, parameterSize: "20.9B", capabilities: THINKING_TOOLS },
-    // Bigger but non-thinking: excluded despite tools.
-    { name: "qwen3-coder:30b", sizeBytes: 18 * GB, parameterSize: "30.5B", capabilities: TOOLS_ONLY },
+    // Bigger, tools, but neither thinking nor coding-tuned: excluded.
+    { name: "mistral-small3.2:24b", sizeBytes: 15 * GB, parameterSize: "24B", capabilities: TOOLS_ONLY },
     // Thinking but too big for the memory budget.
     { name: "gpt-oss:120b", sizeBytes: 65 * GB, parameterSize: "116.8B", capabilities: THINKING_TOOLS },
   ]);
@@ -304,6 +306,49 @@ test("suggestModel picks the strongest local thinking+tools model that fits", as
   });
   assert.equal(picked.model, "gpt-oss:20b");
   assert.equal(picked.cloud, false);
+});
+
+test("suggestModel takes the pinned local model over a larger thinker when it fits", async () => {
+  const client = makeAutoClient([
+    { name: "gpt-oss:20b", sizeBytes: 13 * GB, parameterSize: "20.9B", capabilities: THINKING_TOOLS },
+    { name: PINNED_MODELS.local, sizeBytes: 18 * GB, parameterSize: "30.5B", capabilities: TOOLS_ONLY },
+    { name: PINNED_MODELS.cloud, sizeBytes: 400, parameterSize: "1000B", capabilities: TOOLS_ONLY },
+  ]);
+  const picked = await suggestModel({ client, models: await client.listModelsDetailed(), totalMemBytes: 64 * GB });
+  assert.equal(picked.model, PINNED_MODELS.local);
+  assert.match(picked.reason, /pinned local model/);
+
+  // Pin does not fit: the ordinary rules apply, and thinking still leads.
+  const tight = await suggestModel({ client, models: await client.listModelsDetailed(), totalMemBytes: 32 * GB });
+  assert.equal(tight.model, "gpt-oss:20b");
+
+  // Nothing local fits: the pinned cloud model beats other cloud candidates.
+  const cloudClient = makeAutoClient([
+    { name: "gpt-oss:120b-cloud", sizeBytes: 400, parameterSize: "116.8B", capabilities: THINKING_TOOLS },
+    { name: PINNED_MODELS.cloud, sizeBytes: 400, parameterSize: "1000B", capabilities: TOOLS_ONLY },
+  ]);
+  const cloud = await suggestModel({ client: cloudClient, models: await cloudClient.listModelsDetailed(), totalMemBytes: 8 * GB });
+  assert.equal(cloud.model, PINNED_MODELS.cloud);
+  assert.match(cloud.reason, /pinned cloud model/);
+});
+
+test("suggestModel accepts coding-tuned non-thinking models, preferring thinkers of any size", async () => {
+  assert.equal(isCodingModel("qwen3-coder:30b"), true);
+  assert.equal(isCodingModel("devstral-small-2:latest"), true);
+  assert.equal(isCodingModel("kimi-k2.7-code:cloud"), true);
+  assert.equal(isCodingModel("qwen3:14b"), false);
+  const client = makeAutoClient([
+    { name: "devstral-small-2:latest", sizeBytes: 15 * GB, parameterSize: "24B", capabilities: TOOLS_ONLY },
+    { name: "qwen3:14b", sizeBytes: 9 * GB, parameterSize: "14.8B", capabilities: THINKING_TOOLS },
+  ]);
+  const picked = await suggestModel({ client, models: await client.listModelsDetailed(), totalMemBytes: 64 * GB });
+  assert.equal(picked.model, "qwen3:14b");
+  const coderOnly = makeAutoClient([
+    { name: "devstral-small-2:latest", sizeBytes: 15 * GB, parameterSize: "24B", capabilities: TOOLS_ONLY },
+  ]);
+  const coder = await suggestModel({ client: coderOnly, models: await coderOnly.listModelsDetailed(), totalMemBytes: 64 * GB });
+  assert.equal(coder.model, "devstral-small-2:latest");
+  assert.match(coder.reason, /coding-tuned/);
 });
 
 test("suggestModel skips models below the effectiveness floor", async () => {

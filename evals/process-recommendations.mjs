@@ -48,6 +48,7 @@ const INSIGHT_AREAS = {
   "redundant-reads": "compaction",
   "tool-call-friction": "system prompt",
   "context-pressure": "compaction",
+  "context-overflow": "compaction",
   "tests-mostly-failed": "routing",
   "judge-oracle-disagreement": "bench",
   "stable-and-lean": "other",
