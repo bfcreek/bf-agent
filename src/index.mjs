@@ -24,6 +24,7 @@ import {
 import { configureClientModel, modelPromptOverlay } from "./model-tuning.mjs";
 import { OllamaClient } from "./ollama-client.mjs";
 import { ensureProjectIndex } from "./project-index.mjs";
+import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
 
@@ -130,6 +131,28 @@ export {
   OllamaClientError,
 } from "./ollama-client.mjs";
 
+export {
+  importPeerSdk,
+  isProviderClientError,
+  isTransientProviderError,
+  KNOWN_PROVIDERS,
+  normalizeProvider,
+  ProviderClientError,
+} from "./provider-client.mjs";
+
+export {
+  createProviderClient,
+  providerUsesOllamaRouting,
+  shouldRouteOllamaModel,
+} from "./providers/factory.mjs";
+
+export {
+  COPILOT_SUPERVISOR_OVERLAY,
+  createCompletionGuard,
+  createDelegationTracker,
+  registerDelegateCopilotTool,
+} from "./providers/copilot-worker.mjs";
+
 export { createOpenAIServer } from "./openai-server.mjs";
 
 export { changedFilesFromSteps, SessionStore } from "./session-store.mjs";
@@ -207,6 +230,10 @@ export {
  * @param {boolean|string} [options.think] Ollama native thinking mode (default auto).
  * @param {boolean} [options.requireVision] Route to a vision-capable model.
  * @param {{chat: Function}} [options.client] Injectable client (tests, custom backends).
+ * @param {string} [options.provider] ollama|openai|anthropic|copilot (default ollama).
+ * @param {string} [options.apiKey] API key for openai/anthropic peers.
+ * @param {string} [options.supervisorProvider] For provider=copilot.
+ * @param {string} [options.supervisorModel] For provider=copilot.
  */
 export async function createAgent({
   model = "auto",
@@ -229,32 +256,58 @@ export async function createAgent({
   think,
   requireVision = false,
   client,
+  provider = "ollama",
+  apiKey,
+  supervisorProvider,
+  supervisorModel,
 } = {}) {
   let resolvedModel = model;
-  const resolvedClient =
-    client ??
-    new OllamaClient({
+  /** @type {import("./providers/factory.mjs").ProviderSetup|null} */
+  let providerSetup = null;
+  let resolvedClient = client;
+
+  if (!resolvedClient) {
+    providerSetup = await createProviderClient({
+      provider,
+      model,
       baseUrl,
-      model: resolvedModel,
-      ...(numCtx !== undefined ? { numCtx } : {}),
-      ...(think !== undefined ? { think } : {}),
+      apiKey,
+      numCtx,
+      think,
+      supervisorProvider,
+      supervisorModel,
     });
-  if (!client) {
-    try {
-      const routed = await resolveModelAuto({ requested: resolvedModel, client: resolvedClient, requireVision });
-      resolvedModel = routed.model;
-      await configureClientModel(resolvedClient, routed.model);
-    } catch (err) {
-      if (err instanceof ModelRoutingError) throw err;
-      // Ollama unreachable: an explicit, known-capable model may proceed
-      // (the run will surface the connection error); auto cannot.
-      if (resolvedModel === "auto") {
-        throw new ModelRoutingError(
-          `Cannot reach Ollama to auto-select a model (${err?.message ?? err}). Start Ollama or pass an explicit model.`,
-        );
+    resolvedClient = providerSetup.client;
+    if (shouldRouteOllamaModel(providerSetup)) {
+      const routeModel =
+        providerSetup.kind === "nested" ? (supervisorModel ?? "auto") : resolvedModel;
+      try {
+        const routed = await resolveModelAuto({
+          requested: routeModel,
+          client: resolvedClient,
+          requireVision,
+        });
+        resolvedModel = routed.model;
+        resolvedClient.model = routed.model;
+        await configureClientModel(resolvedClient, routed.model);
+      } catch (err) {
+        if (err instanceof ModelRoutingError) throw err;
+        if (routeModel === "auto") {
+          throw new ModelRoutingError(
+            `Cannot reach Ollama to auto-select a model (${err?.message ?? err}). Start Ollama or pass an explicit model.`,
+          );
+        }
+        assertToolCapable(routeModel);
+        if (requireVision) assertVisionCapable(routeModel);
+        resolvedModel = routeModel;
       }
-      assertToolCapable(resolvedModel);
-      if (requireVision) assertVisionCapable(resolvedModel);
+    } else if (!model || model === "auto") {
+      throw new ModelRoutingError(
+        `Provider '${provider}' requires an explicit model (auto-routing is Ollama-only).`,
+      );
+    } else {
+      resolvedModel = model;
+      resolvedClient.model = model;
     }
   }
 
@@ -272,6 +325,26 @@ export async function createAgent({
   for (const tool of tools ?? []) registry.register(tool);
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
 
+  /** @type {import("./agent-loop.mjs").AgentHooks} */
+  let resolvedHooks = hooks ?? {};
+  let nestedOverlay = "";
+  if (providerSetup?.kind === "nested" && typeof providerSetup.applyNested === "function") {
+    const nested = providerSetup.applyNested({
+      registry,
+      hooks: resolvedHooks,
+      workspaceRoot,
+      onDelta,
+      approvalHandler: async (request) => {
+        if (typeof registry.approvalHandler === "function") {
+          return registry.approvalHandler(request);
+        }
+        return true;
+      },
+    });
+    resolvedHooks = nested.hooks ?? resolvedHooks;
+    nestedOverlay = nested.systemOverlay ?? "";
+  }
+
   if (useIndex) {
     try {
       await ensureProjectIndex({ workspaceRoot, client: resolvedClient, embeddingModel });
@@ -284,7 +357,7 @@ export async function createAgent({
     systemPrompt != null
       ? systemPrompt
       : await buildSystemPrompt({
-          basePrompt: DEFAULT_SYSTEM_PROMPT,
+          basePrompt: DEFAULT_SYSTEM_PROMPT + nestedOverlay,
           modelOverlay: modelPromptOverlay(resolvedClient.model),
           workspaceRoot,
           extraContext: formatMcpToolIndex(registry),
@@ -299,12 +372,13 @@ export async function createAgent({
     onStep,
     onDelta,
     compaction,
-    hooks,
+    hooks: resolvedHooks,
   });
   return {
     loop,
     registry,
     client: resolvedClient,
+    provider: providerSetup?.provider ?? provider,
     checkpoints: checkpointStore,
     /** @type {(goal: string, options?: {history?: Array<object>, signal?: AbortSignal, images?: string[]}) => Promise<import("./agent-loop.mjs").AgentRunResult>} */
     run: (goal, options) => loop.run(goal, options),

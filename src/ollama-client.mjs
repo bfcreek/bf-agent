@@ -5,14 +5,18 @@
  */
 
 import { DEFAULT_NUM_CTX, resolveThinkSetting } from "./model-tuning.mjs";
+import { ProviderClientError } from "./provider-client.mjs";
 
 export { DEFAULT_NUM_CTX };
 
-export class OllamaClientError extends Error {
-  constructor(message, { status, cause } = {}) {
-    super(message, cause ? { cause } : undefined);
+/**
+ * Ollama-specific alias of {@link ProviderClientError}. Kept so existing
+ * callers and tests that check `err.name === "OllamaClientError"` keep working.
+ */
+export class OllamaClientError extends ProviderClientError {
+  constructor(message, { status, cause, transient, body } = {}) {
+    super(message, { status, cause, transient, body });
     this.name = "OllamaClientError";
-    this.status = status ?? null;
   }
 }
 
@@ -49,6 +53,14 @@ export class OllamaClient {
     modelOptions,
     fetchImpl,
   } = {}) {
+    /** @type {import("./provider-client.mjs").ProviderCapabilities} */
+    this.capabilities = {
+      supportsTools: true,
+      supportsThinking: true,
+      supportsEmbed: true,
+      supportsListModels: true,
+      messageDialect: "ollama",
+    };
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.model = model;
     /** @type {boolean} True until an explicit numCtx is given; lets configureClientModel size the window. */

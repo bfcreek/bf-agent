@@ -1,8 +1,10 @@
 # Bitfield Agent (`bf-agent`)
 
-Local agent runtime that turns Ollama's completion API into a multi-step agent:
-the model calls tools, observes results, and repeats until the task is done —
-all on this machine. The harness is modeled on Cursor's: a short system
+Local agent runtime that turns a completion API into a multi-step agent:
+the model calls tools, observes results, and repeats until the task is done.
+**Ollama is the default** (free, local). Optional peer SDKs can drive the same
+loop (`openai`, `anthropic`), or nest GitHub Copilot under a supervising loop
+(`--provider copilot`). The harness is modeled on Cursor's: a short system
 prompt plus your rules files, a tool set the model uses to find its own
 context, and a thin loop with hooks where callers add policy.
 
@@ -26,10 +28,12 @@ Product shape:
 ## Requirements
 
 - Node.js 20+
-- [Ollama](https://ollama.com) running locally (default `http://127.0.0.1:11434`)
+- [Ollama](https://ollama.com) running locally (default `http://127.0.0.1:11434`) for the default provider
 - The pinned local model, `ollama pull qwen3-coder:30b` (or the cloud pin, `ollama pull kimi-k2.7-code:cloud`, when there is no GPU)
 
-No npm dependencies — the runtime uses only Node built-ins.
+**Zero runtime dependencies by default** — the Ollama path uses only Node built-ins.
+Optional peer packages (`openai`, `@anthropic-ai/sdk`, `@github/copilot-sdk`) are
+loaded only when you select those providers.
 
 ## Install
 
@@ -73,8 +77,12 @@ Options:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--model <name\|auto>` | `auto` | Ollama model to drive the loop; `auto` picks the best installed model (see below) |
-| `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server |
+| `--provider <name>` | `ollama` | `ollama` \| `openai` \| `anthropic` \| `copilot` — see [Providers](#providers) |
+| `--model <name\|auto>` | `auto` | Model for the active provider; for `ollama`, `auto` picks the best installed model. For `copilot`, this is the Copilot worker model |
+| `--api-key <key>` | env | API key for `openai` / `anthropic` (or `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) |
+| `--supervisor-provider` | `ollama` | With `--provider copilot`: supervisor LLM (`ollama`\|`openai`\|`anthropic`) |
+| `--supervisor-model` | `auto` | Supervisor model when nesting Copilot |
+| `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server (also OpenAI-compatible base URL for `openai`) |
 | `--max-steps <n>` | `100` | Safety cap on model round-trips per turn (the model decides when it is done; this only stops runaways) |
 | `--wall-clock <sec>` | off | Wall-clock budget for the run; the loop wraps up before the deadline instead of being killed |
 | `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
@@ -128,6 +136,32 @@ pre-edit contents are copied under `.halo-agent/checkpoints/<run-id>/` (first
 snapshot per file per run). `bf-agent checkpoints list` shows runs;
 `bf-agent checkpoints restore <run-id>` puts every file in that run back
 (files the run created are deleted). Sessions record the run id.
+
+## Providers
+
+| Provider | Kind | Install (optional peer) | Notes |
+| --- | --- | --- | --- |
+| `ollama` (default) | Thin LLM | none | Auto model routing, embeddings, `--think` / `--num-ctx` |
+| `openai` | Thin LLM | `npm install openai` | Requires `--model` and `OPENAI_API_KEY` |
+| `anthropic` | Thin LLM | `npm install @anthropic-ai/sdk` | Requires `--model` and `ANTHROPIC_API_KEY` |
+| `copilot` | Nested worker | `npm install @github/copilot-sdk` | Supervisor LLM (default Ollama) + `delegate_copilot` tool + completion-guard stop hook |
+
+```powershell
+bf-agent --provider openai --model gpt-5 "summarize this repo"
+bf-agent --provider anthropic --model claude-sonnet-4-5 "list the public API"
+bf-agent --provider copilot "fix the failing test"
+bf-agent --provider copilot --supervisor-provider openai --supervisor-model gpt-5 "refactor auth"
+```
+
+**Copilot nested mode:** the outer loop is a supervisor with full context and
+verify tools. Implementation work should go through `delegate_copilot`; when the
+supervisor claims done without verifying, a stop hook challenges the claim.
+Copilot owns its native tools during delegation — the supervisor should not
+double-drive the same edits.
+
+Paid / IDE multi-backend routing remains **Aura Wire's** job. These providers are
+an optional local SDK path for CLI/SDK users. `bf-agent serve` stays Ollama-backed
+for now.
 
 ## OpenAI-compatible server
 
@@ -557,7 +591,13 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | Path | Purpose |
 | --- | --- |
 | `src/agent-loop.mjs` | Thin Cursor-style loop: model -> tools -> repeat, with hooks, steer/queue, retries, safety caps |
-| `src/ollama-client.mjs` | Thin `/api/chat` client |
+| `src/ollama-client.mjs` | Thin `/api/chat` client (default provider) |
+| `src/provider-client.mjs` | Shared `ProviderClientError` + peer SDK import helper |
+| `src/providers/factory.mjs` | `createProviderClient` (`ollama` / `openai` / `anthropic` / `copilot`) |
+| `src/providers/openai-client.mjs` | Optional `openai` peer adapter |
+| `src/providers/anthropic-client.mjs` | Optional `@anthropic-ai/sdk` peer adapter |
+| `src/providers/copilot-worker.mjs` | Nested `delegate_copilot` + completion guard |
+| `src/providers/message-bridge.mjs` | Loop transcript ↔ OpenAI / Anthropic wire formats |
 | `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
 | `src/context-builder.mjs` | System prompt: instruction files, rule index, git snapshot, environment |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |

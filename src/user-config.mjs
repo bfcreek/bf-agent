@@ -19,7 +19,11 @@ const CONFIG_TEMPLATE = `# Bitfield Agent user configuration
 # Keys match CLI flag names (without --). Command-line flags override these values.
 # Remove or comment out a line to use the built-in default.
 
+# provider: ollama   # ollama | openai | anthropic | copilot
 # model: auto
+# api-key:           # for openai/anthropic (or use env OPENAI_API_KEY / ANTHROPIC_API_KEY)
+# supervisor-provider: ollama   # with provider=copilot
+# supervisor-model: auto
 # base-url: http://127.0.0.1:11434
 # max-steps: ${DEFAULT_MAX_STEPS}
 # num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
@@ -298,6 +302,12 @@ function configKeyToOption(key) {
       return "noIndex";
     case "no-checkpoints":
       return "noCheckpoints";
+    case "api-key":
+      return "apiKey";
+    case "supervisor-provider":
+      return "supervisorProvider";
+    case "supervisor-model":
+      return "supervisorModel";
     default:
       return key;
   }
@@ -380,6 +390,10 @@ export function openConfigInEditor(configPath) {
 export function getBuiltinDefaults() {
   return {
     model: "auto",
+    provider: "ollama",
+    apiKey: undefined,
+    supervisorProvider: undefined,
+    supervisorModel: undefined,
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: DEFAULT_MAX_STEPS,
     numCtx: "auto",

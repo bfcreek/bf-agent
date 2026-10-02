@@ -26,6 +26,8 @@ import {
 import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./model-tuning.mjs";
 import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
+import { KNOWN_PROVIDERS, ProviderClientError } from "./provider-client.mjs";
+import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { SessionStore } from "./session-store.mjs";
 import { parseAutoApproveSpec, ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
@@ -108,6 +110,35 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       }
       case "--base-url":
         options.baseUrl = value(arg, ++i) ?? options.baseUrl;
+        break;
+      case "--provider": {
+        const raw = value(arg, ++i);
+        if (raw !== undefined) {
+          const name = String(raw).trim().toLowerCase();
+          if (KNOWN_PROVIDERS.includes(name)) options.provider = name;
+          else options.errors.push(`--provider must be one of: ${KNOWN_PROVIDERS.join(", ")}.`);
+        }
+        break;
+      }
+      case "--api-key":
+        options.apiKey = value(arg, ++i) ?? options.apiKey;
+        break;
+      case "--supervisor-provider": {
+        const raw = value(arg, ++i);
+        if (raw !== undefined) {
+          const name = String(raw).trim().toLowerCase();
+          if (name === "copilot") {
+            options.errors.push("--supervisor-provider cannot be 'copilot'.");
+          } else if (KNOWN_PROVIDERS.includes(name)) {
+            options.supervisorProvider = name;
+          } else {
+            options.errors.push(`--supervisor-provider must be one of: ollama, openai, anthropic.`);
+          }
+        }
+        break;
+      }
+      case "--supervisor-model":
+        options.supervisorModel = value(arg, ++i) ?? options.supervisorModel;
         break;
       case "--max-steps": {
         const raw = value(arg, ++i);
@@ -289,12 +320,20 @@ Config:
   Keys match CLI flag names (without --). Command-line flags override config values.
 
 Options:
-  --model <name|auto|tier>  Ollama model. Default auto: with models.yaml, picks the band
-                       for --tier (default from models.yaml); without models.yaml, strongest
-                       installed model with thinking + tools that fits in memory
+  --provider <name>    LLM / nested worker: ${KNOWN_PROVIDERS.join("|")} (default ollama).
+                       openai/anthropic need optional peer SDKs; copilot nests GitHub Copilot
+                       under a supervisor LLM (default ollama) via delegate_copilot
+  --api-key <key>      API key for openai/anthropic (else OPENAI_API_KEY / ANTHROPIC_API_KEY)
+  --supervisor-provider <name>  For --provider copilot: ollama|openai|anthropic (default ollama)
+  --supervisor-model <name>     Supervisor model when using nested Copilot
+  --model <name|auto|tier>  Model for the active provider. For ollama, default auto: with
+                       models.yaml, picks the band for --tier; without models.yaml, strongest
+                       installed model with thinking + tools that fits in memory. For
+                       openai/anthropic, pass an explicit model. For copilot, --model is the
+                       Copilot worker model; supervisor uses --supervisor-model (ollama auto)
   --tier-preset <name> Preset for model routing: ${TIER_PRESET_HELP}
   --tier <n>           Task difficulty 0–6 for model routing (default from models.yaml)
-  --base-url <url>     Ollama server (default http://127.0.0.1:11434)
+  --base-url <url>     Ollama server (default http://127.0.0.1:11434); also OpenAI-compatible base URL
   --max-steps <n>      Max model round-trips (default ${DEFAULT_MAX_STEPS})
   --num-ctx <n|auto>   Context window in tokens sent to Ollama. auto (default) sizes it to the
                        model and this machine's memory: floor ${DEFAULT_NUM_CTX}, ceiling ${MAX_AUTO_NUM_CTX}
@@ -337,6 +376,8 @@ Examples:
   bf-agent models config edit
   bf-agent models --json --base-url http://127.0.0.1:11434
   bf-agent "hard refactor" --tier 4 --tier-preset hybrid
+  bf-agent --provider openai --model gpt-5 "summarize this repo"
+  bf-agent --provider copilot "fix the failing test"
   bf-agent "frontier coding" --tier 5 --tier-preset cloud-max
   bf-agent "search my notes for X" --mcp "npx -y some-mcp-server"
   bf-agent "what is the latest Node.js LTS version?"
@@ -694,54 +735,107 @@ async function main() {
   applyTierPresetPolicy(options, effectivePreset, { thinkExplicit: options.thinkExplicit === true });
   const presetPolicy = getTierPresetPolicy(effectivePreset);
 
-  const client = new OllamaClient({
-    baseUrl: options.baseUrl,
-    model: options.model,
-    numCtx: options.numCtx,
-    think: options.think,
-  });
+  const provider = options.provider ?? "ollama";
+  if (options.serve && provider !== "ollama") {
+    console.error("bf-agent serve currently supports --provider ollama only.");
+    process.exitCode = 1;
+    return;
+  }
+
+  let providerSetup;
+  try {
+    providerSetup = await createProviderClient({
+      provider,
+      model: options.model,
+      baseUrl: options.baseUrl,
+      apiKey: options.apiKey,
+      numCtx: options.numCtx,
+      think: options.think,
+      supervisorProvider: options.supervisorProvider,
+      supervisorModel: options.supervisorModel,
+    });
+  } catch (err) {
+    console.error(err instanceof ProviderClientError || err instanceof OllamaClientError ? err.message : String(err?.message ?? err));
+    process.exitCode = 1;
+    return;
+  }
+
+  const client = providerSetup.client;
+  /** Model name used for prompt overlays / logging (supervisor when nested). */
+  let loopModel = client.model ?? options.model;
+  /** Copilot worker model stays on options.model when nested. */
+  const workerModel = providerSetup.kind === "nested" ? options.model : null;
+
+  if (provider !== "ollama" && providerSetup.kind === "llm") {
+    if (options.thinkExplicit && !options.quiet) {
+      console.error(`[provider] --think is Ollama-only; ignored for ${provider}.`);
+    }
+    if (options.numCtx !== "auto" && options.numCtx != null && !options.quiet) {
+      console.error(`[provider] --num-ctx is Ollama-only; ignored for ${provider}.`);
+    }
+  }
 
   // Route to an installed, suitable model up front; skip silently when Ollama is
   // unreachable — the run itself will surface that error clearly.
-  try {
-    if (options.model === "auto" && !modelsConfigExists && !options.tierPreset && !presetPolicy.cloudOnly) {
-      const routed = await resolveModelAuto({ requested: options.model, client });
-      for (const warning of routed.warnings ?? []) console.error(warning);
-      options.model = routed.model;
-      await configureClientModel(client, routed.model);
-    } else {
-      const routed = await resolveCliModel(options, client, modelsConfigValues, modelsConfigExists);
-      for (const warning of routed.warnings) console.error(warning);
-      options.model = routed.model;
-      await configureClientModel(client, routed.model);
-    }
-    if (client.numCtxAuto && !options.quiet) {
-      console.error(`[context] ${client.numCtx} tokens — ${client.numCtxReason ?? "auto"}`);
-    }
-    for (const warning of client.numCtxWarnings ?? []) console.error(`[context] ${warning}`);
-  } catch (err) {
-    if (err instanceof ModelRoutingError) {
-      console.error(err.message);
-      process.exitCode = 1;
-      return;
-    }
-    if (options.model !== "auto") {
-      try {
-        assertToolCapable(options.model);
-        await configureClientModel(client, options.model);
-      } catch (routingErr) {
-        console.error(routingErr.message);
+  if (shouldRouteOllamaModel(providerSetup)) {
+    const routeOptions = { ...options, model: providerSetup.kind === "nested" ? (options.supervisorModel ?? "auto") : options.model };
+    try {
+      if (routeOptions.model === "auto" && !modelsConfigExists && !options.tierPreset && !presetPolicy.cloudOnly) {
+        const routed = await resolveModelAuto({ requested: routeOptions.model, client });
+        for (const warning of routed.warnings ?? []) console.error(warning);
+        loopModel = routed.model;
+        client.model = routed.model;
+        if (providerSetup.kind !== "nested") options.model = routed.model;
+        await configureClientModel(client, routed.model);
+      } else {
+        const routed = await resolveCliModel(routeOptions, client, modelsConfigValues, modelsConfigExists);
+        for (const warning of routed.warnings) console.error(warning);
+        loopModel = routed.model;
+        client.model = routed.model;
+        if (providerSetup.kind !== "nested") options.model = routed.model;
+        await configureClientModel(client, routed.model);
+      }
+      if (client.numCtxAuto && !options.quiet) {
+        console.error(`[context] ${client.numCtx} tokens — ${client.numCtxReason ?? "auto"}`);
+      }
+      for (const warning of client.numCtxWarnings ?? []) console.error(`[context] ${warning}`);
+    } catch (err) {
+      if (err instanceof ModelRoutingError) {
+        console.error(err.message);
         process.exitCode = 1;
         return;
       }
+      if (routeOptions.model !== "auto") {
+        try {
+          assertToolCapable(routeOptions.model);
+          await configureClientModel(client, routeOptions.model);
+          loopModel = routeOptions.model;
+        } catch (routingErr) {
+          console.error(routingErr.message);
+          process.exitCode = 1;
+          return;
+        }
+      }
+      // Ollama unreachable — fall through; the run itself will surface that error.
     }
-    // Ollama unreachable — fall through; the run itself will surface that error.
+  } else if (!options.model || options.model === "auto") {
+    console.error(`Provider '${provider}' requires an explicit --model (auto-routing is Ollama-only).`);
+    process.exitCode = 1;
+    return;
+  } else {
+    loopModel = options.model;
+    client.model = options.model;
+  }
+
+  const useIndex = !options.noIndex && typeof client.embed === "function";
+  if (!options.noIndex && !useIndex && provider !== "ollama" && !options.quiet) {
+    console.error(`[provider] project index skipped (${provider} has no embeddings API).`);
   }
 
   const checkpointStore = options.noCheckpoints ? undefined : new CheckpointStore({ workspaceRoot: options.cwd });
   const registry = registerBuiltinTools(new ToolRegistry(), {
     workspaceRoot: options.cwd,
-    searchClient: options.noIndex ? undefined : client,
+    searchClient: useIndex ? client : undefined,
     embeddingModel: options.embedModel,
     checkpoints: checkpointStore,
   });
@@ -766,7 +860,7 @@ async function main() {
     }
   }
 
-  if (!options.noIndex) {
+  if (useIndex) {
     try {
       await ensureProjectIndex({
         workspaceRoot: options.cwd,
@@ -779,9 +873,36 @@ async function main() {
     }
   }
 
+  /** @type {import("./agent-loop.mjs").AgentHooks} */
+  let loopHooks = {};
+  let nestedOverlay = "";
+  if (providerSetup.kind === "nested" && typeof providerSetup.applyNested === "function") {
+    const nested = providerSetup.applyNested({
+      registry,
+      hooks: loopHooks,
+      workspaceRoot: options.cwd,
+      onDelta: options.quiet ? undefined : (d) => process.stderr.write(d),
+      // Approval is wired later; resolve lazily so ask-mode prompts still apply.
+      approvalHandler: async (request) => {
+        if (typeof registry.approvalHandler === "function") {
+          return registry.approvalHandler(request);
+        }
+        return true;
+      },
+    });
+    loopHooks = nested.hooks ?? loopHooks;
+    nestedOverlay = nested.systemOverlay ?? "";
+    if (!options.quiet) {
+      console.error(
+        `[provider] copilot nested | supervisor=${providerSetup.supervisorProvider}:${loopModel}` +
+          (workerModel && workerModel !== "auto" ? ` | worker model=${workerModel}` : ""),
+      );
+    }
+  }
+
   const systemPrompt = await buildSystemPrompt({
-    basePrompt: DEFAULT_SYSTEM_PROMPT,
-    modelOverlay: modelPromptOverlay(options.model),
+    basePrompt: DEFAULT_SYSTEM_PROMPT + nestedOverlay,
+    modelOverlay: modelPromptOverlay(loopModel),
     workspaceRoot: options.cwd,
     extraContext: formatMcpToolIndex(registry),
   });
@@ -886,6 +1007,7 @@ async function main() {
     onStep,
     compaction: {},
     wallClockMs: resolveWallClockMs(options),
+    hooks: loopHooks,
   });
 
   const onKillSignal = () => {

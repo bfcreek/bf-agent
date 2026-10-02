@@ -26,6 +26,7 @@ Bitfield Agent extensions: editors point at Wire's `/v1` door and Wire routes he
 | 12 | **Model routing** | done (v2) | Tool/thinking/vision detection via `/api/show`; `auto` picks the strongest installed model that fits (VRAM-aware), cloud only when no local model qualifies; tier presets and `models.yaml` bands. Routing happens once at startup — no mid-run escalation ladder |
 | 13 | **RAG / memory** | resolved (no build) | Not Bitfield Agent's job: internal state is covered by compaction (7) + sessions (9); corpus RAG is Terran's domain via Aura Wire / MCP. Web facts use builtin `web_search` (DuckDuckGo). Local project index remains as the `search_project` tool; the model calls it when useful |
 | 14 | **MCP** | done (v2) | Stdio MCP client (initialize, tools/list, tools/call); `--mcp "<command>"` attaches servers. Tools are listed by name + one line in the prompt and reached through `describe_tool` / `call_mcp_tool`, so schemas cost nothing until used (`registerMcpTools(..., { lazy: false })` for the eager `mcp_<name>` bridge) |
+| 15 | **Provider clients / Copilot supervisor** | done (v1) | `--provider ollama\|openai\|anthropic\|copilot`. Ollama remains zero-dep default; openai/anthropic load optional peer SDKs as thin LLM adapters; copilot nests `@github/copilot-sdk` under a supervisor loop (`delegate_copilot` + completion-guard stop hook). Does **not** replace Aura Wire for routed paid `/v1` / IDE. `serve` stays Ollama-backed |
 
 ## Compatibility commitments
 

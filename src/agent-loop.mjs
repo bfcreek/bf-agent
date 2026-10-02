@@ -17,6 +17,7 @@
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
 import { minimalThinkSetting } from "./model-tuning.mjs";
+import { isProviderClientError, isTransientProviderError } from "./provider-client.mjs";
 
 /**
  * Default per-call output cap (`num_predict`), thinking included. Equal to
@@ -177,8 +178,8 @@ const TOOL_CALL_PARSE_NUDGE = [
 export class AgentLoop {
   /**
    * @param {object} options
-   * @param {{chat: Function, chatStream?: Function}} options.client Ollama client
-   *   (or any object with a compatible `chat({messages, tools, signal})`).
+   * @param {{chat: Function, chatStream?: Function}} options.client LLM client
+   *   (Ollama or any object with a compatible `chat({messages, tools, signal})`).
    * @param {import("./tool-registry.mjs").ToolRegistry} options.registry
    * @param {string} [options.systemPrompt]
    * @param {number} [options.maxSteps] Safety cap on model round-trips per turn.
@@ -416,7 +417,7 @@ export class AgentLoop {
         // Startup failures (no work done yet) propagate so callers can map
         // them to exit codes. Mid-run failures end as a failed run with the
         // steps preserved for the session log.
-        if (err?.name !== "OllamaClientError" || !steps.some((s) => s.kind === "tool-calls")) {
+        if (!isProviderClientError(err) || !steps.some((s) => s.kind === "tool-calls")) {
           throw err;
         }
         const error = `model call failed: ${String(err.message ?? err).slice(0, 300)}`;
@@ -601,10 +602,10 @@ export class AgentLoop {
   }
 }
 
-/** Ollama 500 when the model contaminates the tool-call channel with prose. */
+/** Provider 500 when the model contaminates the tool-call channel with prose. */
 export function isToolCallParseError(err) {
   return (
-    err?.name === "OllamaClientError" &&
+    isProviderClientError(err) &&
     typeof err.status === "number" &&
     err.status >= 500 &&
     /error parsing tool call/i.test(String(err.message ?? ""))
@@ -632,8 +633,7 @@ async function chatWithRetry(client, request) {
     } catch (err) {
       lastErr = err;
       if (err?.name === "AbortError" || request.signal?.aborted) throw err;
-      if (err?.name !== "OllamaClientError") throw err;
-      if (typeof err.status === "number" && err.status < 500) throw err;
+      if (!isTransientProviderError(err)) throw err;
       if (isToolCallParseError(err)) throw err;
       if (attempt >= TRANSIENT_RETRY_DELAYS_MS.length) throw err;
       await new Promise((resolve) => setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[attempt]));

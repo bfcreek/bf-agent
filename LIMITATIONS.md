@@ -5,9 +5,10 @@ local agent (via Aura Wire) or running it standalone.
 
 ## What it is
 
-- A **local agent runtime** for Ollama: tool calls → observe → repeat until the model stops, in a thin Cursor-style harness.
-- **CLI, SDK, and `serve`** (OpenAI-compatible `/v1` facade).
-- **Free** — you pay only for your hardware and whichever Ollama model you run.
+- A **local-first agent runtime** (Ollama by default): tool calls → observe → repeat until the model stops, in a thin Cursor-style harness.
+- Optional **peer SDK providers** (`openai`, `anthropic`) and **nested Copilot supervision** (`--provider copilot`) when those packages are installed.
+- **CLI, SDK, and `serve`** (OpenAI-compatible `/v1` facade; serve remains Ollama-backed).
+- **Free on Ollama** — you pay only for your hardware and whichever Ollama model you run; other providers bill through their own accounts.
 
 ## What it is not
 
@@ -15,7 +16,7 @@ local agent (via Aura Wire) or running it standalone.
 - **Not frontier-class** on hard multi-file tasks — quality depends heavily on your local model.
 - **Not a sandbox** — tools are workspace-scoped, but the agent can still write and run commands in that workspace when unattended (`serve` mode, `--mode agent`).
 - **Not RAG/memory** — private corpora stay with Terran (via Aura Wire / MCP); sessions + compaction handle conversation state. Public web lookup is built in as `web_search`.
-- **Not a supervisor** — the loop does not plan for the model, grade its work, nudge it, or swap models mid-run. A weak model that stops early stops early; put that policy in rules files or SDK hooks (`stop`, `beforeToolCall`) rather than expecting the runtime to compensate.
+- **Not a general supervisor** — the loop does not plan for the model, grade its work, or swap models mid-run. Nested Copilot mode adds a best-effort completion guard (challenge false “done” / missing verify), not a sandbox or proof of correctness. A weak model that stops early still stops early; put stronger policy in rules files or SDK hooks (`stop`, `beforeToolCall`).
 - **Not small-context** — the agent needs at least a 16k window and works best at 32k+ for thinking models (`docs/context-spec.md`). Below the floor Ollama silently drops the system prompt and tool schemas; at the floor a thinking model can spend the whole window reasoning and emit nothing. `--num-ctx auto` sizes the window to your memory, and a window under the spec is reported at startup, but a machine with no room after the model's weights gets the floor and a warning, not a fix.
 
 ## Model quality
@@ -51,6 +52,7 @@ Bitfield Agent is designed to pair with **Aura Wire**:
 - Wire routes IDE traffic; Bitfield Agent is the **built-in local tier** for simple work.
 - Wire reads `../halo-agent-benchmark/local/capability.json` (from a gated bench run) to set routing defaults.
 - Complex tasks should be routed to cloud providers by Wire; the runtime itself does not escalate mid-run.
+- Optional CLI `--provider` peers are a separate local SDK path — they do not replace Wire's `/v1` routing, compression, or guardrails.
 
 ## Reporting issues
 
