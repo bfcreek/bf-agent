@@ -71,6 +71,8 @@ const TOOL_CAPABLE = [
   /^granite3/,
   /^nemotron/,
   /^smollm2/,
+  // Pinned cloud line (PINNED_MODELS.cloud / tier presets); matches CODING_TUNED.
+  /^kimi-k[\d.]+-code/,
 ];
 
 /** Families known to lack tool calling (vision, embedding, legacy chat). */

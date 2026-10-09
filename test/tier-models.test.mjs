@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { isLikelyToolCapable } from "../src/model-routing.mjs";
 import {
   applyTierPresetPolicy,
   coerceTierPresetModel,
@@ -70,6 +71,24 @@ test("TIER_PRESETS include vision models on every band", () => {
       assert.ok(band.vision, `${name} band missing vision: ${JSON.stringify(band)}`);
     }
   }
+});
+
+test("TIER_PRESETS primary and vision models are all tool-capable", () => {
+  for (const [name, bands] of Object.entries(TIER_PRESETS)) {
+    for (const band of bands) {
+      for (const key of ["model", "vision"]) {
+        const model = band[key];
+        if (!model) continue;
+        assert.equal(
+          isLikelyToolCapable(model),
+          true,
+          `${name} ${key} '${model}' must be a known tool-capable family`,
+        );
+      }
+    }
+  }
+  assert.equal(isLikelyToolCapable(PINNED_MODELS.local), true);
+  assert.equal(isLikelyToolCapable(PINNED_MODELS.cloud), true);
 });
 
 test("parseTierPresetArg accepts cloud-max and lists it in help", () => {

@@ -1,6 +1,6 @@
 {
   "name": "@bitfieldcreek/bf-agent",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Local-first agent runtime (Ollama default): plan/act/observe loop, tools, optional peer providers, and an OpenAI-compatible facade.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",

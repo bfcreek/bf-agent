@@ -45,6 +45,7 @@ test("known tool-capable families are detected", () => {
     "mistral-nemo:latest",
     "devstral-small-2:latest",
     "gpt-oss:20b",
+    "kimi-k2.7-code:cloud",
   ]) {
     assert.equal(isLikelyToolCapable(name), true, name);
   }
