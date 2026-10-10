@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_STEPS,
   DEFAULT_SYSTEM_PROMPT,
   isToolCallParseError,
+  incompleteToolCallText,
   parseTextToolCall,
   repairToolCallParseError,
   toolResultContent,
@@ -557,6 +558,54 @@ test("parseTextToolCall reads qwen3-coder's XML form and the name+arguments JSON
   assert.equal(parseTextToolCall("<function=nope><parameter=x>1</parameter></function>", shellSchemas()), null);
   assert.equal(parseTextToolCall('{"command":"pwd"}', shellSchemas()), null);
   assert.equal(parseTextToolCall("Done. <function=read_file><parameter=path>a</parameter></function>", shellSchemas()), null);
+});
+
+test("incompleteToolCallText is an unclosed marker, not a balanced example", () => {
+  assert.equal(
+    incompleteToolCallText("First, I'll create the product controller with proper CRUD operations:<tool_call>"),
+    true,
+  );
+  assert.equal(incompleteToolCallText("<function=read_file>\n<parameter=path>\na.ts"), true);
+  assert.equal(
+    incompleteToolCallText("<tool_call><function=read_file><parameter=path>a.ts</parameter></function></tool_call>"),
+    false,
+  );
+  assert.equal(incompleteToolCallText("Use a </tool_call> only after <tool_call>."), false);
+  assert.equal(incompleteToolCallText("I'll read the file next."), false);
+});
+
+test("a reply that ends on an unclosed tool_call token is retried, not accepted as final", async () => {
+  const requests = [];
+  const client = {
+    model: "qwen3-coder:30b",
+    async chat(request) {
+      requests.push(structuredClone(request.messages));
+      if (requests.length === 1) {
+        return {
+          message: {
+            role: "assistant",
+            content: "First, I'll create the product controller with proper CRUD operations:<tool_call>",
+          },
+          raw: { done_reason: "stop" },
+        };
+      }
+      return { message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] }, raw: {} };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 3 });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.steps[0].kind, "empty");
+  assert.equal(result.steps[0].truncated, true);
+  assert.match(result.steps[0].content, /<tool_call>/);
+  assert.match(requests[1].at(-1).content, /started a tool call/);
+  assert.ok(
+    !requests[1].some((m) => m.role === "assistant" && /<tool_call>/.test(String(m.content ?? ""))),
+    "the cut-off call is not re-sent",
+  );
+  assert.equal(result.steps[1].kind, "tool-calls");
+  assert.equal(result.truncatedTurns, 1);
 });
 
 function readSchema() {

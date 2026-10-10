@@ -97,6 +97,16 @@ export const TRUNCATED_RETRY_PROMPT =
   "Do not start over and do not apologize: keep reasoning brief and take the next concrete step now by calling a tool " +
   "(for example, write the file you were working on with write_file, then run it). " +
   "Only if the task needs no tool at all, give the answer in plain text.";
+/**
+ * Sent when the model opened a tool-call marker (`<tool_call>`, `<function=`)
+ * and stopped before the call was complete. `done_reason` is often `stop`
+ * here — the marker itself is the ending token — so this is not the output
+ * limit path. The partial text is dropped; keeping it would end the turn.
+ */
+export const INCOMPLETE_TOOL_CALL_PROMPT =
+  "Your last response started a tool call but the call was cut off before it could run. " +
+  "Do not start over and do not apologize: call the tool now using native tool calling, with short arguments. " +
+  "Do not write <tool_call> or <function=...> as message text.";
 
 /**
  * Wall-clock budget policy (only when `wallClockMs` is set): stop the loop a
@@ -441,14 +451,21 @@ export class AgentLoop {
       stepIndex += 1;
 
       let toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      // A call cut off by the output limit has unusable arguments. Drop it
+      // and re-ask instead of executing a half-built call.
+      if (truncated && toolCalls.length > 0) toolCalls = [];
 
       if (toolCalls.length === 0) {
         const text = textOf(message.content).trim();
+        // An opening `<tool_call>` / `<function=` with no close means the
+        // model stopped on the tool-call token (often `done_reason: stop`,
+        // not `length`). That is not an answer.
+        const incomplete = incompleteToolCallText(text);
         // A tool call the model wrote into its text instead of the tool-call
         // channel (qwen3-coder's `<function=…>` form, or a name+arguments JSON
         // object). Same class of failure as an Ollama parse error: recover it
         // rather than accept it as the final answer.
-        const textCall = text && !truncated ? parseTextToolCall(text, tools) : null;
+        const textCall = text && !truncated && !incomplete ? parseTextToolCall(text, tools) : null;
         if (textCall) {
           record({
             index,
@@ -460,27 +477,37 @@ export class AgentLoop {
           });
           messages[messages.length - 1] = { role: "assistant", content: "", tool_calls: [{ function: textCall }] };
           toolCalls = [{ function: textCall }];
-        } else if (!text || truncated) {
-          // Nothing actionable: no text at all, or text cut off by the output
-          // limit before it reached a tool call (a cut-off answer is not an
-          // answer — it is usually a script or a data dump the model should
-          // have written to a file).
+        } else if (!text || truncated || incomplete) {
+          // Nothing actionable: no text at all, text cut off by the output
+          // limit, or a tool call that stopped on its opening token. A
+          // cut-off answer is not an answer — it is usually a script, a data
+          // dump, or a call the model should have emitted natively.
           emptyRetries += 1;
-          if (truncated) truncatedTurns += 1;
+          if (truncated || incomplete) truncatedTurns += 1;
           // Empty turns are model round-trips too; record them so the trace
           // shows where the time and tokens went.
-          record({ index, kind: "empty", content: text.slice(0, 500), toolCalls: [], ...turnMeta });
+          record({
+            index,
+            kind: "empty",
+            content: text.slice(0, 500),
+            toolCalls: [],
+            ...turnMeta,
+            ...(incomplete ? { truncated: true } : {}),
+          });
           if (emptyRetries <= MAX_EMPTY_RETRIES) {
-            if (truncated) {
-              // The model ran out of output budget mid-reasoning. Its partial
-              // thinking never reached an action, so it is dead weight: keeping
-              // it would inflate the token estimate (forcing a compaction whose
-              // summarizer then chokes on the same text) and would seed the
-              // retry with the loop that overran. Drop it and re-ask with the
-              // cheapest thinking the model honors so the budget goes to the
-              // action. One-shot: the override applies to the next call only.
+            if (truncated || incomplete) {
+              // The partial never reached an action, so it is dead weight:
+              // keeping it would inflate the token estimate (forcing a
+              // compaction whose summarizer then chokes on the same text)
+              // and would seed the retry with the loop that overran. Drop it
+              // and re-ask with the cheapest thinking the model honors so the
+              // budget goes to the action. One-shot: the override applies to
+              // the next call only.
               messages.pop();
-              messages.push({ role: "user", content: TRUNCATED_RETRY_PROMPT });
+              messages.push({
+                role: "user",
+                content: incomplete && !truncated ? INCOMPLETE_TOOL_CALL_PROMPT : TRUNCATED_RETRY_PROMPT,
+              });
               nextThink = minimalThinkSetting(this.client?.model);
             } else {
               messages.push({ role: "user", content: EMPTY_RETRY_PROMPT });
@@ -493,7 +520,9 @@ export class AgentLoop {
             stopReason: "empty",
             error: truncated
               ? "model output was cut off by the context window before acting, repeatedly"
-              : "model returned empty responses repeatedly",
+              : incomplete
+                ? "model started a tool call but the call was cut off, repeatedly"
+                : "model returned empty responses repeatedly",
           });
         }
       }
@@ -710,6 +739,25 @@ function uniqueToolForArgs(args, tools) {
  * @param {Array<object>} tools Schemas in the OpenAI function shape.
  * @returns {{name: string, arguments: object}|null}
  */
+/**
+ * True when assistant text opened a tool-call marker and never closed it.
+ * A balanced example inside prose is not incomplete. An unclosed
+ * `<tool_call>`, `<function=`, or `<parameter=` is: the model stopped on
+ * the call token and the body never arrived.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function incompleteToolCallText(text) {
+  const body = String(text ?? "");
+  if (!body) return false;
+  const count = (re) => (body.match(re) || []).length;
+  if (count(/<tool_call\b/g) > count(/<\/tool_call>/g)) return true;
+  if (count(/<function=/g) > count(/<\/function>/g)) return true;
+  if (count(/<parameter=/g) > count(/<\/parameter>/g)) return true;
+  return false;
+}
+
 export function parseTextToolCall(text, tools) {
   const body = String(text ?? "").trim();
   if (!body || body.length > 20_000) return null;

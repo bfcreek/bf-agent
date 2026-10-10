@@ -65,6 +65,34 @@ test("OpenAIClient maps loop tool transcript and returns loop dialect", async ()
   assert.equal(raw.eval_count, 5);
 });
 
+test("OpenAIClient maps finish_reason length onto done_reason", async () => {
+  const client = new OpenAIClient({
+    sdk: fakeSdk(async () => ({
+      choices: [{ finish_reason: "length", message: { role: "assistant", content: "partial" } }],
+      usage: { prompt_tokens: 2, completion_tokens: 8 },
+    })),
+    model: "gpt-5",
+  });
+  const { raw } = await client.chat({ messages: [{ role: "user", content: "go" }] });
+  assert.equal(raw.done_reason, "length");
+  assert.equal(raw.eval_count, 8);
+});
+
+test("OpenAIClient stream maps finish_reason length onto done_reason", async () => {
+  async function* chunks() {
+    yield { choices: [{ delta: { content: "ops:<tool_call>" }, finish_reason: null }] };
+    yield { choices: [{ delta: {}, finish_reason: "length" }], usage: { prompt_tokens: 3, completion_tokens: 12 } };
+  }
+  const client = new OpenAIClient({
+    sdk: fakeSdk(async () => chunks()),
+    model: "gpt-5",
+  });
+  const { message, raw } = await client.chatStream({ messages: [{ role: "user", content: "go" }] });
+  assert.match(message.content, /<tool_call>/);
+  assert.equal(raw.done_reason, "length");
+  assert.equal(raw.eval_count, 12);
+});
+
 test("OpenAIClient rejects model auto", async () => {
   const client = new OpenAIClient({
     sdk: fakeSdk(async () => ({})),

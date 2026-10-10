@@ -1,0 +1,37 @@
+{
+  "voice": "en-US-AndrewNeural",
+  "clips": [
+    {
+      "id": "01-one-command",
+      "phase": "type-cmd",
+      "offsetMs": 0,
+      "text": "One command. Bitfield Agent reads the project, writes the code and the tests, and runs them until they pass.",
+      "file": "narration/01-one-command.mp3",
+      "durationMs": 7340
+    },
+    {
+      "id": "02-every-step",
+      "phase": "run",
+      "offsetMs": 5200,
+      "text": "Every step is logged. When a test fails, it reads the error, edits the file, and runs the tests again.",
+      "file": "narration/02-every-step.mp3",
+      "durationMs": 7220
+    },
+    {
+      "id": "03-run-it-yourself",
+      "phase": "type-test",
+      "offsetMs": 0,
+      "text": "Then you run the tests yourself.",
+      "file": "narration/03-run-it-yourself.mp3",
+      "durationMs": 1940
+    },
+    {
+      "id": "04-close",
+      "phase": "end",
+      "offsetMs": 200,
+      "text": "Bitfield Agent. A local coding agent, free for personal use.",
+      "file": "narration/04-close.mp3",
+      "durationMs": 4700
+    }
+  ]
+}

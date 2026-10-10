@@ -1,0 +1,128 @@
+{
+  "product": "Bitfield Agent",
+  "concept": "Real bf-agent session in a terminal: one command, the logged steps, then npm test passing.",
+  "landingUrl": "https://www.bitfieldcreek.com/bf-agent",
+  "session": {
+    "source": "../../../sample-out.txt",
+    "copy": "session.txt",
+    "note": "Output is unedited. Long step lines are clipped to the terminal width; the prompt path is shown once as PS D:\\source\\repos\\bf-order-api>."
+  },
+  "ratios": [
+    {
+      "id": "16x9",
+      "width": 1920,
+      "height": 1080,
+      "poster": "posters/terminal-16x9.png",
+      "video": "videos/terminal-16x9.mp4",
+      "gif": "gifs/terminal-16x9.gif",
+      "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
+    },
+    {
+      "id": "1x1",
+      "width": 1080,
+      "height": 1080,
+      "poster": "posters/terminal-1x1.png",
+      "video": "videos/terminal-1x1.mp4",
+      "gif": "gifs/terminal-1x1.gif",
+      "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
+    },
+    {
+      "id": "2x3",
+      "width": 1080,
+      "height": 1620,
+      "poster": "posters/terminal-2x3.png",
+      "video": "videos/terminal-2x3.mp4",
+      "gif": "gifs/terminal-2x3.gif",
+      "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
+    },
+    {
+      "id": "4x3",
+      "width": 1440,
+      "height": 1080,
+      "poster": "posters/terminal-4x3.png",
+      "video": "videos/terminal-4x3.mp4",
+      "gif": "gifs/terminal-4x3.gif",
+      "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
+    }
+  ],
+  "video": {
+    "fps": 24,
+    "durationMs": 32090,
+    "phases": [
+      {
+        "id": "idle",
+        "startMs": 0,
+        "endMs": 700
+      },
+      {
+        "id": "type-cmd",
+        "startMs": 700,
+        "endMs": 5700
+      },
+      {
+        "id": "run",
+        "startMs": 5700,
+        "endMs": 21400
+      },
+      {
+        "id": "idle-2",
+        "startMs": 21400,
+        "endMs": 22100
+      },
+      {
+        "id": "type-test",
+        "startMs": 22100,
+        "endMs": 23360
+      },
+      {
+        "id": "test-output",
+        "startMs": 23360,
+        "endMs": 26490
+      },
+      {
+        "id": "end",
+        "startMs": 26490,
+        "endMs": 32090
+      }
+    ],
+    "narration": [
+      {
+        "file": "narration/01-one-command.mp3",
+        "startMs": 700,
+        "durationMs": 7340,
+        "phase": "type-cmd"
+      },
+      {
+        "file": "narration/02-every-step.mp3",
+        "startMs": 10900,
+        "durationMs": 7220,
+        "phase": "run"
+      },
+      {
+        "file": "narration/03-run-it-yourself.mp3",
+        "startMs": 22100,
+        "durationMs": 1940,
+        "phase": "type-test"
+      },
+      {
+        "file": "narration/04-close.mp3",
+        "startMs": 26690,
+        "durationMs": 4700,
+        "phase": "end"
+      }
+    ],
+    "narrationTrack": "narration/terminal.m4a",
+    "endCaption": "A local coding agent. Free for personal use."
+  },
+  "gif": {
+    "fps": 12,
+    "maxSide": 800,
+    "note": "Silent, looping, derived from the matching video."
+  },
+  "claims": [
+    "Local Ollama is the default. Running on local models costs nothing.",
+    "Free for personal, non-commercial use. Do not say it is free for business.",
+    "The session shown used a cloud model via Ollama (see [context] line); say 'local by default', not 'ran locally'.",
+    "Do not quote benchmark scores or mock dollar savings."
+  ]
+}

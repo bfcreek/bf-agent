@@ -86,15 +86,17 @@ export class OpenAIClient {
       throw mapOpenAIError(err);
     }
 
-    const choice = completion?.choices?.[0]?.message;
-    if (!choice) {
+    const choice = completion?.choices?.[0];
+    if (!choice?.message) {
       throw new ProviderClientError("OpenAI response had no choices.", { transient: false });
     }
-    const message = fromOpenAIMessage(choice);
+    const message = fromOpenAIMessage(choice.message);
+    const doneReason = doneReasonFromFinish(choice.finish_reason);
     const raw = {
       ...completion,
       prompt_eval_count: completion?.usage?.prompt_tokens,
       eval_count: completion?.usage?.completion_tokens,
+      ...(doneReason ? { done_reason: doneReason } : {}),
     };
     return { message, raw };
   }
@@ -136,10 +138,13 @@ export class OpenAIClient {
       tool_calls: /** @type {Array<object>} */ ([]),
     };
     let usage = null;
+    let finishReason = null;
 
     try {
       for await (const chunk of stream) {
         if (chunk?.usage) usage = chunk.usage;
+        const reason = chunk?.choices?.[0]?.finish_reason;
+        if (reason) finishReason = reason;
         const delta = chunk?.choices?.[0]?.delta;
         if (!delta) continue;
         if (typeof delta.content === "string" && delta.content) {
@@ -176,11 +181,13 @@ export class OpenAIClient {
         : {}),
     };
     const message = fromOpenAIMessage(openaiMessage);
+    const doneReason = doneReasonFromFinish(finishReason);
     const raw = {
       usage,
       prompt_eval_count: usage?.prompt_tokens,
       eval_count: usage?.completion_tokens,
       message: openaiMessage,
+      ...(doneReason ? { done_reason: doneReason } : {}),
     };
     return { message, raw };
   }
@@ -194,6 +201,19 @@ export class OpenAIClient {
       throw mapOpenAIError(err);
     }
   }
+}
+
+/**
+ * The agent loop retries a turn only when `raw.done_reason` is `"length"`
+ * (Ollama's name). OpenAI reports the same cutoff as `finish_reason`.
+ * @param {unknown} reason
+ * @returns {string|undefined}
+ */
+function doneReasonFromFinish(reason) {
+  const value = String(reason ?? "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === "length" || value === "max_tokens") return "length";
+  return value;
 }
 
 /** @param {any} err */
