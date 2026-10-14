@@ -37,7 +37,7 @@ test("agentResultFromTrial falls back to the live-flushed session in the /app ar
   try {
     // Harbor killed the agent: /logs/agent/session.json was never copied, but
     // the artifact collection picked up the mid-run flush.
-    const sessions = path.join(trialDir, "artifacts", "app", ".halo-agent", "sessions");
+    const sessions = path.join(trialDir, "artifacts", "app", ".bf", "bf-agent", "sessions");
     await mkdir(sessions, { recursive: true });
     await writeFile(
       path.join(sessions, "harbor.json"),

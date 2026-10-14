@@ -12,6 +12,8 @@ const SNAPSHOT_SKIP = new Set([
   "node_modules",
   ".git",
   ".halo-agent",
+  ".bf",
+  "bf-agent",
 ]);
 
 /** Where Harbor's `--artifact /app` download lands inside a trial directory. */
@@ -94,7 +96,7 @@ export async function loadTrialJudgeInput(task, { maxSteps = null } = {}) {
   };
 
   const preamble = [
-    "You are grading Bitfield Agent on a Terminal-Bench task that already ran inside Harbor/Docker.",
+    "You are grading Bitfield Ollama Agent on a Terminal-Bench task that already ran inside Harbor/Docker.",
     "Harbor's hidden tests already produced a mechanical pass/fail (reward); it fixes the outcome band.",
     "Everything you need is in this prompt: the instruction, the reward, the step trace, and the file diff. Do not open other files and do not re-run tests.",
   ].join(" ");
@@ -102,7 +104,12 @@ export async function loadTrialJudgeInput(task, { maxSteps = null } = {}) {
   // Checkpoints live in the container's /app; when Harbor collected that
   // artifact the judge gets an exact before/after diff.
   const appDir = path.join(trialDir, APP_ARTIFACT_REL);
-  const changeSetRoot = (await isDir(path.join(appDir, ".halo-agent", "checkpoints"))) ? appDir : trialDir;
+  const changeSetRoot =
+    (await isDir(path.join(appDir, ".bf", "bf-agent", "checkpoints"))) ||
+    (await isDir(path.join(appDir, "bitfield", "bf-agent", "checkpoints"))) ||
+    (await isDir(path.join(appDir, ".halo-agent", "checkpoints")))
+      ? appDir
+      : trialDir;
 
   return { scenario, agentResult, preamble, oracle, efficiency, changeSetRoot };
 }
@@ -169,6 +176,8 @@ export async function agentResultFromTrial(trialDir) {
     // The adapter copies the session into /logs/agent only after the CLI
     // exits. When Harbor kills the agent (AgentTimeoutError) that never runs,
     // but the live-flushed session survives in the collected /app artifact.
+    "artifacts/app/.bf/bf-agent/sessions/harbor.json",
+    "artifacts/app/bitfield/bf-agent/sessions/harbor.json",
     "artifacts/app/.halo-agent/sessions/harbor.json",
   ]);
   const stdout = await readFirstExisting(trialDir, ["agent/stdout.txt", "logs/agent/stdout.txt"]);

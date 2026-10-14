@@ -117,7 +117,7 @@ export class McpClient {
         this.#write({
           jsonrpc: "2.0",
           id: message.id,
-          error: { code: -32601, message: `Bitfield Agent does not handle '${message.method}'.` },
+          error: { code: -32601, message: `Bitfield Ollama Agent does not handle '${message.method}'.` },
         });
       }
       return;

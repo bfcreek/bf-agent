@@ -30,7 +30,7 @@ export const MAX_INSTRUCTION_CHARS = 12_000;
 export const MAX_SINGLE_INSTRUCTION_CHARS = 6000;
 
 /** Directories never scanned for nested AGENTS.md. */
-const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "out", ".halo-agent", "vendor", "target"]);
+const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", "out", ".halo-agent", ".bf", "bf-agent", "vendor", "target"]);
 const NESTED_AGENTS_MAX_DEPTH = 4;
 const GIT_STATUS_MAX_LINES = 30;
 

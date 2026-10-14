@@ -29,10 +29,12 @@ test("captureIntegritySnapshot hashes file bytes", async () => {
   assert.match(snap.get("a.txt"), /^[a-f0-9]{64}$/);
 });
 
-test("captureIntegritySnapshot skips .halo-agent directory", async () => {
+test("captureIntegritySnapshot skips agent data directories", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "halo-integrity-skip-"));
+  await mkdir(path.join(dir, ".bf", "bf-agent"), { recursive: true });
+  await writeFile(path.join(dir, ".bf", "bf-agent", "state.json"), "{}", "utf8");
   await mkdir(path.join(dir, ".halo-agent"), { recursive: true });
-  await writeFile(path.join(dir, ".halo-agent", "state.json"), "{}", "utf8");
+  await writeFile(path.join(dir, ".halo-agent", "legacy.json"), "{}", "utf8");
   await writeFile(path.join(dir, "visible.txt"), "ok", "utf8");
   const snap = await captureIntegritySnapshot(dir);
   assert.equal(snap.size, 1);

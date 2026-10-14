@@ -171,7 +171,7 @@ export function formatReportConsole(report) {
   const lines = [];
   const bar = "═".repeat(56);
   lines.push(bar);
-  lines.push("  Bitfield Agent dev bench — assessment report");
+  lines.push("  Bitfield Ollama Agent dev bench — assessment report");
   lines.push(bar);
   lines.push(`  Ran: ${report.ranAt}`);
   lines.push(`  Agent model(s): ${report.models.join(", ")}  |  Judge: ${report.judgeModel}`);
@@ -232,7 +232,7 @@ export function formatReportConsole(report) {
   lines.push("");
 
   if (report.recommendations.length > 0) {
-    lines.push("  Recommendations for Bitfield Agent");
+    lines.push("  Recommendations for Bitfield Ollama Agent");
     lines.push("  " + "─".repeat(52));
     for (const rec of report.recommendations.slice(0, 12)) {
       const tag = `[${rec.priority.toUpperCase()}]`.padEnd(8);
@@ -261,7 +261,7 @@ export function formatReportConsole(report) {
  */
 export function formatReportMarkdown(report) {
   const lines = [
-    "# Bitfield Agent dev bench report",
+    "# Bitfield Ollama Agent dev bench report",
     "",
     `**Ran:** ${report.ranAt}`,
     `**Agent model(s):** ${report.models.join(", ")}`,

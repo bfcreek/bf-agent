@@ -189,6 +189,8 @@ async function walkWorkspaceFiles(dir, predicate) {
         entry.name === "obj" ||
         entry.name === ".git" ||
         entry.name === ".halo-agent" ||
+        entry.name === ".bf" ||
+        entry.name === "bf-agent" ||
         entry.name === "__pycache__" ||
         entry.name === "node_modules"
       ) {

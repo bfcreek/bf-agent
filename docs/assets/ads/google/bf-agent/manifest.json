@@ -5,7 +5,7 @@
   "session": {
     "source": "../../../sample-out.txt",
     "copy": "session.txt",
-    "note": "Output is unedited. Long step lines are clipped to the terminal width; the prompt path is shown once as PS D:\\source\\repos\\bf-order-api>."
+    "note": "Recorded on this machine with Ollama running qwen3-coder:30b locally (bf-agent's pinned local model, chosen by --model auto). Output is unedited; long step lines are clipped to the terminal width."
   },
   "ratios": [
     {
@@ -13,6 +13,7 @@
       "width": 1920,
       "height": 1080,
       "poster": "posters/terminal-16x9.png",
+      "animatedPoster": "posters/terminal-16x9.gif",
       "video": "videos/terminal-16x9.mp4",
       "gif": "gifs/terminal-16x9.gif",
       "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
@@ -22,6 +23,7 @@
       "width": 1080,
       "height": 1080,
       "poster": "posters/terminal-1x1.png",
+      "animatedPoster": "posters/terminal-1x1.gif",
       "video": "videos/terminal-1x1.mp4",
       "gif": "gifs/terminal-1x1.gif",
       "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
@@ -31,6 +33,7 @@
       "width": 1080,
       "height": 1620,
       "poster": "posters/terminal-2x3.png",
+      "animatedPoster": "posters/terminal-2x3.gif",
       "video": "videos/terminal-2x3.mp4",
       "gif": "gifs/terminal-2x3.gif",
       "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
@@ -40,6 +43,7 @@
       "width": 1440,
       "height": 1080,
       "poster": "posters/terminal-4x3.png",
+      "animatedPoster": "posters/terminal-4x3.gif",
       "video": "videos/terminal-4x3.mp4",
       "gif": "gifs/terminal-4x3.gif",
       "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
@@ -47,7 +51,7 @@
   ],
   "video": {
     "fps": 24,
-    "durationMs": 32090,
+    "durationMs": 30902,
     "phases": [
       {
         "id": "idle",
@@ -57,62 +61,98 @@
       {
         "id": "type-cmd",
         "startMs": 700,
-        "endMs": 5700
+        "endMs": 6532
       },
       {
         "id": "run",
-        "startMs": 5700,
-        "endMs": 21400
+        "startMs": 6532,
+        "endMs": 16982
       },
       {
         "id": "idle-2",
-        "startMs": 21400,
-        "endMs": 22100
+        "startMs": 16982,
+        "endMs": 17682
       },
       {
         "id": "type-test",
-        "startMs": 22100,
-        "endMs": 23360
+        "startMs": 17682,
+        "endMs": 19852
       },
       {
         "id": "test-output",
-        "startMs": 23360,
-        "endMs": 26490
+        "startMs": 19852,
+        "endMs": 24002
       },
       {
         "id": "end",
-        "startMs": 26490,
-        "endMs": 32090
+        "startMs": 24002,
+        "endMs": 30902
       }
     ],
     "narration": [
       {
         "file": "narration/01-one-command.mp3",
         "startMs": 700,
-        "durationMs": 7340,
+        "durationMs": 8230,
         "phase": "type-cmd"
       },
       {
         "file": "narration/02-every-step.mp3",
-        "startMs": 10900,
-        "durationMs": 7220,
+        "startMs": 9280,
+        "durationMs": 7510,
         "phase": "run"
       },
       {
         "file": "narration/03-run-it-yourself.mp3",
-        "startMs": 22100,
+        "startMs": 17682,
         "durationMs": 1940,
         "phase": "type-test"
       },
       {
         "file": "narration/04-close.mp3",
-        "startMs": 26690,
-        "durationMs": 4700,
+        "startMs": 24202,
+        "durationMs": 6000,
         "phase": "end"
       }
     ],
     "narrationTrack": "narration/terminal.m4a",
-    "endCaption": "A local coding agent. Free for personal use."
+    "endCaption": "Local models. Full agent. Free for personal use."
+  },
+  "callouts": {
+    "command": {
+      "number": 1,
+      "text": "You type one request"
+    },
+    "steps": {
+      "number": 2,
+      "text": "The agent writes code and tests until they pass"
+    },
+    "tests": {
+      "number": 3,
+      "text": "You run the tests yourself"
+    }
+  },
+  "videoCaptions": {
+    "command": {
+      "number": 1,
+      "text": "Your Ollama models, turned into a full coding agent"
+    },
+    "steps": {
+      "number": 2,
+      "text": "Writes and tests the code — no cloud model required"
+    },
+    "tests": {
+      "number": 3,
+      "text": "You run the tests yourself"
+    }
+  },
+  "message": "Bitfield Agent turns Ollama models into full coding agents, so for many jobs no cloud model is needed.",
+  "layout": "Product name and URL sit above an inset terminal. Posters pin three numbered callouts beside the command, the steps, and the PASS line; the video shows one caption per phase.",
+  "animatedPoster": {
+    "fps": 12,
+    "maxSide": 1080,
+    "durationMs": 12812,
+    "note": "Silent loop: the command types, the first steps fill in, then the npm test block."
   },
   "gif": {
     "fps": 12,
@@ -122,7 +162,7 @@
   "claims": [
     "Local Ollama is the default. Running on local models costs nothing.",
     "Free for personal, non-commercial use. Do not say it is free for business.",
-    "The session shown used a cloud model via Ollama (see [context] line); say 'local by default', not 'ran locally'.",
+    "The session shown ran entirely on a local Ollama model (qwen3-coder:30b on one RTX 4090); no cloud model was involved.",
     "Do not quote benchmark scores or mock dollar savings."
   ]
 }

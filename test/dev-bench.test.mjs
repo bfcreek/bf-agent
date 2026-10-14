@@ -1535,13 +1535,13 @@ test("describeRunSelection labels tier and scenario runs", () => {
 });
 
 test("checkpointRelForLanguage isolates js, python, and csharp files", () => {
-  assert.equal(checkpointRelForLanguage(null), ".halo-agent/bench-checkpoint.json");
-  assert.equal(checkpointRelForLanguage(["csharp"]), ".halo-agent/bench-checkpoint-csharp.json");
-  assert.equal(checkpointRelForLanguage(["python"]), ".halo-agent/bench-checkpoint-python.json");
-  assert.equal(checkpointRelForLanguage(["js"]), ".halo-agent/bench-checkpoint-js.json");
+  assert.equal(checkpointRelForLanguage(null), ".bf/bf-agent/bench-checkpoint.json");
+  assert.equal(checkpointRelForLanguage(["csharp"]), ".bf/bf-agent/bench-checkpoint-csharp.json");
+  assert.equal(checkpointRelForLanguage(["python"]), ".bf/bf-agent/bench-checkpoint-python.json");
+  assert.equal(checkpointRelForLanguage(["js"]), ".bf/bf-agent/bench-checkpoint-js.json");
   assert.equal(
     checkpointRelForLanguage(["csharp", "python"]),
-    ".halo-agent/bench-checkpoint-csharp+python.json",
+    ".bf/bf-agent/bench-checkpoint-csharp+python.json",
   );
 });
 

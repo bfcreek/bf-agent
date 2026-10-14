@@ -2,6 +2,7 @@ node_modules/
 *.log
 .env
 .halo-agent/
+.bf/bf-agent/
 evals-*.json
 # Accidental repo-root dumps (reports now go to ../halo-agent-benchmark/local/)
 bench-*.json

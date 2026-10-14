@@ -2,13 +2,15 @@
  * Tool output handling. Cursor never truncates a long tool result: it writes
  * the full text to a file and hands the model the head, the tail, and the
  * path, so the model can read more with its own tools. This module does the
- * same for every builtin, spilling to `.halo-agent/tool-output/` inside the
- * workspace. In-memory head/tail truncation is the fallback when there is
+ * same for every builtin, spilling to `.bf/bf-agent/tool-output/` inside
+ * the workspace. In-memory head/tail truncation is the fallback when there is
  * nowhere to spill.
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+import { AGENT_DATA_DIR, migrateAgentDataDir } from "../workspace-data.mjs";
 
 /** Output longer than this (in characters) is spilled to a file. */
 export const MAX_TOOL_OUTPUT_CHARS = 32_000;
@@ -17,7 +19,7 @@ export const MAX_TOOL_OUTPUT_CHARS = 32_000;
 export const SPILL_HEAD_CHARS = 12_000;
 export const SPILL_TAIL_CHARS = 8_000;
 
-export const TOOL_OUTPUT_DIR = path.join(".halo-agent", "tool-output");
+export const TOOL_OUTPUT_DIR = path.join(AGENT_DATA_DIR, "tool-output");
 
 let spillCounter = 0;
 
@@ -56,7 +58,7 @@ export function truncateOutput(text, limit = MAX_TOOL_OUTPUT_CHARS) {
  * replaced with head + tail + a pointer.
  *
  * @param {object} options
- * @param {string} [options.workspaceRoot] Where `.halo-agent/tool-output` lives.
+ * @param {string} [options.workspaceRoot] Where `.bf/bf-agent/tool-output` lives.
  *   Without it, output falls back to in-memory truncation.
  * @param {number} [options.limit]
  * @param {number} [options.headChars]
@@ -81,6 +83,7 @@ export function createOutputSpiller({
     const fileName = `${stamp}-${safeLabel}-${String(spillCounter).padStart(4, "0")}.txt`;
     const rel = path.join(TOOL_OUTPUT_DIR, fileName).split(path.sep).join("/");
     try {
+      await migrateAgentDataDir(root);
       await mkdir(path.join(root, TOOL_OUTPUT_DIR), { recursive: true });
       await writeFile(path.join(root, rel), s, "utf8");
     } catch {

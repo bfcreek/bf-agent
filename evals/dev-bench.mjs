@@ -105,7 +105,7 @@ async function runAgentOnWorkspace({ scenario, model, options, dir, goal, maxSte
     maxSteps,
     projectIndex: false,
     // Checkpoints give the judge an exact before/after of every file the
-    // agent touched (see change-set.mjs). They live under .halo-agent/,
+    // agent touched (see change-set.mjs). They live under .bf/bf-agent/,
     // which integrity and snapshots already skip.
     checkpoints: true,
     think: options.think ?? undefined,
@@ -715,7 +715,7 @@ async function main() {
     }
   } else {
     for (const model of options.models) {
-      console.error(`== Bitfield Agent model: ${model} ==`);
+      console.error(`== Bitfield Ollama Agent model: ${model} ==`);
       resolvedModel = await logResolvedModel(model, options);
       const outcome = await runAllScenarios(scenarios, resolvedModel, options, {
         completedNames: [...resumeCompleted],

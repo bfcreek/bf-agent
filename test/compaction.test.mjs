@@ -259,7 +259,7 @@ test("the summary keeps the original instruction verbatim and points at the hist
     messages,
     maxChars: 2000,
     keepRecent: 4,
-    historyPath: ".halo-agent/sessions/fix.json",
+    historyPath: ".bf/bf-agent/sessions/fix.json",
   });
 
   assert.notEqual(result, messages);
@@ -267,7 +267,7 @@ test("the summary keeps the original instruction verbatim and points at the hist
   assert.match(recap, /Original user instruction \(verbatim/);
   assert.match(recap, /Merge the two branches\./);
   assert.match(recap, /SUMMARY OF OLD TURNS/);
-  assert.match(recap, /\.halo-agent\/sessions\/fix\.json/);
+  assert.match(recap, /\.bf\/bf-agent\/sessions\/fix\.json/);
   assert.match(recap, /grep_search or read_file/);
   assert.equal(extractOriginalInstruction(result).startsWith("[Earlier conversation"), false);
 });

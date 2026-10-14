@@ -8,7 +8,16 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-const DEFAULT_SKIP_DIRS = new Set([".halo-agent", "bin", "obj", "__pycache__", ".vs", ".pytest_cache"]);
+const DEFAULT_SKIP_DIRS = new Set([
+  ".halo-agent",
+  ".bf",
+  "bf-agent",
+  "bin",
+  "obj",
+  "__pycache__",
+  ".vs",
+  ".pytest_cache",
+]);
 
 /**
  * @typedef {object} IntegrityRules
@@ -34,7 +43,7 @@ function normalizeRel(rel) {
 
 /**
  * @param {string} rel Normalized relative path.
- * @param {string} pattern e.g. `.halo-agent` or `.halo-agent/**`
+ * @param {string} pattern e.g. `.bf/bf-agent` or `.bf/bf-agent/**`
  */
 function matchesExclude(rel, pattern) {
   const normalized = normalizeRel(pattern);

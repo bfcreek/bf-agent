@@ -1,6 +1,6 @@
-# Bitfield Agent — limitations
+# Bitfield Ollama Agent — limitations
 
-Honest expectations for v0.1. Use this when evaluating Bitfield Agent as a built-in
+Honest expectations for v0.1. Use this when evaluating Bitfield Ollama Agent as a built-in
 local agent (via Aura Wire) or running it standalone.
 
 ## What it is
@@ -47,13 +47,13 @@ Run `npm run bench` to measure your setup. Gates define minimum acceptable score
 
 ## Wire pairing
 
-Bitfield Agent is designed to pair with **Aura Wire**:
+Bitfield Ollama Agent is designed to pair with **Aura Wire**:
 
-- Wire routes IDE traffic; Bitfield Agent is the **built-in local tier** for simple work.
+- Wire routes IDE traffic; Bitfield Ollama Agent is the **built-in local tier** for simple work.
 - Wire reads `../halo-agent-benchmark/local/capability.json` (from a gated bench run) to set routing defaults.
 - Complex tasks should be routed to cloud providers by Wire; the runtime itself does not escalate mid-run.
 - Optional CLI `--provider` peers are a separate local SDK path — they do not replace Wire's `/v1` routing, compression, or guardrails.
 
 ## Reporting issues
 
-If tier 0 safety scenarios fail on your model, do not use Bitfield Agent for unattended writes in production workflows until scores improve or you add approval gates upstream.
+If tier 0 safety scenarios fail on your model, do not use Bitfield Ollama Agent for unattended writes in production workflows until scores improve or you add approval gates upstream.

@@ -16,6 +16,8 @@ import { createOutputSpiller } from "./output.mjs";
 const SKIP_DIRS = new Set([
   ".git",
   ".halo-agent",
+  ".bf",
+  "bf-agent",
   ".hg",
   ".svn",
   ".next",

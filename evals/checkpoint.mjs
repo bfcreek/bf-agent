@@ -7,9 +7,17 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { migrateAgentDataDir } from "../src/workspace-data.mjs";
+
 export const CHECKPOINT_VERSION = 1;
-export const DEFAULT_CHECKPOINT_REL = ".halo-agent/bench-checkpoint.json";
+export const DEFAULT_CHECKPOINT_REL = ".bf/bf-agent/bench-checkpoint.json";
 const CHECKPOINT_FILE_RE = /^bench-checkpoint(?:-(.+))?\.json$/;
+
+async function readyCheckpointDir(dirRel = path.posix.dirname(DEFAULT_CHECKPOINT_REL)) {
+  // Bench checkpoints live under the agent data dir in the repo cwd.
+  await migrateAgentDataDir(process.cwd());
+  return path.resolve(dirRel);
+}
 
 /**
  * Stable key for a bench run — changes when scenario set or core options differ.
@@ -65,7 +73,7 @@ export function resolveCheckpointPath(checkpointPath = DEFAULT_CHECKPOINT_REL) {
 
 /**
  * Per-language checkpoint next to the default file.
- * `--language csharp` → `.halo-agent/bench-checkpoint-csharp.json`
+ * `--language csharp` → `.bf/bf-agent/bench-checkpoint-csharp.json`
  *
  * @param {string[]|null|undefined} languageFilter
  * @param {string} [baseRel]
@@ -97,7 +105,7 @@ export function languageFilterFromCheckpoint(checkpoint) {
  * @returns {Promise<{path: string, fileName: string, languageKey: string|null, languageFilter: string[]|null, record: object}[]>}
  */
 export async function listCheckpoints(dirRel = path.posix.dirname(DEFAULT_CHECKPOINT_REL)) {
-  const dir = path.resolve(dirRel);
+  const dir = await readyCheckpointDir(dirRel);
   let names;
   try {
     names = await readdir(dir);
@@ -129,7 +137,7 @@ export async function listCheckpoints(dirRel = path.posix.dirname(DEFAULT_CHECKP
  * @returns {Promise<string[]>} Cleared absolute paths.
  */
 export async function clearAllCheckpoints(dirRel = path.posix.dirname(DEFAULT_CHECKPOINT_REL)) {
-  const dir = path.resolve(dirRel);
+  const dir = await readyCheckpointDir(dirRel);
   let names;
   try {
     names = await readdir(dir);
@@ -153,6 +161,7 @@ export async function clearAllCheckpoints(dirRel = path.posix.dirname(DEFAULT_CH
  * @returns {Promise<object|null>}
  */
 export async function loadCheckpoint(checkpointPath) {
+  await migrateAgentDataDir(process.cwd());
   const target = resolveCheckpointPath(checkpointPath);
   try {
     const raw = JSON.parse(await readFile(target, "utf8"));
@@ -168,6 +177,7 @@ export async function loadCheckpoint(checkpointPath) {
  * @param {string} checkpointPath
  */
 export async function clearCheckpoint(checkpointPath) {
+  await migrateAgentDataDir(process.cwd());
   const target = resolveCheckpointPath(checkpointPath);
   try {
     await rm(target, { force: true });
@@ -183,6 +193,7 @@ export async function clearCheckpoint(checkpointPath) {
  * @param {object} data
  */
 export async function saveCheckpoint(checkpointPath, data) {
+  await migrateAgentDataDir(process.cwd());
   const target = resolveCheckpointPath(checkpointPath);
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, JSON.stringify(data, null, 2), "utf8");

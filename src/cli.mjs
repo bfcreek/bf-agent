@@ -31,6 +31,7 @@ import { createProviderClient, shouldRouteOllamaModel } from "./providers/factor
 import { SessionStore } from "./session-store.mjs";
 import { parseAutoApproveSpec, ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { ensureAgentDataDir } from "./workspace-data.mjs";
 import {
   applyConfigToDefaults,
   ensureConfigFile,
@@ -303,7 +304,7 @@ const VERSION = JSON.parse(
 ).version;
 
 function printHelp() {
-  console.log(`Bitfield Agent (bf-agent) v${VERSION} - local agent loop on Ollama
+  console.log(`Bitfield Ollama Agent (bf-agent) v${VERSION} - local agent loop on Ollama
 
 Usage:
   bf-agent                        Interactive terminal mode (TTY only)
@@ -350,7 +351,7 @@ Options:
                        Auto-approved calls count as approved, including deletes.
                        In ask mode, tools outside the list still prompt
   --no-auto-approve    Do not auto-approve tools (overrides config)
-  --session <name>     Persist/resume this conversation (.halo-agent/sessions/ in the workspace)
+  --session <name>     Persist/resume this conversation (.bf/bf-agent/sessions/ in the workspace)
   --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
   --embed-model <name> Embedding model for project index (default nomic-embed-text)
   --no-index           Skip building the local project vector index
@@ -480,7 +481,7 @@ async function runInteractiveSession({
 
   const sessionLabel = sessionName ? ` | session: ${sessionName}` : "";
   console.error(
-    `Bitfield Agent (bf-agent) v${VERSION} | interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
+    `Bitfield Ollama Agent (bf-agent) v${VERSION} | interactive | model: ${options.model} | workspace: ${options.cwd}${sessionLabel}`,
   );
   console.error("Enter a prompt, or /help for commands. /quit to exit.");
   if (priorSession && !options.quiet) {
@@ -832,6 +833,7 @@ async function main() {
     console.error(`[provider] project index skipped (${provider} has no embeddings API).`);
   }
 
+  await ensureAgentDataDir(options.cwd);
   const checkpointStore = options.noCheckpoints ? undefined : new CheckpointStore({ workspaceRoot: options.cwd });
   const registry = registerBuiltinTools(new ToolRegistry(), {
     workspaceRoot: options.cwd,
@@ -933,7 +935,7 @@ async function main() {
     });
     server.listen(options.port, () => {
       const { port } = server.address();
-      console.error(`Bitfield Agent serving OpenAI-compatible API on http://127.0.0.1:${port}/v1`);
+      console.error(`Bitfield Ollama Agent serving OpenAI-compatible API on http://127.0.0.1:${port}/v1`);
       console.error(`workspace: ${options.cwd} | model: ${options.model} | ollama: ${options.baseUrl}`);
     });
     return;

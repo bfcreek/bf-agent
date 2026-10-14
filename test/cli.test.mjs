@@ -377,7 +377,7 @@ test("models config edit creates models.yaml", async () => {
   await writeFile(
     editorPath,
     `import { readFileSync } from "node:fs";
-console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Agent model routing") ? "ok" : "bad");
+console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Ollama Agent model routing") ? "ok" : "bad");
 `,
     "utf8",
   );
@@ -409,7 +409,7 @@ test("config edit creates the config file", async () => {
   await writeFile(
     editorPath,
     `import { readFileSync } from "node:fs";
-console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Agent user configuration") ? "ok" : "bad");
+console.log(readFileSync(process.argv[2], "utf8").includes("Bitfield Ollama Agent user configuration") ? "ok" : "bad");
 `,
     "utf8",
   );

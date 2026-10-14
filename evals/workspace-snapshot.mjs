@@ -9,6 +9,8 @@ const DEFAULT_SKIP = new Set([
   "node_modules",
   ".git",
   ".halo-agent",
+  ".bf",
+  "bf-agent",
   "package-lock.json",
 ]);
 

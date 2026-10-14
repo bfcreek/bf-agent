@@ -1,14 +1,16 @@
 /**
  * File checkpoints. Before the agent writes or edits a file, the current
- * contents are copied under `.halo-agent/checkpoints/<run>/` so a wrong turn
- * can be undone without git. Modeled on Cursor's checkpoints: file-level,
+ * contents are copied under `.bf/bf-agent/checkpoints/<run>/` so a wrong
+ * turn can be undone without git. Modeled on Cursor's checkpoints: file-level,
  * local, separate from version control, and only for undoing agent changes.
  */
 
 import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export const CHECKPOINT_DIR = path.join(".halo-agent", "checkpoints");
+import { AGENT_DATA_DIR, migrateAgentDataDir } from "./workspace-data.mjs";
+
+export const CHECKPOINT_DIR = path.join(AGENT_DATA_DIR, "checkpoints");
 
 /**
  * @typedef {object} CheckpointEntry
@@ -31,6 +33,11 @@ export class CheckpointStore {
     this.dir = path.join(this.root, CHECKPOINT_DIR, this.runId);
     /** @type {Map<string, CheckpointEntry>} first snapshot per file wins */
     this.entries = new Map();
+    this._ready = migrateAgentDataDir(this.root);
+  }
+
+  async #ready() {
+    await this._ready;
   }
 
   /** Workspace-relative path of this run's checkpoint directory. */
@@ -47,6 +54,7 @@ export class CheckpointStore {
    * @returns {Promise<CheckpointEntry|null>} Null when already snapshotted.
    */
   async snapshot(relPath, { tool = "write_file" } = {}) {
+    await this.#ready();
     const rel = String(relPath).split(path.sep).join("/");
     if (this.entries.has(rel)) return null;
     const source = path.join(this.root, rel);
@@ -82,6 +90,7 @@ export class CheckpointStore {
    */
   static async restore(workspaceRoot, runId) {
     const root = path.resolve(workspaceRoot);
+    await migrateAgentDataDir(root);
     const dir = path.join(root, CHECKPOINT_DIR, runId);
     const manifest = JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8"));
     const restored = [];
@@ -105,7 +114,9 @@ export class CheckpointStore {
    * @returns {Promise<Array<{runId: string, files: CheckpointEntry[]}>>} Oldest first.
    */
   static async list(workspaceRoot) {
-    const base = path.join(path.resolve(workspaceRoot), CHECKPOINT_DIR);
+    const root = path.resolve(workspaceRoot);
+    await migrateAgentDataDir(root);
+    const base = path.join(root, CHECKPOINT_DIR);
     let names;
     try {
       names = await readdir(base);

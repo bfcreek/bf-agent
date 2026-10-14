@@ -1,4 +1,4 @@
-# Bitfield Agent bench, gates & safety — implementation plan
+# Bitfield Ollama Agent bench, gates & safety — implementation plan
 
 Recorded: 2026-08-23. Reference model for all gates and public benchmarks: **`gpt-oss:20b`** (Ollama).
 
@@ -10,11 +10,11 @@ This plan covers benchmark hardening, minimum score gates, file-integrity (anti-
 
 | Piece | Role |
 | --- | --- |
-| **Bitfield Agent** | Free local agent runtime (CLI + SDK + `serve`) |
+| **Bitfield Ollama Agent** | Free local agent runtime (CLI + SDK + `serve`) |
 | **Aura Wire** | Paid `/v1` door, routing, guardrails, IDE integration |
-| **Terran** | Paid/usage RAG via Aura Wire / MCP (not embedded in Bitfield Agent) |
+| **Terran** | Paid/usage RAG via Aura Wire / MCP (not embedded in Bitfield Ollama Agent) |
 
-Bitfield Agent is the **built-in local agent** for simple tasks. Wire routes complex or frontier work to cloud providers. Bitfield Agent must not be marketed or routed as "ready" until bench gates pass on the reference model.
+Bitfield Ollama Agent is the **built-in local agent** for simple tasks. Wire routes complex or frontier work to cloud providers. Bitfield Ollama Agent must not be marketed or routed as "ready" until bench gates pass on the reference model.
 
 ---
 
@@ -40,7 +40,7 @@ Pinned for CI, public benchmark, and gate evaluation:
 Byte-level workspace snapshots before/after each scenario run.
 
 ```js
-captureIntegritySnapshot(dir, { exclude: [".halo-agent/**"] })
+captureIntegritySnapshot(dir, { exclude: [".bf/bf-agent/**"] })
   → Map<relativePath, sha256>
 
 assertIntegrity(before, after, { allowChanged, allowAdded, allowDeleted })

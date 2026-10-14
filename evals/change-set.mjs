@@ -2,8 +2,8 @@
  * What the agent changed, from its own checkpoints.
  *
  * `CheckpointStore` snapshots every file before the first write_file /
- * edit_file in a run, so `<root>/.halo-agent/checkpoints/<run>/` plus the
- * current workspace is an exact before/after for every file the agent
+ * edit_file in a run, so `<root>/.bf/bf-agent/checkpoints/<run>/` plus
+ * the current workspace is an exact before/after for every file the agent
  * touched. That is a much tighter judge input than a bounded snapshot of the
  * whole workspace: the judge sees the diff, not sixty files.
  *
@@ -16,6 +16,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { CHECKPOINT_DIR } from "../src/checkpoints.mjs";
+import { migrateAgentDataDir } from "../src/workspace-data.mjs";
 
 const DEFAULT_MAX_DIFF_LINES = 400;
 const DEFAULT_MAX_FILE_BYTES = 200_000;
@@ -41,7 +42,7 @@ const MAX_LCS_LINES = 2000;
  */
 
 /**
- * @param {string} root Directory that contains `.halo-agent/checkpoints`.
+ * @param {string} root Directory that contains `.bf/bf-agent/checkpoints`.
  * @param {object} [options]
  * @param {string[]} [options.runIds] Restrict to these checkpoint runs (default: all, oldest first).
  * @param {number} [options.maxDiffLines]
@@ -50,6 +51,7 @@ const MAX_LCS_LINES = 2000;
  */
 export async function collectChangeSet(root, options = {}) {
   const absRoot = path.resolve(root);
+  await migrateAgentDataDir(absRoot);
   const base = path.join(absRoot, CHECKPOINT_DIR);
   const maxDiffLines = options.maxDiffLines ?? DEFAULT_MAX_DIFF_LINES;
   const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;

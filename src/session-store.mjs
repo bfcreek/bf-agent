@@ -1,11 +1,13 @@
 /**
  * Session persistence: transcripts, step logs, and a running list of files
- * the agent changed, saved as JSON under `.halo-agent/sessions/` in the
+ * the agent changed, saved as JSON under `.bf/bf-agent/sessions/` in the
  * workspace so a task can be resumed across CLI invocations.
  */
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+import { AGENT_DATA_DIR, migrateAgentDataDir } from "./workspace-data.mjs";
 
 /**
  * @typedef {object} SessionData
@@ -26,22 +28,28 @@ export class SessionStore {
   /**
    * @param {object} options
    * @param {string} options.workspaceRoot Sessions live under
-   *   `<workspaceRoot>/.halo-agent/sessions` unless `dir` is given.
+   *   `<workspaceRoot>/.bf/bf-agent/sessions` unless `dir` is given.
    * @param {string} [options.dir] Explicit sessions directory.
    */
   constructor({ workspaceRoot, dir } = {}) {
     if (!workspaceRoot && !dir) {
       throw new Error("SessionStore needs a workspaceRoot or an explicit dir.");
     }
-    this.dir = dir ?? path.join(workspaceRoot, ".halo-agent", "sessions");
+    this.workspaceRoot = workspaceRoot ? path.resolve(workspaceRoot) : null;
+    this.dir = dir ?? path.join(workspaceRoot, AGENT_DATA_DIR, "sessions");
   }
 
   filePath(name) {
     return path.join(this.dir, `${sanitizeName(name)}.json`);
   }
 
+  async #ready() {
+    if (this.workspaceRoot) await migrateAgentDataDir(this.workspaceRoot);
+  }
+
   /** @returns {Promise<SessionData|null>} null when the session does not exist. */
   async load(name) {
+    await this.#ready();
     try {
       return JSON.parse(await readFile(this.filePath(name), "utf8"));
     } catch (err) {
@@ -52,6 +60,7 @@ export class SessionStore {
 
   /** @param {SessionData} data */
   async save(name, data) {
+    await this.#ready();
     await mkdir(this.dir, { recursive: true });
     await writeFile(this.filePath(name), JSON.stringify(data, null, 2), "utf8");
   }
@@ -89,6 +98,7 @@ export class SessionStore {
 
   /** @returns {Promise<string[]>} Session names, most recently updated last. */
   async list() {
+    await this.#ready();
     let entries;
     try {
       entries = await readdir(this.dir);

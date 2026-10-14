@@ -89,7 +89,7 @@ export function buildAgentSpawn(agentBin, args) {
  * @param {number} [input.options.retries]
  * @param {string} [input.options.preamble] Extra instructions prepended to the prompt.
  * @param {object} [input.options.snapshotOptions] Passed to captureWorkspaceSnapshot.
- * @param {string} [input.options.changeSetRoot] Directory holding `.halo-agent/checkpoints` (default: workspaceDir).
+ * @param {string} [input.options.changeSetRoot] Directory holding `.bf/bf-agent/checkpoints` (default: workspaceDir).
  * @param {number} [input.options.maxSteps] Step budget the agent ran with (for budget metrics).
  * @param {import("./efficiency.mjs").EfficiencyMetrics} [input.options.efficiency] Precomputed metrics.
  */
@@ -171,7 +171,7 @@ const JUDGE_RESPONSE_SCHEMA = {
   agentImprovements: [
     {
       area: "system prompt | tools | loop | compaction | routing | other",
-      suggestion: "concrete change to the Bitfield Agent runtime",
+      suggestion: "concrete change to the Bitfield Ollama Agent runtime",
       priority: "low|medium|high",
     },
   ],
@@ -326,7 +326,7 @@ export function buildJudgeRetryPrompt({ scenario, agentResult, snapshot, changeS
 export function buildJudgePrompt({ scenario, agentResult, snapshot, changeSet, efficiency, oracle, preamble }) {
   return [
     ...(preamble ? [preamble, ""] : []),
-    "You are grading an AI coding agent (Bitfield Agent) that ran against a task in a temp workspace.",
+    "You are grading an AI coding agent (Bitfield Ollama Agent) that ran against a task in a temp workspace.",
     ...SCORING_GUIDE,
     `Use the step list in this prompt. Do not open other files.`,
     "",
@@ -495,7 +495,7 @@ export function scoreToGrade(score) {
 /** Short CLI prompt. The grading packet is already one file; the judge must not explore the workspace. */
 export function buildJudgeInvocationPrompt() {
   return [
-    "You are grading an AI coding agent (Bitfield Agent).",
+    "You are grading an AI coding agent (Bitfield Ollama Agent).",
     `Read ${ARTIFACTS_JUDGE_PROMPT} and nothing else. It already contains the task, the ground truth, the efficiency metrics, the step trace, and the file changes.`,
     "Do not use tools. Do not open any other file. Do not re-run tests.",
     "Reply with ONLY a single JSON object matching the schema in that file — no markdown fences.",

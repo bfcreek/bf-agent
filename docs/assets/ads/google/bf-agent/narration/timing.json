@@ -5,17 +5,17 @@
       "id": "01-one-command",
       "phase": "type-cmd",
       "offsetMs": 0,
-      "text": "One command. Bitfield Agent reads the project, writes the code and the tests, and runs them until they pass.",
+      "text": "Bitfield Agent turns the Ollama models you already run into a full coding agent. One request, and it gets to work.",
       "file": "narration/01-one-command.mp3",
-      "durationMs": 7340
+      "durationMs": 8230
     },
     {
       "id": "02-every-step",
       "phase": "run",
-      "offsetMs": 5200,
-      "text": "Every step is logged. When a test fails, it reads the error, edits the file, and runs the tests again.",
+      "offsetMs": 1500,
+      "text": "It writes the code and the tests, and runs them until they pass. Every step is logged. No cloud model needed.",
       "file": "narration/02-every-step.mp3",
-      "durationMs": 7220
+      "durationMs": 7510
     },
     {
       "id": "03-run-it-yourself",
@@ -29,9 +29,9 @@
       "id": "04-close",
       "phase": "end",
       "offsetMs": 200,
-      "text": "Bitfield Agent. A local coding agent, free for personal use.",
+      "text": "Bitfield Agent. Your local models, working as a full agent. Free for personal use.",
       "file": "narration/04-close.mp3",
-      "durationMs": 4700
+      "durationMs": 6000
     }
   ]
 }

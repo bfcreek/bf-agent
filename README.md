@@ -1,4 +1,4 @@
-# Bitfield Agent (`bf-agent`)
+# Bitfield Ollama Agent (`bf-agent`)
 
 Local agent runtime that turns a completion API into a multi-step agent:
 the model calls tools, observes results, and repeats until the task is done.
@@ -22,7 +22,7 @@ Product shape:
 | --- | --- |
 | **CLI + SDK** | Two first-class surfaces: a command line for humans and scripts, an SDK for embedding the loop in other software |
 | **Compatible at every angle** | OpenAI-compatible API façade, standard tool schemas, MCP for external tools, any Ollama model — integrate with what already exists rather than inventing formats |
-| **IDE integration via Wire** | Bitfield Agent ships no IDE extensions. Editors reach it through Aura Wire's `/v1` door and routing rules — Wire owns the IDE story |
+| **IDE integration via Wire** | Bitfield Ollama Agent ships no IDE extensions. Editors reach it through Aura Wire's `/v1` door and routing rules — Wire owns the IDE story |
 | **Local-first, private** | Prompts, tools, and files stay on this machine unless you explicitly route elsewhere |
 
 ## Requirements
@@ -53,7 +53,7 @@ npx @bitfieldcreek/bf-agent "summarize README.md"
 
 Or download the zip from [Explore](https://www.bitfieldcreek.com/explore#bf-agent) and use the `bin/` launchers below.
 
-**Bitfield Agent** (`bf-agent`) is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Bitfield Creek EULA](https://www.bitfieldcreek.com/eula).
+**Bitfield Ollama Agent** (`bf-agent`) is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Bitfield Creek EULA](https://www.bitfieldcreek.com/eula).
 
 From a git checkout, use `node src/cli.mjs` or the launchers in `bin/`.
 
@@ -90,14 +90,14 @@ Options:
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended. Deletes and cleanup writes still need an explicit approval |
 | `--auto-approve [policy]` | `off` | Approve gated tools without a prompt. Bare flag or `all`: every gated tool. `off`: none. Or a comma-separated list such as `write_file,run_command`. Those calls count as approved, including deletes. In ask mode, tools outside the list still prompt |
 | `--no-auto-approve` | | Force auto-approve off (overrides config) |
-| `--session <name>` | off | Persist and resume this conversation (`.halo-agent/sessions/` in the workspace) |
+| `--session <name>` | off | Persist and resume this conversation (`.bf/bf-agent/sessions/` in the workspace) |
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); tools are listed by name and fetched on demand |
 | `--no-checkpoints` | off | Do not snapshot files before `write_file` / `edit_file` |
 | `--quiet` | off | Suppress step trace; print only the final answer |
 | `--think <mode>` | `auto` | Native model reasoning: `auto`, `true`, `false`/`off`, or `low`/`medium`/`high`/`max` |
 
 The model is resolved against Ollama's installed list at startup. With
-`auto` (the default), Bitfield Agent first takes the **pinned local model**
+`auto` (the default), Bitfield Ollama Agent first takes the **pinned local model**
 (`qwen3-coder:30b`, see `PINNED_MODELS` in `src/model-routing.mjs`) when it
 is installed and fits in memory. Otherwise it picks the strongest installed
 model that supports tool calling and is either thinking-capable or
@@ -132,7 +132,7 @@ files the agent changed. Re-running with the same `--session` name continues
 the conversation with prior context.
 
 **Checkpoints:** before `write_file` or `edit_file` touches a file, its
-pre-edit contents are copied under `.halo-agent/checkpoints/<run-id>/` (first
+pre-edit contents are copied under `.bf/bf-agent/checkpoints/<run-id>/` (first
 snapshot per file per run). `bf-agent checkpoints list` shows runs;
 `bf-agent checkpoints restore <run-id>` puts every file in that run back
 (files the run created are deleted). Sessions record the run id.
@@ -170,7 +170,7 @@ node src/cli.mjs serve --port 11435
 ```
 
 Exposes the agent loop behind the standard OpenAI API so any existing client
-(or Aura Wire routing rule) can use it with no Bitfield Agent awareness:
+(or Aura Wire routing rule) can use it with no Bitfield Ollama Agent awareness:
 
 - `POST /v1/chat/completions` — messages in, agent loop (with tools) runs,
   `chat.completion` out. `stream: true` forwards content tokens live from
@@ -274,7 +274,7 @@ All file and shell tools are confined to the workspace root (`--cwd`): paths
 that resolve outside it are rejected, and commands are killed (whole process
 tree) after a timeout, 30s by default. Long tool output is never silently
 truncated: past 32k characters the full text is written to
-`.halo-agent/tool-output/` and the model gets the head, the tail, and the
+`.bf/bf-agent/tool-output/` and the model gets the head, the tail, and the
 path, so it can `read_file` or `grep_search` the rest.
 
 **Approvals:** in a terminal, `write_file`, `edit_file`, and `run_command`
@@ -472,7 +472,7 @@ node evals/dev-bench.mjs --scenario greet-module --keep-workspace
 
 Development benchmarks with **increasing complexity tiers** (simple module →
 multi-file fixes → small CLI → HTTP API → refactor → log/CSV tools). Each
-scenario runs Bitfield Agent in a fresh temp workspace, then grades the outcome with
+scenario runs Bitfield Ollama Agent in a fresh temp workspace, then grades the outcome with
 the **Cursor CLI** (`agent --model auto`) in read-only ask mode.
 
 **Config:** `bench.config.json` in the project root, or `evals/bench.config.json`
@@ -515,7 +515,7 @@ Every scenario gets two scores, kept separate on purpose:
 
 The judge sees the task, the agent's final answer, a step summary, the
 efficiency block, and the **change set**: a unified diff of every file the
-agent touched, built from the run's checkpoints (`.halo-agent/checkpoints/`)
+agent touched, built from the run's checkpoints (`.bf/bf-agent/checkpoints/`)
 paired with the final workspace. Files changed only through shell commands
 are not checkpointed, so a paths-and-sizes listing of the workspace is
 included as a fallback, and Harbor trials with no collected `/app` artifact
@@ -544,7 +544,7 @@ npm run bench:patterns -- --scoreboard ../halo-agent-benchmark/local/scoreboard-
 | `--stop-below <score>` | Halt progression when tier average is below *score* |
 | `--scenario <name>` | Run one scenario |
 | `--scenarios a,b,c` | Run a subset |
-| `--model <name\|auto>` | Ollama model for Bitfield Agent |
+| `--model <name\|auto>` | Ollama model for Bitfield Ollama Agent |
 | `--skip-judge` | Run agent only (no Cursor CLI) |
 | `--judge-model auto` | Judge model (default `auto`) |
 | `--keep-workspace` | Leave temp dir for inspection |
@@ -601,7 +601,7 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
 | `src/context-builder.mjs` | System prompt: instruction files, rule index, git snapshot, environment |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
-| `src/checkpoints.mjs` | Pre-edit file snapshots under `.halo-agent/checkpoints/` with list/restore |
+| `src/checkpoints.mjs` | Pre-edit file snapshots under `.bf/bf-agent/checkpoints/` with list/restore |
 | `src/model-tuning.mjs` | Per-model-family settings: think mode, prompt overlay |
 | `src/openai-server.mjs` | `/v1/chat/completions` facade over the loop |
 | `src/session-store.mjs` | Persist/resume sessions with step log and changed files |
@@ -610,22 +610,22 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/index.mjs` | SDK entry point (`createAgent` and all public exports) |
 | `src/tools/builtin.mjs` | Registers the standard tool set (diagnostics + file + search + rules + shell) |
 | `src/tools/fs.mjs` | Workspace-scoped file tools and path guards |
-| `src/tools/output.mjs` | Spills long tool output to `.halo-agent/tool-output/` (head + tail + path) |
+| `src/tools/output.mjs` | Spills long tool output to `.bf/bf-agent/tool-output/` (head + tail + path) |
 | `src/tools/search.mjs` | `grep_search` and `find_files` over the workspace tree |
 | `src/tools/web-search.mjs` | `web_search` via DuckDuckGo HTML results |
 | `src/tools/fetch-url.mjs` | `fetch_url` with HTML extract + micro-RAG |
 | `src/tools/shell.mjs` | `run_command` with tree-kill timeout |
 | `src/cli.mjs` | Command-line entry point |
 | `Dockerfile` | Image for `bf-agent serve` (and one-shot CLI via `compose run`) |
-| `docker-compose.yml` | Ollama + Bitfield Agent; see `docker-compose.gpu.yml` and `docker-compose.host-ollama.yml` |
+| `docker-compose.yml` | Ollama + Bitfield Ollama Agent; see `docker-compose.gpu.yml` and `docker-compose.host-ollama.yml` |
 | `evals/` | Live-model eval harness (`evals/run.mjs`), dev bench (`evals/dev-bench.mjs`), recognized benches (`evals/recognized/`) |
 
 ## Relationship to Aura Wire
 
-Bitfield Agent is a standalone product, but **Wire is the pairing that completes it**:
+Bitfield Ollama Agent is a standalone product, but **Wire is the pairing that completes it**:
 Wire provides the OpenAI `/v1` front door, routing rules, cost observability,
-compression, and guardrails; Bitfield Agent provides the loop and local tool execution.
+compression, and guardrails; Bitfield Ollama Agent provides the loop and local tool execution.
 IDE integration is deliberately Wire's job — editors point at Wire, and Wire
-routes to Bitfield Agent as a custom provider via `bf-agent serve` (the
+routes to Bitfield Ollama Agent as a custom provider via `bf-agent serve` (the
 OpenAI-compatible door, roadmap item 10). Composition is HTTP only, no shared
 code. Details from the Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.

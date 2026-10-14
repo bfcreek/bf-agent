@@ -174,7 +174,7 @@ export function formatRecognizedMarkdown(report) {
   }
 
   if (report.recommendations.length > 0) {
-    lines.push("## Recommendations for Bitfield Agent", "");
+    lines.push("## Recommendations for Bitfield Ollama Agent", "");
     for (const rec of report.recommendations) {
       const seen = rec.count > 1 ? ` (${rec.count}x: ${rec.tasks.join(", ")})` : "";
       lines.push(`- **[${rec.priority}] ${rec.area}:** ${rec.suggestion}${seen}`);

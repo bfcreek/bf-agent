@@ -1,8 +1,8 @@
 /**
  * Lightweight project RAG: index README and other key docs into
- * `.halo-agent/project-index.json`, embed with Ollama, search by cosine
+ * `.bf/bf-agent/project-index.json`, embed with Ollama, search by cosine
  * similarity. No npm dependencies — vectors stay on disk, gitignored via
- * `.halo-agent/`. Exposed to the model only through the `search_project`
+ * `.bf/bf-agent/`. Exposed to the model only through the `search_project`
  * tool; nothing is injected into the prompt up front.
  */
 
@@ -10,9 +10,11 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { AGENT_DATA_DIR, AGENT_DATA_SKIP_NAMES, migrateAgentDataDir } from "./workspace-data.mjs";
+
 export const DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
 export const INDEX_VERSION = 1;
-export const INDEX_DIR = ".halo-agent";
+export const INDEX_DIR = AGENT_DATA_DIR;
 export const INDEX_FILE = "project-index.json";
 
 const ROOT_KEY_FILES = [
@@ -25,7 +27,7 @@ const ROOT_KEY_FILES = [
 
 const SKIP_DIRS = new Set([
   ".git",
-  ".halo-agent",
+  ...AGENT_DATA_SKIP_NAMES,
   "node_modules",
   "dist",
   "build",
@@ -132,6 +134,7 @@ export async function discoverIndexFiles(workspaceRoot) {
  * @returns {Promise<object|null>}
  */
 export async function loadIndex(workspaceRoot) {
+  await migrateAgentDataDir(workspaceRoot);
   try {
     const raw = await readFile(indexPath(workspaceRoot), "utf8");
     return JSON.parse(raw);
@@ -258,6 +261,7 @@ export async function ensureProjectIndex({
  * @param {object} index
  */
 export async function saveIndex(workspaceRoot, index) {
+  await migrateAgentDataDir(workspaceRoot);
   const dir = path.join(path.resolve(workspaceRoot), INDEX_DIR);
   await mkdir(dir, { recursive: true });
   await writeFile(indexPath(workspaceRoot), JSON.stringify(index), "utf8");

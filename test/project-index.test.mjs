@@ -27,7 +27,7 @@ class MockEmbedClient {
 
 before(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "halo-agent-rag-"));
-  await writeFile(path.join(root, "README.md"), "# Bitfield Agent\n\nLocal agent runtime.\n", "utf8");
+  await writeFile(path.join(root, "README.md"), "# Bitfield Ollama Agent\n\nLocal agent runtime.\n", "utf8");
   await writeFile(
     path.join(root, "package.json"),
     JSON.stringify({ name: "demo", version: "1.0.0", description: "A demo" }),

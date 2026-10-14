@@ -1,5 +1,5 @@
 /**
- * Bitfield Agent SDK entry point.
+ * Bitfield Ollama Agent SDK entry point.
  *
  *   import { createAgent } from "@bitfieldcreek/bf-agent";
  *   const agent = await createAgent({ workspaceRoot: process.cwd() });
@@ -27,6 +27,7 @@ import { ensureProjectIndex } from "./project-index.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { ensureAgentDataDir } from "./workspace-data.mjs";
 
 export {
   AgentLoop,
@@ -38,6 +39,18 @@ export {
 } from "./agent-loop.mjs";
 
 export { CHECKPOINT_DIR, CheckpointStore } from "./checkpoints.mjs";
+
+export {
+  AGENT_DATA_DIR,
+  AGENT_DATA_DIR_POSIX,
+  AGENT_DATA_SKIP_NAMES,
+  LEGACY_AGENT_DATA_DIR,
+  LEGACY_AGENT_DATA_DIRS,
+  agentDataPath,
+  agentDataRel,
+  ensureAgentDataDir,
+  migrateAgentDataDir,
+} from "./workspace-data.mjs";
 
 export {
   describeFitBudget,
@@ -310,6 +323,8 @@ export async function createAgent({
       resolvedClient.model = model;
     }
   }
+
+  await ensureAgentDataDir(workspaceRoot);
 
   const useIndex = projectIndex && typeof resolvedClient.embed === "function";
   const checkpointStore = checkpoints ? new CheckpointStore({ workspaceRoot }) : undefined;
