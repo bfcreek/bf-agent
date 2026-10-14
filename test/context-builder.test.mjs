@@ -236,3 +236,16 @@ This should not appear.
     await rm(userDir, { recursive: true, force: true });
   }
 });
+
+test("workspace top-level listing hides the agent data directory", async () => {
+  const { listWorkspaceTopLevel } = await import("../src/context-builder.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "bf-agent-ctx-"));
+  try {
+    await mkdir(path.join(root, ".bf", "bf-agent"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    const names = await listWorkspaceTopLevel(root);
+    assert.deepEqual(names, ["src/"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

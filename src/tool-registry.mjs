@@ -27,6 +27,76 @@ const TOOL_TYPO_HINTS = {
 };
 
 /**
+ * @typedef {object} ToolAlias
+ * @property {string} target Registered tool the alias resolves to.
+ * @property {(args: object) => object} [args] Rewrites the caller's arguments
+ *   into the target's schema (e.g. `query` -> `pattern`).
+ */
+
+const grepAliasArgs = (a) => {
+  const o = { ...a };
+  if (o.query != null && o.pattern == null) o.pattern = o.query;
+  if (o.regex != null && o.pattern == null) o.pattern = o.regex;
+  delete o.query;
+  delete o.regex;
+  return o;
+};
+
+const readAliasArgs = (a) => {
+  const o = { ...a };
+  if (o.file != null && o.path == null) o.path = o.file;
+  if (o.filename != null && o.path == null) o.path = o.filename;
+  if (o.line_start != null && o.offset == null) {
+    o.offset = o.line_start;
+    if (o.line_end != null && o.limit == null) o.limit = Math.max(1, o.line_end - o.line_start + 1);
+  }
+  if (o.start_line != null && o.offset == null) {
+    o.offset = o.start_line;
+    if (o.end_line != null && o.limit == null) o.limit = Math.max(1, o.end_line - o.start_line + 1);
+  }
+  for (const k of ["file", "filename", "line_start", "line_end", "start_line", "end_line"]) delete o[k];
+  return o;
+};
+
+const shellAliasArgs = (a) => {
+  const o = { ...a };
+  if (o.cmd != null && o.command == null) o.command = o.cmd;
+  delete o.cmd;
+  return o;
+};
+
+/**
+ * Names models reach for that are not real tools, mapped onto the builtin
+ * they meant. Costs no schema tokens: an alias only resolves when its target
+ * is registered, and the call runs as the target. Measured on the halo-scan
+ * tool bench: roughly 60 of 97 tool errors on gpt-oss:20b were calls to
+ * names like `search` and `open_file`.
+ *
+ * @type {Readonly<Record<string, ToolAlias>>}
+ */
+export const DEFAULT_TOOL_ALIASES = Object.freeze({
+  search: { target: "grep_search", args: grepAliasArgs },
+  search_file: { target: "grep_search", args: grepAliasArgs },
+  search_files: { target: "grep_search", args: grepAliasArgs },
+  search_code: { target: "grep_search", args: grepAliasArgs },
+  search_text: { target: "grep_search", args: grepAliasArgs },
+  grep: { target: "grep_search", args: grepAliasArgs },
+  rg: { target: "grep_search", args: grepAliasArgs },
+  open_file: { target: "read_file", args: readAliasArgs },
+  view_file: { target: "read_file", args: readAliasArgs },
+  cat: { target: "read_file", args: readAliasArgs },
+  read: { target: "read_file", args: readAliasArgs },
+  list_files: { target: "find_files" },
+  glob: { target: "find_files" },
+  ls: { target: "list_dir" },
+  list_directory: { target: "list_dir" },
+  shell: { target: "run_command", args: shellAliasArgs },
+  bash: { target: "run_command", args: shellAliasArgs },
+  execute_command: { target: "run_command", args: shellAliasArgs },
+  run_shell_command: { target: "run_command", args: shellAliasArgs },
+});
+
+/**
  * @param {string} name
  * @param {string[]} validNames
  * @returns {string[]}
@@ -70,6 +140,43 @@ export class ToolRegistry {
      * @type {{goal?: string}|null}
      */
     this.runContext = null;
+    /**
+     * Alternate names resolved at call time (see {@link DEFAULT_TOOL_ALIASES}).
+     * Never listed in `schemas()`.
+     * @type {Map<string, ToolAlias>}
+     */
+    this.aliases = new Map(Object.entries(DEFAULT_TOOL_ALIASES));
+  }
+
+  /**
+   * Add call-time aliases. An alias whose target is not registered is simply
+   * never matched, so a full table can be installed up front.
+   * @param {Record<string, ToolAlias>|Map<string, ToolAlias>} aliases
+   */
+  registerAliases(aliases) {
+    const entries = aliases instanceof Map ? aliases.entries() : Object.entries(aliases ?? {});
+    for (const [name, alias] of entries) {
+      if (!name || !alias?.target) continue;
+      this.aliases.set(name, { target: alias.target, args: alias.args });
+    }
+    return this;
+  }
+
+  /**
+   * Resolve a call name to a registered tool, following aliases when the name
+   * itself is not registered but its alias target is.
+   * @param {string} name
+   * @param {object} [args]
+   * @returns {{tool: ToolDefinition, args: object, alias: string|null}|null}
+   */
+  resolve(name, args = {}) {
+    const direct = this.tools.get(name);
+    if (direct) return { tool: direct, args: args ?? {}, alias: null };
+    const alias = this.aliases.get(name);
+    if (!alias) return null;
+    const target = this.tools.get(alias.target);
+    if (!target) return null;
+    return { tool: target, args: alias.args ? alias.args(args ?? {}) : args ?? {}, alias: name };
   }
 
   /** Set (or clear) the per-run context. The agent loop calls this per run. */
@@ -126,8 +233,31 @@ export class ToolRegistry {
     return this;
   }
 
+  /**
+   * Register a tool, replacing any existing one with the same name. Used
+   * when an embedded toolset supersedes a builtin (same name, richer tool).
+   * @param {ToolDefinition} tool
+   * @returns {boolean} True when an existing tool was replaced.
+   */
+  replace(tool) {
+    const existed = this.tools.has(tool?.name);
+    if (existed) this.tools.delete(tool.name);
+    this.register(tool);
+    return existed;
+  }
+
+  /** @param {string} name @returns {boolean} True when a tool was removed. */
+  unregister(name) {
+    return this.tools.delete(name);
+  }
+
   has(name) {
     return this.tools.has(name);
+  }
+
+  /** @returns {string[]} Registered tool names in registration order. */
+  names() {
+    return [...this.tools.keys()];
   }
 
   /** Tool schemas in the OpenAI function shape Ollama accepts. */
@@ -150,20 +280,10 @@ export class ToolRegistry {
    * @param {string} name
    * @param {object|string|null|undefined} args Object, or JSON text from
    *   models that stringify arguments.
-   * @returns {Promise<{ok: boolean, result?: unknown, error?: string}>}
+   * @returns {Promise<{ok: boolean, result?: unknown, error?: string, resolvedName?: string}>}
+   *   `resolvedName` is set when the call came in under an alias.
    */
   async execute(name, args) {
-    const tool = this.tools.get(name);
-    if (!tool) {
-      const valid = [...this.tools.keys()];
-      const similar = suggestSimilarTools(name, valid);
-      const hint = similar.length ? ` Did you mean: ${similar.join(", ")}?` : "";
-      return {
-        ok: false,
-        error: `Unknown tool '${name}'. Available tools: ${valid.join(", ") || "(none)"}.${hint}`,
-      };
-    }
-
     let parsedArgs = args;
     if (typeof args === "string") {
       try {
@@ -177,14 +297,28 @@ export class ToolRegistry {
       }
     }
 
+    const resolved = this.resolve(name, parsedArgs ?? {});
+    if (!resolved) {
+      const valid = [...this.tools.keys()];
+      const similar = suggestSimilarTools(name, valid);
+      const hint = similar.length ? ` Did you mean: ${similar.join(", ")}?` : "";
+      return {
+        ok: false,
+        error: `Unknown tool '${name}'. Available tools: ${valid.join(", ") || "(none)"}.${hint}`,
+      };
+    }
+    const { tool } = resolved;
+    parsedArgs = resolved.args;
+    const aliasNote = resolved.alias ? { resolvedName: tool.name } : {};
+
     let approvedCall = false;
     if (tool.requiresApproval) {
-      if (this.isAutoApproved(name)) {
+      if (this.isAutoApproved(tool.name)) {
         approvedCall = true;
       } else if (this.approvalHandler) {
         let approved;
         try {
-          approved = await this.approvalHandler({ name, args: parsedArgs ?? {} });
+          approved = await this.approvalHandler({ name: tool.name, args: parsedArgs ?? {} });
         } catch (err) {
           return { ok: false, error: `Approval check failed: ${err?.message ?? err}` };
         }
@@ -201,9 +335,9 @@ export class ToolRegistry {
     this.callApproved = approvedCall;
     try {
       const result = await tool.execute(parsedArgs ?? {});
-      return { ok: true, result };
+      return { ok: true, result, ...aliasNote };
     } catch (err) {
-      return { ok: false, error: `Tool '${name}' failed: ${err?.message ?? err}` };
+      return { ok: false, error: `Tool '${tool.name}' failed: ${err?.message ?? err}`, ...aliasNote };
     } finally {
       this.callApproved = false;
     }

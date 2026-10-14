@@ -30,49 +30,71 @@ import { isProviderClientError, isTransientProviderError } from "./provider-clie
 export const DEFAULT_MAX_OUTPUT_TOKENS = 12_000;
 
 /**
- * Core instructions. Short on purpose: task knowledge belongs in rules files
- * (`AGENTS.md`, `.cursor/rules`) and in what the model discovers with tools,
- * not in the system prompt. Model-family quirks are appended separately by
- * `modelPromptOverlay`.
+ * The "find your context" bullet of the core prompt for the builtin tool set.
+ * `composeSystemPrompt` swaps this out when a richer toolset (Halo Scan) is
+ * embedded: a model told to grep/read/list first will do exactly that and
+ * never pick the structured tools, so the guidance has to replace this line,
+ * not follow it.
  */
-export const DEFAULT_SYSTEM_PROMPT = [
-  "You are a coding agent working in the user's workspace. You complete tasks by",
-  "calling tools, reading their results, and continuing until the task is done.",
-  "",
-  "How to work:",
+export const BUILTIN_CONTEXT_GUIDANCE = [
   "- Gather context yourself. Use grep_search and find_files to locate code,",
   "  read_file to read it, list_dir to orient. Do not guess at file contents",
   "  or APIs when a tool can show you.",
-  "- Read a file before editing it. Prefer edit_file for changes to existing",
-  "  files; use write_file for new files or full rewrites.",
-  "- Verify your work: run the project's tests, build, or the command the user",
-  "  named, and read the output. Fix what fails.",
-  "- If a tool call fails, read the error and change your approach instead of",
-  "  repeating the same call.",
-  "- Keep going until the task is complete, then reply to the user in plain",
-  "  text with no tool calls. If you cannot finish, say what was done and what",
-  "  remains.",
-  "- Never end a turn with only internal reasoning. If the next action is a",
-  "  tool call, emit it in that same turn.",
-  "",
-  "Communication:",
-  "- Answer the user's actual question first, then give supporting detail.",
-  "- Write for a reader who did not see your tool calls; the final message must",
-  "  stand alone. Mention only files you actually created or changed.",
-  "- When citing code, name the file path and quote only the relevant lines.",
-  "",
-  "Scope and safety:",
-  "- Change only what the task requires. Match existing style and conventions.",
-  "  Do not add docs, refactors, or extra files unless asked.",
-  "- Only run git commit or git push when the user asked for it. Never rewrite",
-  "  published history, skip hooks, or change git config unless asked.",
-  "- Deleting files is destructive: delete only files the user explicitly named.",
-  "  If a task implies deleting something unnamed, stop and ask.",
-  "- Refuse requests whose intent is to harm others: malware, unauthorized access",
-  "  to systems you were not given, attacks on real targets. Security analysis of",
-  "  code in the workspace — cryptanalysis, CTF-style exercises, fuzzing, writing",
-  "  a proof-of-concept against the user's own program — is legitimate work; do it.",
 ].join("\n");
+
+/**
+ * Build the core system prompt. `contextGuidance` is the bullet (or bullets)
+ * that tell the model how to find context with the tools it actually has.
+ *
+ * @param {{ contextGuidance?: string }} [options]
+ * @returns {string}
+ */
+export function composeSystemPrompt({ contextGuidance = BUILTIN_CONTEXT_GUIDANCE } = {}) {
+  return [
+    "You are a coding agent working in the user's workspace. You complete tasks by",
+    "calling tools, reading their results, and continuing until the task is done.",
+    "",
+    "How to work:",
+    contextGuidance,
+    "- Read a file before editing it. Prefer edit_file for changes to existing",
+    "  files; use write_file for new files or full rewrites.",
+    "- Verify your work: run the project's tests, build, or the command the user",
+    "  named, and read the output. Fix what fails.",
+    "- If a tool call fails, read the error and change your approach instead of",
+    "  repeating the same call.",
+    "- Keep going until the task is complete, then reply to the user in plain",
+    "  text with no tool calls. If you cannot finish, say what was done and what",
+    "  remains.",
+    "- Never end a turn with only internal reasoning. If the next action is a",
+    "  tool call, emit it in that same turn.",
+    "",
+    "Communication:",
+    "- Answer the user's actual question first, then give supporting detail.",
+    "- Write for a reader who did not see your tool calls; the final message must",
+    "  stand alone. Mention only files you actually created or changed.",
+    "- When citing code, name the file path and quote only the relevant lines.",
+    "",
+    "Scope and safety:",
+    "- Change only what the task requires. Match existing style and conventions.",
+    "  Do not add docs, refactors, or extra files unless asked.",
+    "- Only run git commit or git push when the user asked for it. Never rewrite",
+    "  published history, skip hooks, or change git config unless asked.",
+    "- Deleting files is destructive: delete only files the user explicitly named.",
+    "  If a task implies deleting something unnamed, stop and ask.",
+    "- Refuse requests whose intent is to harm others: malware, unauthorized access",
+    "  to systems you were not given, attacks on real targets. Security analysis of",
+    "  code in the workspace — cryptanalysis, CTF-style exercises, fuzzing, writing",
+    "  a proof-of-concept against the user's own program — is legitimate work; do it.",
+  ].join("\n");
+}
+
+/**
+ * Core instructions for the builtin tool set. Short on purpose: task
+ * knowledge belongs in rules files (`AGENTS.md`, `.cursor/rules`) and in what
+ * the model discovers with tools, not in the system prompt. Model-family
+ * quirks are appended separately by `modelPromptOverlay`.
+ */
+export const DEFAULT_SYSTEM_PROMPT = composeSystemPrompt();
 
 /** Safety cap on model round-trips per turn. Cursor has no cap; ours is generous. */
 export const DEFAULT_MAX_STEPS = 100;
@@ -118,6 +140,33 @@ export const WALL_CLOCK_RESERVE_MIN_MS = 15_000;
 export const WALL_CLOCK_RESERVE_MAX_MS = 60_000;
 export const WRAP_UP_TURN_MARGIN = 1.2;
 
+/**
+ * Streak nudge: after this many consecutive calls to the same read-only tool
+ * with no answer in between, one steer message asks the model to answer or
+ * switch to a tool that answers in one call. Measured on gpt-oss:20b with the
+ * halo-scan tool bench, every run that hit the step cap was such a streak
+ * (grep ×14, read_file ×12, test_inventory ×18, list_dir ×19) at 10-25k
+ * prompt tokens per step; exact repeats were rare, so a dedupe check would
+ * not have caught them. Streaks of mutating tools (write_file ×15 while
+ * scaffolding a project) are legitimate and are never nudged. Off unless
+ * `streakNudgeAfter` is set.
+ */
+export const DEFAULT_STREAK_NUDGE_AFTER = 6;
+export const DEFAULT_STREAK_NUDGE_HINT =
+  "Prefer a tool that answers the question in one call over repeating a primitive one.";
+
+/**
+ * @param {string} tool
+ * @param {number} count
+ * @param {string} [hint] Catalog-specific alternatives (Halo Scan supplies one).
+ */
+export function streakNudgePrompt(tool, count, hint = DEFAULT_STREAK_NUDGE_HINT) {
+  return (
+    `You have called ${tool} ${count} times in a row. If what you have already answers the question, ` +
+    `answer now in plain text. If not, do not call ${tool} again for the same purpose: ${hint}`
+  );
+}
+
 /** Sent when the step or time budget runs out, so the run still ends with an answer. */
 const WRAP_UP_PROMPT = [
   "The budget for this task is exhausted. Do not call any more tools.",
@@ -158,7 +207,9 @@ const TOOL_CALL_PARSE_NUDGE = [
 /**
  * @typedef {object} AgentRunResult
  * @property {string} text Final assistant answer ("" if the loop was cut off).
- * @property {"completed"|"empty"|"max-steps"|"aborted"|"failed"} stopReason
+ * @property {"completed"|"empty"|"max-steps"|"token-budget"|"aborted"|"failed"} stopReason
+ *   `token-budget`: cumulative prompt tokens passed `maxPromptTokens`; the
+ *   wrap-up answer (if any) is in `text`.
  * @property {AgentStep[]} steps
  * @property {Array<object>} messages Full transcript, replayable into another run.
  * @property {number} elapsedMs
@@ -168,6 +219,8 @@ const TOOL_CALL_PARSE_NUDGE = [
  * @property {number} compactionFailures Compactions that were due but produced no usable summary.
  * @property {number} truncatedTurns Model calls cut off by the output limit before a tool call or text.
  * @property {boolean} [wallClockExhausted]
+ * @property {number} promptTokens Cumulative prompt tokens across the run's model calls (0 when the provider reports none).
+ * @property {number} streakNudges How many streak nudges were injected.
  * @property {string} [error] Why a "failed" run stopped.
  */
 
@@ -208,6 +261,15 @@ export class AgentLoop {
    *   turn that needs more than the reserve has already broken the window
    *   accounting, so cut it off early and re-ask instead of letting a runaway
    *   reasoning channel run the window dry. 0 disables the cap.
+   * @param {number} [options.maxPromptTokens] Cumulative prompt-token budget
+   *   for one run (0 = none). Steps are not uniform — one costs 3k tokens,
+   *   another 20k — so this caps what a run actually costs; `maxSteps` stays
+   *   as the hard safety net. When exceeded the loop takes the same wrap-up
+   *   path as the step cap and reports `stopReason: "token-budget"`.
+   * @param {number} [options.streakNudgeAfter] Consecutive calls to one
+   *   read-only tool before a steer message asks the model to answer or
+   *   switch tools (0 = off). See {@link DEFAULT_STREAK_NUDGE_AFTER}.
+   * @param {string} [options.streakNudgeHint] Alternatives named in the nudge.
    * @param {() => number} [options.now] Clock for the wall-clock budget (tests).
    */
   constructor({
@@ -222,6 +284,9 @@ export class AgentLoop {
     maxStopHookLoops = DEFAULT_MAX_STOP_HOOK_LOOPS,
     wallClockMs = 0,
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    maxPromptTokens = 0,
+    streakNudgeAfter = 0,
+    streakNudgeHint = DEFAULT_STREAK_NUDGE_HINT,
     now = Date.now,
   } = {}) {
     if (!client?.chat) throw new Error("AgentLoop requires a client with chat().");
@@ -237,6 +302,9 @@ export class AgentLoop {
     this.maxStopHookLoops = maxStopHookLoops;
     this.wallClockMs = Number.isFinite(wallClockMs) && wallClockMs > 0 ? wallClockMs : 0;
     this.maxOutputTokens = Number.isFinite(maxOutputTokens) && maxOutputTokens > 0 ? Math.floor(maxOutputTokens) : 0;
+    this.maxPromptTokens = Number.isFinite(maxPromptTokens) && maxPromptTokens > 0 ? Math.floor(maxPromptTokens) : 0;
+    this.streakNudgeAfter = Number.isFinite(streakNudgeAfter) && streakNudgeAfter > 0 ? Math.floor(streakNudgeAfter) : 0;
+    this.streakNudgeHint = String(streakNudgeHint ?? DEFAULT_STREAK_NUDGE_HINT);
     this.now = typeof now === "function" ? now : Date.now;
     /** @type {string[]} Messages delivered at the next tool boundary. */
     this._steering = [];
@@ -336,25 +404,38 @@ export class AgentLoop {
       compactions,
       compactionFailures,
       truncatedTurns,
+      promptTokens: promptTokensTotal,
+      streakNudges,
     });
 
     let observedTokens = 0;
+    let promptTokensTotal = 0;
     let stepIndex = 0;
     let stopHookLoops = 0;
     let emptyRetries = 0;
     let compactions = 0;
     let compactionFailures = 0;
     let truncatedTurns = 0;
+    let streakNudges = 0;
+    /** Current run of consecutive calls to one read-only tool. */
+    let streakTool = null;
+    let streakCount = 0;
+    let streakNudged = false;
     /** Per-call think override for the next model call (set after a truncated turn). */
     let nextThink;
     let currentGoal = goal;
     let wallClockExhausted = false;
+    let tokenBudgetExhausted = false;
 
     while (true) {
       if (signal?.aborted) return finish({ text: "", stopReason: "aborted" });
       if (stepIndex >= this.maxSteps) break;
       if (outOfTime()) {
         wallClockExhausted = true;
+        break;
+      }
+      if (this.maxPromptTokens > 0 && promptTokensTotal >= this.maxPromptTokens) {
+        tokenBudgetExhausted = true;
         break;
       }
 
@@ -438,6 +519,9 @@ export class AgentLoop {
       const { message, raw } = chatResult;
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
+      if (typeof raw?.prompt_eval_count === "number" && raw.prompt_eval_count > 0) {
+        promptTokensTotal += raw.prompt_eval_count;
+      }
       // Per-step telemetry for efficiency analysis: how long the model took
       // and how much context it was carrying.
       const truncated = raw?.done_reason === "length";
@@ -530,6 +614,9 @@ export class AgentLoop {
       if (toolCalls.length === 0) {
         const text = textOf(message.content).trim();
         emptyRetries = 0;
+        streakTool = null;
+        streakCount = 0;
+        streakNudged = false;
 
         // The model ended its turn. A stop hook may keep it going.
         if (this.hooks.stop && stopHookLoops < this.maxStopHookLoops) {
@@ -584,8 +671,32 @@ export class AgentLoop {
         }
         executed.push({ name, args, ...outcome, durationMs: Math.max(0, Math.round(this.now() - toolStarted)) });
         messages.push({ role: "tool", tool_name: name, content: toolResultContent(outcome) });
+
+        // Streak tracking: consecutive calls to one read-only tool. Aliases
+        // resolve to their target so `search` and `grep_search` are one
+        // streak. Mutating (approval-gated) tools and unknown names reset it.
+        if (this.streakNudgeAfter > 0) {
+          const resolved = this.registry.resolve?.(name, args)?.tool;
+          const readOnly = resolved && !resolved.requiresApproval && outcome?.ok !== false;
+          const key = readOnly ? resolved.name : null;
+          if (key && key === streakTool) {
+            streakCount += 1;
+          } else {
+            streakTool = key;
+            streakCount = key ? 1 : 0;
+            streakNudged = false;
+          }
+        }
       }
       record({ index, kind: "tool-calls", content: textOf(message.content), toolCalls: executed, ...turnMeta });
+
+      if (this.streakNudgeAfter > 0 && streakTool && streakCount >= this.streakNudgeAfter && !streakNudged) {
+        streakNudged = true;
+        streakNudges += 1;
+        const text = streakNudgePrompt(streakTool, streakCount, this.streakNudgeHint);
+        messages.push({ role: "user", content: text });
+        record({ index, kind: "steer", content: text, toolCalls: [], nudge: { tool: streakTool, count: streakCount } });
+      }
 
       // Steering lands at the tool boundary, after results, so in-flight
       // work is preserved and the model sees the results and the redirect
@@ -625,7 +736,7 @@ export class AgentLoop {
     }
     return finish({
       text,
-      stopReason: "max-steps",
+      stopReason: tokenBudgetExhausted ? "token-budget" : "max-steps",
       ...(wallClockExhausted ? { wallClockExhausted: true } : {}),
     });
   }

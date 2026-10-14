@@ -168,13 +168,19 @@ test("invalid option values are rejected with specific messages", () => {
   const badWallClock = cli("hello", "--wall-clock", "soon");
   assert.equal(badWallClock.status, 1);
   assert.match(badWallClock.stderr, /--wall-clock needs a positive integer \(seconds\), got 'soon'/);
+
+  const badBudget = cli("hello", "--max-prompt-tokens", "lots");
+  assert.equal(badBudget.status, 1);
+  assert.match(badBudget.stderr, /--max-prompt-tokens needs a positive integer, got 'lots'/);
 });
 
-test("--wall-clock is documented in help", () => {
+test("--wall-clock, --max-prompt-tokens, and --streak-nudge are documented in help", () => {
   const run = cli("--help");
   assert.equal(run.status, 0);
   assert.match(run.stdout, /--wall-clock <sec>/);
   assert.match(run.stdout, /HALO_WALL_CLOCK_SECONDS/);
+  assert.match(run.stdout, /--max-prompt-tokens <n>/);
+  assert.match(run.stdout, /--streak-nudge \[n\]/);
 });
 
 test("a flag missing its value is reported", () => {

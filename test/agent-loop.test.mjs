@@ -218,6 +218,120 @@ test("stops at maxSteps and asks for a plain-text wrap-up answer", async () => {
   assert.equal(result.messages.at(-1).content, result.text);
 });
 
+test("prompt-token budget: cumulative prompt tokens stop the loop with a wrap-up and stopReason token-budget", async () => {
+  // Each call reports 1500 prompt tokens; budget 4000 allows 3 calls (0, 1500,
+  // 3000 before each), then the wrap-up call.
+  const script = [
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "Out of budget; here is what I have." },
+  ];
+  const client = {
+    calls: [],
+    async chat({ messages, tools }) {
+      this.calls.push({ messages, tools });
+      const message = script.shift();
+      return { message, raw: { message, prompt_eval_count: 1500, eval_count: 20 } };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 50, maxPromptTokens: 4000 });
+
+  const result = await loop.run("spend tokens");
+
+  assert.equal(result.stopReason, "token-budget");
+  assert.equal(result.steps.filter((s) => s.kind === "tool-calls").length, 3);
+  assert.equal(result.promptTokens, 4500);
+  assert.equal(result.text, "Out of budget; here is what I have.");
+  assert.equal(client.calls.at(-1).tools, undefined, "wrap-up offers no tools");
+});
+
+test("prompt-token budget is off by default and ignores providers that report no usage", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "done" },
+  ]);
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+  const result = await loop.run("go");
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.promptTokens, 0);
+  assert.equal(result.streakNudges, 0);
+});
+
+test("streak nudge: N consecutive calls to one read-only tool inject one steer message", async () => {
+  const calls = Array.from({ length: 4 }, (_, i) => ({
+    role: "assistant",
+    content: "",
+    tool_calls: [toolCall("add", { a: i, b: 1 })],
+  }));
+  const client = new FakeClient([...calls, { role: "assistant", content: "ok, answering" }]);
+  const loop = new AgentLoop({
+    client,
+    registry: makeRegistry(),
+    streakNudgeAfter: 3,
+    streakNudgeHint: "use multiply_many instead.",
+  });
+
+  const result = await loop.run("add a lot");
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.streakNudges, 1, "nudged once per streak, not on every call past the threshold");
+  const nudges = result.steps.filter((s) => s.kind === "steer" && s.nudge);
+  assert.equal(nudges.length, 1);
+  assert.deepEqual(nudges[0].nudge, { tool: "add", count: 3 });
+  assert.match(nudges[0].content, /called add 3 times in a row/);
+  assert.match(nudges[0].content, /use multiply_many instead\./);
+  // The nudge is the user message the 4th model call sees right after the 3rd tool result.
+  const fourth = client.calls[3].messages;
+  assert.equal(fourth.at(-1).role, "user");
+  assert.match(fourth.at(-1).content, /called add 3 times/);
+  assert.equal(fourth.at(-2).role, "tool");
+});
+
+test("streak nudge: mutating tools, failures, and tool switches reset the streak", async () => {
+  const registry = makeRegistry();
+  registry.register({
+    name: "write",
+    description: "Mutates.",
+    parameters: { type: "object", properties: {} },
+    requiresApproval: true,
+    execute: () => "written",
+  });
+  registry.registerAliases({ plus: { target: "add" } });
+  const client = new FakeClient([
+    // Six writes in a row: legitimate scaffolding, never nudged.
+    ...Array.from({ length: 6 }, () => ({ role: "assistant", content: "", tool_calls: [toolCall("write", {})] })),
+    // add, add, (alias) plus -> add == streak of 3 -> nudge.
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 2, b: 1 })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("plus", { a: 3, b: 1 })] },
+    // A failing call breaks the streak; two more adds do not reach 3 again.
+    { role: "assistant", content: "", tool_calls: [toolCall("explode", {})] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 4, b: 1 })] },
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 5, b: 1 })] },
+    { role: "assistant", content: "done" },
+  ]);
+  const loop = new AgentLoop({ client, registry, streakNudgeAfter: 3 });
+
+  const result = await loop.run("mixed");
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.streakNudges, 1);
+  const nudge = result.steps.find((s) => s.kind === "steer" && s.nudge);
+  assert.deepEqual(nudge.nudge, { tool: "add", count: 3 });
+  assert.equal(nudge.index, 9, "fires after the third add (the alias call), not after any write");
+});
+
+test("streak nudge is off unless streakNudgeAfter is set", async () => {
+  const client = new FakeClient([
+    ...Array.from({ length: 8 }, () => ({ role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] })),
+    { role: "assistant", content: "done" },
+  ]);
+  const result = await new AgentLoop({ client, registry: makeRegistry() }).run("go");
+  assert.equal(result.streakNudges, 0);
+  assert.equal(result.steps.filter((s) => s.kind === "steer").length, 0);
+});
+
 test("wrap-up failure still returns max-steps with empty text", async () => {
   let calls = 0;
   const client = {

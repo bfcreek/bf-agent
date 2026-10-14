@@ -46,8 +46,41 @@ test("parseCliArgs loads single scenario from config file", () => {
   assert.equal(values.model, "llama3.2");
   assert.equal(values.baseUrl, "http://example:11434");
   assert.equal(values.maxSteps, 5);
-  assert.equal(values.noIndex, true);
+  // Legacy spelling maps onto the current opt-in key.
+  assert.equal(values.index, false);
   assert.equal(values.noCheckpoints, true);
+});
+
+test("index, scan, and scan-profile config keys", () => {
+  const defaults = getBuiltinDefaults();
+  assert.equal(defaults.index, false);
+  assert.equal(defaults.scan, true);
+  assert.equal(defaults.scanProfile, "auto");
+
+  const { values, errors } = normalizeConfigValues({ index: true, scan: false, "scan-profile": "Base" });
+  assert.deepEqual(errors, []);
+  assert.equal(values.index, true);
+  assert.equal(values.scan, false);
+  assert.equal(values.scanProfile, "base");
+
+  assert.ok(normalizeConfigValues({ scan: "yes" }).errors.some((e) => e.includes("scan")));
+  assert.ok(normalizeConfigValues({ "scan-profile": "" }).errors.some((e) => e.includes("scan-profile")));
+});
+
+test("max-prompt-tokens and streak-nudge config keys", () => {
+  const defaults = getBuiltinDefaults();
+  assert.equal(defaults.maxPromptTokens, 0);
+  assert.equal(defaults.streakNudge, 0);
+
+  const { values, errors } = normalizeConfigValues({ "max-prompt-tokens": "400k", "streak-nudge": true });
+  assert.deepEqual(errors, []);
+  assert.equal(values.maxPromptTokens, 400000);
+  assert.equal(values.streakNudge, 6);
+  assert.equal(normalizeConfigValues({ "streak-nudge": 4 }).values.streakNudge, 4);
+  assert.equal(normalizeConfigValues({ "streak-nudge": false }).values.streakNudge, 0);
+  assert.equal(normalizeConfigValues({ "max-prompt-tokens": 250000 }).values.maxPromptTokens, 250000);
+  assert.ok(normalizeConfigValues({ "max-prompt-tokens": -1 }).errors.some((e) => e.includes("max-prompt-tokens")));
+  assert.ok(normalizeConfigValues({ "streak-nudge": "often" }).errors.some((e) => e.includes("streak-nudge")));
 });
 
 test("normalizeConfigValues reports invalid values", () => {

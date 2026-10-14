@@ -11,7 +11,13 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 
-import { AgentLoop, DEFAULT_MAX_STEPS, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+import {
+  AgentLoop,
+  composeSystemPrompt,
+  DEFAULT_MAX_STEPS,
+  DEFAULT_STREAK_NUDGE_AFTER,
+  DEFAULT_SYSTEM_PROMPT,
+} from "./agent-loop.mjs";
 import { CheckpointStore } from "./checkpoints.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
 import { ensureProjectIndex } from "./project-index.mjs";
@@ -31,6 +37,7 @@ import { createProviderClient, shouldRouteOllamaModel } from "./providers/factor
 import { SessionStore } from "./session-store.mjs";
 import { parseAutoApproveSpec, ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { HALO_SCAN_CONTEXT_GUIDANCE, HALO_SCAN_STREAK_HINT, registerHaloScanTools } from "./tools/halo-scan.mjs";
 import { ensureAgentDataDir } from "./workspace-data.mjs";
 import {
   applyConfigToDefaults,
@@ -166,6 +173,27 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         else if (raw !== undefined) options.errors.push(`--wall-clock needs a positive integer (seconds), got '${raw}'.`);
         break;
       }
+      case "--max-prompt-tokens": {
+        const raw = value(arg, ++i);
+        const n = Number.parseInt(String(raw ?? "").replace(/[_,]/g, "").replace(/k$/i, "000"), 10);
+        if (Number.isFinite(n) && n > 0) options.maxPromptTokens = n;
+        else if (raw !== undefined) options.errors.push(`--max-prompt-tokens needs a positive integer, got '${raw}'.`);
+        break;
+      }
+      case "--streak-nudge": {
+        // Optional count: `--streak-nudge` alone uses the default.
+        const next = argv[i + 1];
+        if (next !== undefined && /^\d+$/.test(next)) {
+          i += 1;
+          options.streakNudge = Number.parseInt(next, 10) || DEFAULT_STREAK_NUDGE_AFTER;
+        } else {
+          options.streakNudge = DEFAULT_STREAK_NUDGE_AFTER;
+        }
+        break;
+      }
+      case "--no-streak-nudge":
+        options.streakNudge = 0;
+        break;
       case "--quiet":
         options.quiet = true;
         break;
@@ -222,9 +250,23 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         if (name !== undefined) options.embedModel = name;
         break;
       }
-      case "--no-index":
-        options.noIndex = true;
+      case "--index":
+        options.index = true;
         break;
+      case "--no-index":
+        options.index = false;
+        break;
+      case "--no-scan":
+        options.scan = false;
+        break;
+      case "--scan":
+        options.scan = true;
+        break;
+      case "--scan-profile": {
+        const name = value(arg, ++i);
+        if (name !== undefined) options.scanProfile = String(name).trim().toLowerCase();
+        break;
+      }
       case "--json":
         options.json = true;
         break;
@@ -341,6 +383,12 @@ Options:
   --wall-clock <sec>   Wall-clock budget for the run (also HALO_WALL_CLOCK_SECONDS). Time spent
                        counts toward budget pressure, command timeouts are clamped to what
                        remains, and the loop wraps up before the deadline instead of being killed
+  --max-prompt-tokens <n>
+                       Cumulative prompt-token budget for the run (e.g. 400k). Steps cost 3k-20k
+                       tokens each, so this caps spend where --max-steps cannot; the loop wraps
+                       up with a plain-text answer when it is exceeded (exit code 2)
+  --streak-nudge [n]   After n (default ${DEFAULT_STREAK_NUDGE_AFTER}) consecutive calls to one read-only tool,
+                       tell the model to answer or switch to a one-call tool. Off by default
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
                        agent: run them unattended (default when not a TTY, and in serve mode).
@@ -352,9 +400,17 @@ Options:
                        In ask mode, tools outside the list still prompt
   --no-auto-approve    Do not auto-approve tools (overrides config)
   --session <name>     Persist/resume this conversation (.bf/bf-agent/sessions/ in the workspace)
-  --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools appear as mcp_<name>
-  --embed-model <name> Embedding model for project index (default nomic-embed-text)
-  --no-index           Skip building the local project vector index
+  --mcp "<command>"    Attach an MCP server (stdio); repeatable. Tools are listed by name and
+                       reached through describe_tool / call_mcp_tool
+  --no-scan            Do not embed Halo Scan's code tools (repo_overview, file_outline,
+                       get_symbol, symbol_context, ...). They are embedded natively when
+                       @bitfieldcreek/halo-scan is installed; their read_file / grep_search /
+                       list_dir / find_files replace the builtins
+  --scan-profile <p>   Halo Scan tool packs: auto (default; fingerprints the repo), base,
+                       full, or a pack name (symbols, quality, web, config)
+  --index              Build the local project vector index and register search_project
+                       (off by default; needs an Ollama embedding model)
+  --embed-model <name> Embedding model for --index and fetch_url (default nomic-embed-text)
   --think <mode>       Native model reasoning: auto (default), true, false/off,
                        or low|medium|high|max (for thinking models / gpt-oss)
   --no-checkpoints     Do not snapshot files before write_file/edit_file
@@ -544,6 +600,10 @@ async function runInteractiveSession({
           console.error(
             `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
           );
+        } else if (result.stopReason === "token-budget") {
+          console.error(
+            `Stopped at the prompt-token budget (${result.promptTokens} of ${options.maxPromptTokens} tokens); the answer below may be incomplete (raise --max-prompt-tokens to allow more).`,
+          );
         }
         if (result.text) console.log(result.text);
       } catch (err) {
@@ -615,6 +675,10 @@ async function listOllamaModels(options) {
 /** @param {object} step */
 function describeStep(step) {
   if (step.kind === "steer") {
+    if (step.nudge) {
+      console.error(`[nudge] ${step.nudge.tool} x${step.nudge.count}: asked the model to answer or switch tools`);
+      return;
+    }
     console.error(`[steer] ${step.content}`);
     return;
   }
@@ -624,7 +688,10 @@ function describeStep(step) {
   }
   for (const call of step.toolCalls ?? []) {
     const status = call.ok ? "ok" : `error: ${call.error}`;
-    console.error(`[step ${step.index}] ${call.name}(${JSON.stringify(call.args)}) -> ${status}`);
+    if (call.resolvedName && call.resolvedName !== call.name) {
+      console.error(`[alias] ${call.name} -> ${call.resolvedName}`);
+    }
+    console.error(`[step ${step.index}] ${call.resolvedName ?? call.name}(${JSON.stringify(call.args)}) -> ${status}`);
   }
 }
 
@@ -828,8 +895,9 @@ async function main() {
     client.model = options.model;
   }
 
-  const useIndex = !options.noIndex && typeof client.embed === "function";
-  if (!options.noIndex && !useIndex && provider !== "ollama" && !options.quiet) {
+  const canEmbed = typeof client.embed === "function";
+  const useIndex = options.index && canEmbed;
+  if (options.index && !useIndex && !options.quiet) {
     console.error(`[provider] project index skipped (${provider} has no embeddings API).`);
   }
 
@@ -837,10 +905,29 @@ async function main() {
   const checkpointStore = options.noCheckpoints ? undefined : new CheckpointStore({ workspaceRoot: options.cwd });
   const registry = registerBuiltinTools(new ToolRegistry(), {
     workspaceRoot: options.cwd,
-    searchClient: useIndex ? client : undefined,
+    searchClient: canEmbed ? client : undefined,
+    projectIndex: useIndex,
     embeddingModel: options.embedModel,
     checkpoints: checkpointStore,
   });
+
+  let haloScanInfo = null;
+  if (options.scan) {
+    try {
+      haloScanInfo = await registerHaloScanTools(registry, {
+        workspaceRoot: options.cwd,
+        profile: options.scanProfile,
+      });
+    } catch (err) {
+      if (!options.quiet) console.error(`[scan] halo-scan not embedded: ${err?.message ?? err}`);
+    }
+    if (haloScanInfo && !options.quiet) {
+      const replaced = haloScanInfo.replaced.length ? `; replaced ${haloScanInfo.replaced.join(", ")}` : "";
+      console.error(
+        `[scan] halo-scan: ${haloScanInfo.names.length} tools (profile ${haloScanInfo.profile ?? "full"}${replaced})`,
+      );
+    }
+  }
 
   const mcpClients = [];
   for (const spec of options.mcp) {
@@ -902,8 +989,11 @@ async function main() {
     }
   }
 
+  const corePrompt = haloScanInfo
+    ? composeSystemPrompt({ contextGuidance: HALO_SCAN_CONTEXT_GUIDANCE })
+    : DEFAULT_SYSTEM_PROMPT;
   const systemPrompt = await buildSystemPrompt({
-    basePrompt: DEFAULT_SYSTEM_PROMPT + nestedOverlay,
+    basePrompt: corePrompt + nestedOverlay,
     modelOverlay: modelPromptOverlay(loopModel),
     workspaceRoot: options.cwd,
     extraContext: formatMcpToolIndex(registry),
@@ -1009,6 +1099,13 @@ async function main() {
     onStep,
     compaction: {},
     wallClockMs: resolveWallClockMs(options),
+    ...(options.maxPromptTokens > 0 ? { maxPromptTokens: options.maxPromptTokens } : {}),
+    ...(options.streakNudge > 0
+      ? {
+          streakNudgeAfter: options.streakNudge,
+          ...(haloScanInfo ? { streakNudgeHint: HALO_SCAN_STREAK_HINT } : {}),
+        }
+      : {}),
     hooks: loopHooks,
   });
 
@@ -1051,11 +1148,13 @@ async function main() {
       }
     }
 
-    if (result.stopReason === "max-steps") {
+    if (result.stopReason === "max-steps" || result.stopReason === "token-budget") {
       console.error(
-        result.wallClockExhausted
-          ? `Stopped at the wall-clock budget (${Math.round((result.elapsedMs ?? 0) / 1000)}s); the answer below may be incomplete (raise --wall-clock to allow more).`
-          : `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
+        result.stopReason === "token-budget"
+          ? `Stopped at the prompt-token budget (${result.promptTokens} of ${options.maxPromptTokens} tokens); the answer below may be incomplete (raise --max-prompt-tokens to allow more).`
+          : result.wallClockExhausted
+            ? `Stopped at the wall-clock budget (${Math.round((result.elapsedMs ?? 0) / 1000)}s); the answer below may be incomplete (raise --wall-clock to allow more).`
+            : `Stopped after ${options.maxSteps} steps; the answer below may be incomplete (raise --max-steps to allow more).`,
       );
       if (result.text) console.log(result.text);
       process.exitCode = 2;

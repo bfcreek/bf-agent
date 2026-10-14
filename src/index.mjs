@@ -11,7 +11,7 @@
  * `afterToolCall`, `stop`) are where callers add policy.
  */
 
-import { AgentLoop, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
+import { AgentLoop, composeSystemPrompt, DEFAULT_STREAK_NUDGE_AFTER, DEFAULT_SYSTEM_PROMPT } from "./agent-loop.mjs";
 import { CheckpointStore } from "./checkpoints.mjs";
 import { buildSystemPrompt } from "./context-builder.mjs";
 import { formatMcpToolIndex } from "./mcp-client.mjs";
@@ -27,14 +27,20 @@ import { ensureProjectIndex } from "./project-index.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { HALO_SCAN_CONTEXT_GUIDANCE, HALO_SCAN_STREAK_HINT, registerHaloScanTools } from "./tools/halo-scan.mjs";
 import { ensureAgentDataDir } from "./workspace-data.mjs";
 
 export {
   AgentLoop,
+  BUILTIN_CONTEXT_GUIDANCE,
+  composeSystemPrompt,
   DEFAULT_MAX_STEPS,
   DEFAULT_MAX_STOP_HOOK_LOOPS,
+  DEFAULT_STREAK_NUDGE_AFTER,
+  DEFAULT_STREAK_NUDGE_HINT,
   DEFAULT_SYSTEM_PROMPT,
   isToolCallParseError,
+  streakNudgePrompt,
   toolResultContent,
 } from "./agent-loop.mjs";
 
@@ -43,6 +49,7 @@ export { CHECKPOINT_DIR, CheckpointStore } from "./checkpoints.mjs";
 export {
   AGENT_DATA_DIR,
   AGENT_DATA_DIR_POSIX,
+  AGENT_DATA_HIDDEN_NAMES,
   AGENT_DATA_SKIP_NAMES,
   LEGACY_AGENT_DATA_DIR,
   LEGACY_AGENT_DATA_DIRS,
@@ -170,9 +177,21 @@ export { createOpenAIServer } from "./openai-server.mjs";
 
 export { changedFilesFromSteps, SessionStore } from "./session-store.mjs";
 
-export { ToolRegistry } from "./tool-registry.mjs";
+export { DEFAULT_TOOL_ALIASES, ToolRegistry } from "./tool-registry.mjs";
 
 export { registerBuiltinTools, registerRuleTool } from "./tools/builtin.mjs";
+
+export {
+  DEFAULT_HALO_SCAN_PROFILE,
+  HALO_SCAN_CONTEXT_GUIDANCE,
+  HALO_SCAN_PACKAGE,
+  HALO_SCAN_PROMPT_OVERLAY,
+  HALO_SCAN_STREAK_HINT,
+  HALO_SCAN_SUPERSEDES,
+  importHaloScan,
+  registerHaloScanTools,
+  wrapHaloScanTool,
+} from "./tools/halo-scan.mjs";
 
 export { registerProjectSearchTool } from "./tools/project-search.mjs";
 
@@ -226,6 +245,13 @@ export {
  *   workspace snapshot in the system prompt.
  * @param {number} [options.maxSteps] Safety cap on model round-trips per turn.
  * @param {number} [options.wallClockMs] Wall-clock budget per run (0 = none).
+ * @param {number} [options.maxPromptTokens] Cumulative prompt-token budget per
+ *   run (0 = none). Exceeding it ends the run with a plain-text wrap-up and
+ *   `stopReason: "token-budget"`.
+ * @param {boolean|number} [options.streakNudge] After N consecutive calls to
+ *   one read-only tool, steer the model to answer or switch tools. `true`
+ *   uses {@link DEFAULT_STREAK_NUDGE_AFTER}; a number sets N; off by default.
+ *   With Halo Scan embedded the nudge names its one-call tools.
  * @param {object|false} [options.compaction] Loop compaction settings; on by default.
  * @param {import("./agent-loop.mjs").AgentHooks} [options.hooks]
  * @param {(step: object) => void} [options.onStep]
@@ -235,8 +261,14 @@ export {
  * @param {Array<import("./tool-registry.mjs").ToolDefinition>} [options.tools]
  *   Extra tools registered alongside (or instead of) the builtins.
  * @param {boolean} [options.builtinTools] Set false for a custom-tools-only agent.
- * @param {boolean} [options.projectIndex] Build the local project index and
- *   register search_project (default true when an embed client is available).
+ * @param {boolean|{profile?: string, exclude?: string[]}} [options.haloScan]
+ *   Embed Halo Scan's structured code tools natively when the optional
+ *   `@bitfieldcreek/halo-scan` package (or a sibling checkout) is available
+ *   (default true). Pass `{ profile: "base" | "full" | ... }` to choose the
+ *   tool packs; false to keep the builtin file/search tools only.
+ * @param {boolean} [options.projectIndex] Build the local project vector index
+ *   and register search_project (default false; Halo Scan's structured tools
+ *   cover project orientation without an embedding model).
  * @param {string} [options.embeddingModel] Embedding model for the project index.
  * @param {boolean} [options.checkpoints] Snapshot files before writes (default true).
  * @param {string} [options.systemPrompt] Full override; skips the context builder.
@@ -248,6 +280,26 @@ export {
  * @param {string} [options.supervisorProvider] For provider=copilot.
  * @param {string} [options.supervisorModel] For provider=copilot.
  */
+/**
+ * Map the `streakNudge` option (boolean or count) onto AgentLoop options,
+ * choosing the Halo Scan hint when its tools are the ones to switch to.
+ * @param {boolean|number|undefined} streakNudge
+ * @param {object|null} haloScanInfo
+ */
+export function resolveStreakNudgeOptions(streakNudge, haloScanInfo) {
+  const after =
+    streakNudge === true
+      ? DEFAULT_STREAK_NUDGE_AFTER
+      : Number.isFinite(streakNudge) && streakNudge > 0
+        ? Math.floor(streakNudge)
+        : 0;
+  if (!after) return {};
+  return {
+    streakNudgeAfter: after,
+    ...(haloScanInfo ? { streakNudgeHint: HALO_SCAN_STREAK_HINT } : {}),
+  };
+}
+
 export async function createAgent({
   model = "auto",
   baseUrl,
@@ -255,6 +307,8 @@ export async function createAgent({
   workspaceRoot = process.cwd(),
   maxSteps,
   wallClockMs,
+  maxPromptTokens,
+  streakNudge = false,
   compaction = {},
   hooks,
   onStep,
@@ -262,7 +316,8 @@ export async function createAgent({
   approvalHandler,
   tools,
   builtinTools = true,
-  projectIndex = true,
+  haloScan = true,
+  projectIndex = false,
   embeddingModel,
   checkpoints = true,
   systemPrompt,
@@ -326,16 +381,28 @@ export async function createAgent({
 
   await ensureAgentDataDir(workspaceRoot);
 
-  const useIndex = projectIndex && typeof resolvedClient.embed === "function";
+  const canEmbed = typeof resolvedClient.embed === "function";
+  const useIndex = projectIndex && canEmbed;
   const checkpointStore = checkpoints ? new CheckpointStore({ workspaceRoot }) : undefined;
   const registry = new ToolRegistry();
+  let haloScanInfo = null;
   if (builtinTools) {
     registerBuiltinTools(registry, {
       workspaceRoot,
-      searchClient: useIndex ? resolvedClient : undefined,
+      searchClient: canEmbed ? resolvedClient : undefined,
+      projectIndex: useIndex,
       embeddingModel,
       checkpoints: checkpointStore,
     });
+    if (haloScan) {
+      const scanOptions = typeof haloScan === "object" ? haloScan : {};
+      try {
+        haloScanInfo = await registerHaloScanTools(registry, { workspaceRoot, ...scanOptions });
+      } catch {
+        // Halo Scan is optional; a broken install must not take the agent down.
+        haloScanInfo = null;
+      }
+    }
   }
   for (const tool of tools ?? []) registry.register(tool);
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
@@ -372,7 +439,9 @@ export async function createAgent({
     systemPrompt != null
       ? systemPrompt
       : await buildSystemPrompt({
-          basePrompt: DEFAULT_SYSTEM_PROMPT + nestedOverlay,
+          basePrompt:
+            (haloScanInfo ? composeSystemPrompt({ contextGuidance: HALO_SCAN_CONTEXT_GUIDANCE }) : DEFAULT_SYSTEM_PROMPT) +
+            nestedOverlay,
           modelOverlay: modelPromptOverlay(resolvedClient.model),
           workspaceRoot,
           extraContext: formatMcpToolIndex(registry),
@@ -384,6 +453,8 @@ export async function createAgent({
     systemPrompt: prompt,
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
+    ...(maxPromptTokens !== undefined ? { maxPromptTokens } : {}),
+    ...resolveStreakNudgeOptions(streakNudge, haloScanInfo),
     onStep,
     onDelta,
     compaction,
@@ -395,6 +466,8 @@ export async function createAgent({
     client: resolvedClient,
     provider: providerSetup?.provider ?? provider,
     checkpoints: checkpointStore,
+    /** Embedded Halo Scan summary (`names`, `replaced`, `profile`), or null when not embedded. */
+    haloScan: haloScanInfo,
     /** @type {(goal: string, options?: {history?: Array<object>, signal?: AbortSignal, images?: string[]}) => Promise<import("./agent-loop.mjs").AgentRunResult>} */
     run: (goal, options) => loop.run(goal, options),
     steer: (text) => loop.steer(text),

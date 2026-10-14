@@ -8,6 +8,7 @@
 import { access, constants, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { AGENT_DATA_HIDDEN_NAMES } from "../workspace-data.mjs";
 import { classifyCleanupFileMutation, cleanupMutationBlockMessage } from "./mutation-safety.mjs";
 import { createOutputSpiller } from "./output.mjs";
 
@@ -346,6 +347,9 @@ export function registerFileTools(registry, { workspaceRoot, checkpoints }) {
       const target = resolveWithinRoot(root, dirPath);
       const entries = await readdir(target, { withFileTypes: true });
       const names = entries
+        // The agent's own data dir (sessions, checkpoints, spills) is noise
+        // to the model; small models have been seen reading its index file.
+        .filter((e) => !AGENT_DATA_HIDDEN_NAMES.has(e.name))
         .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
         .sort((a, b) => a.localeCompare(b));
       return { path: path.relative(root, target) || ".", entries: names };

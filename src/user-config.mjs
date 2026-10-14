@@ -9,7 +9,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { DEFAULT_MAX_STEPS } from "./agent-loop.mjs";
+import { DEFAULT_MAX_STEPS, DEFAULT_STREAK_NUDGE_AFTER } from "./agent-loop.mjs";
 import { DEFAULT_NUM_CTX, DEFAULT_THINK } from "./ollama-client.mjs";
 import { parseAutoApproveSpec } from "./tool-registry.mjs";
 
@@ -26,6 +26,8 @@ const CONFIG_TEMPLATE = `# Bitfield Ollama Agent user configuration
 # supervisor-model: auto
 # base-url: http://127.0.0.1:11434
 # max-steps: ${DEFAULT_MAX_STEPS}
+# max-prompt-tokens: 0   (cumulative prompt-token budget per run; 0 = none, e.g. 400000)
+# streak-nudge: false    (true, or a count: nudge after N calls in a row to one read-only tool)
 # num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
 # cwd: .
 # mode: ask
@@ -35,7 +37,9 @@ const CONFIG_TEMPLATE = `# Bitfield Ollama Agent user configuration
 # embed-model: nomic-embed-text
 # think: auto
 # quiet: false
-# no-index: false
+# scan: true          # embed Halo Scan code tools when @bitfieldcreek/halo-scan is available
+# scan-profile: auto  # auto | base | full | symbols | quality | web | config
+# index: false        # build the local project vector index and register search_project
 # no-checkpoints: false
 # json: false
 #
@@ -221,6 +225,22 @@ export function normalizeConfigValues(raw) {
         else errors.push(`config 'max-steps' needs a positive integer, got '${value}'.`);
         break;
       }
+      case "max-prompt-tokens": {
+        const n = Number(String(value).replace(/[_,]/g, "").replace(/k$/i, "000"));
+        if (Number.isFinite(n) && n >= 0) values.maxPromptTokens = Math.floor(n);
+        else errors.push(`config 'max-prompt-tokens' needs a non-negative integer (0 = none), got '${value}'.`);
+        break;
+      }
+      case "streak-nudge": {
+        if (value === true) values.streakNudge = DEFAULT_STREAK_NUDGE_AFTER;
+        else if (value === false) values.streakNudge = 0;
+        else {
+          const n = Number(value);
+          if (Number.isFinite(n) && n >= 0) values.streakNudge = Math.floor(n);
+          else errors.push(`config 'streak-nudge' needs true, false, or a count, got '${value}'.`);
+        }
+        break;
+      }
       case "num-ctx": {
         if (String(value).trim().toLowerCase() === "auto") {
           values.numCtx = "auto";
@@ -238,11 +258,21 @@ export function normalizeConfigValues(raw) {
         break;
       }
       case "quiet":
-      case "no-index":
+      case "index":
+      case "scan":
       case "no-checkpoints":
       case "json":
         if (typeof value === "boolean") values[configKeyToOption(key)] = value;
         else errors.push(`config '${key}' must be true or false.`);
+        break;
+      case "no-index":
+        // Older spelling; `index: true` is the current opt-in.
+        if (typeof value === "boolean") values.index = !value;
+        else errors.push(`config '${key}' must be true or false.`);
+        break;
+      case "scan-profile":
+        if (typeof value === "string" && value.trim()) values.scanProfile = value.trim().toLowerCase();
+        else errors.push(`config 'scan-profile' needs a profile name (auto, base, full, or a pack).`);
         break;
       case "auto-approve": {
         const parsed = parseAutoApproveSpec(value, "config 'auto-approve'");
@@ -294,12 +324,16 @@ function configKeyToOption(key) {
       return "baseUrl";
     case "max-steps":
       return "maxSteps";
+    case "max-prompt-tokens":
+      return "maxPromptTokens";
+    case "streak-nudge":
+      return "streakNudge";
     case "num-ctx":
       return "numCtx";
     case "embed-model":
       return "embedModel";
-    case "no-index":
-      return "noIndex";
+    case "scan-profile":
+      return "scanProfile";
     case "no-checkpoints":
       return "noCheckpoints";
     case "api-key":
@@ -396,6 +430,8 @@ export function getBuiltinDefaults() {
     supervisorModel: undefined,
     baseUrl: "http://127.0.0.1:11434",
     maxSteps: DEFAULT_MAX_STEPS,
+    maxPromptTokens: 0,
+    streakNudge: 0,
     numCtx: "auto",
     quiet: false,
     cwd: process.cwd(),
@@ -404,7 +440,9 @@ export function getBuiltinDefaults() {
     autoApprove: "off",
     mcp: [],
     embedModel: "nomic-embed-text",
-    noIndex: false,
+    index: false,
+    scan: true,
+    scanProfile: "auto",
     noCheckpoints: false,
     json: false,
     think: DEFAULT_THINK,

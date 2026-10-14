@@ -33,7 +33,9 @@ Product shape:
 
 **Zero runtime dependencies by default** — the Ollama path uses only Node built-ins.
 Optional peer packages (`openai`, `@anthropic-ai/sdk`, `@github/copilot-sdk`) are
-loaded only when you select those providers.
+loaded only when you select those providers; `@bitfieldcreek/halo-scan` (itself
+zero-dependency) is embedded automatically when installed — see
+[Halo Scan code tools](#halo-scan-code-tools).
 
 ## Install
 
@@ -85,12 +87,17 @@ Options:
 | `--base-url <url>` | `http://127.0.0.1:11434` | Ollama server (also OpenAI-compatible base URL for `openai`) |
 | `--max-steps <n>` | `100` | Safety cap on model round-trips per turn (the model decides when it is done; this only stops runaways) |
 | `--wall-clock <sec>` | off | Wall-clock budget for the run; the loop wraps up before the deadline instead of being killed |
+| `--max-prompt-tokens <n>` | off | Cumulative prompt-token budget for the run (`400k` works). Steps cost 3k–20k tokens each, so this caps spend where `--max-steps` cannot; exceeded → plain-text wrap-up, exit code 2 |
+| `--streak-nudge [n]` | off | After `n` (default 6) consecutive calls to one read-only tool, tell the model to answer or switch to a tool that answers in one call. Mutating tools (`write_file`, `edit_file`, `run_command`) never trigger it |
 | `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended. Deletes and cleanup writes still need an explicit approval |
 | `--auto-approve [policy]` | `off` | Approve gated tools without a prompt. Bare flag or `all`: every gated tool. `off`: none. Or a comma-separated list such as `write_file,run_command`. Those calls count as approved, including deletes. In ask mode, tools outside the list still prompt |
 | `--no-auto-approve` | | Force auto-approve off (overrides config) |
 | `--session <name>` | off | Persist and resume this conversation (`.bf/bf-agent/sessions/` in the workspace) |
+| `--no-scan` | scan on | Do not embed [Halo Scan](#halo-scan-code-tools)'s structured code tools (embedded natively whenever `@bitfieldcreek/halo-scan` or a sibling `bf-chat-tools` checkout is present) |
+| `--scan-profile <p>` | `auto` | Halo Scan tool packs: `auto` fingerprints the repo (base + up to two packs), `base`, `full`, or a pack name (`symbols`, `quality`, `web`, `config`) |
+| `--index` | off | Build the local project vector index and register `search_project` (needs an Ollama embedding model) |
 | `--mcp "<command>"` | none | Attach an MCP server over stdio (repeatable); tools are listed by name and fetched on demand |
 | `--no-checkpoints` | off | Do not snapshot files before `write_file` / `edit_file` |
 | `--quiet` | off | Suppress step trace; print only the final answer |
@@ -225,6 +232,9 @@ const agent = await createAgent({
   model: "qwen3-coder:30b",
   workspaceRoot: "/path/to/project",
   tools: [{ name: "deploy", description: "Deploy the app.", execute: () => "done" }],
+  haloScan: { profile: "auto" },          // default true; false keeps builtin file/search tools only
+  maxPromptTokens: 400_000,               // cumulative budget per run; stopReason "token-budget" when hit
+  streakNudge: true,                      // or a count; nudge after N calls in a row to one read-only tool
   approvalHandler: async ({ name, args }) => confirmSomehow(name, args),
   hooks: {
     // Refuse a tool call; the reason goes back to the model as the result.
@@ -260,7 +270,7 @@ bridge in via `registerMcpTools(agent.registry, await McpClient.connect({ comman
 | `list_dir` | List a directory; subdirectory names end with `/` |
 | `grep_search` | Regex search over file contents (`path:line: text`); prunes `node_modules`, `.git`, etc., skips binaries |
 | `find_files` | Find files by glob (`*.mjs`, `src/**/*.js`) |
-| `search_project` | Semantic search over the local project index (when an embedding model is available) |
+| `search_project` | Semantic search over the local project index (only with `--index` and an embedding model) |
 | `fetch_rule` | Read a `.cursor/rules` rule the system prompt listed by name |
 | `web_search` | Search the public web via DuckDuckGo (titles, URLs, snippets) |
 | `fetch_url` | Fetch a page and return text; optional `query` runs micro-RAG for top passages |
@@ -276,6 +286,50 @@ tree) after a timeout, 30s by default. Long tool output is never silently
 truncated: past 32k characters the full text is written to
 `.bf/bf-agent/tool-output/` and the model gets the head, the tail, and the
 path, so it can `read_file` or `grep_search` the rest.
+
+**Tool-name aliases.** Small models reach for names that do not exist —
+`open_file`, `search`, `cat`, `ls`, `bash`. Those resolve at call time onto
+the builtin they meant (with argument spellings such as `query` → `pattern`
+and `line_start`/`line_end` → `offset`/`limit` rewritten), so the step is
+not wasted on an "unknown tool" error. Aliases are never listed in the tool
+schemas, so they cost no prompt tokens. The step trace prints `[alias]
+open_file -> read_file` when one fires.
+
+### Halo Scan code tools
+
+[Halo Scan](https://www.npmjs.com/package/@bitfieldcreek/halo-scan)
+(`@bitfieldcreek/halo-scan`, zero dependencies) is a read-only toolset for
+navigating code by structure: `repo_overview`, `project_conventions`,
+`entrypoint_map`, `file_outline`, `get_symbol`, `symbol_context`,
+`find_references`, `changed_symbols`, `tests_for`, `git_history`, and more.
+When it is installed (or a `bf-chat-tools` checkout sits next to this repo)
+the agent embeds it **natively**: its tools are registered as ordinary
+functions alongside the builtins, and its `read_file`, `list_dir`,
+`grep_search`, and `find_files` replace the builtins under the same names
+(they are supersets — batch `read_file paths:[...]`, `grep_search expand:
+"symbol"`, hits tagged with the enclosing function). The "gather context"
+bullet in the system prompt is swapped for one that points at the structured
+tools first (`repo_overview`, `file_outline`, `symbol_context`, ...). Nothing
+else changes: writes, shell, web, and rules are the builtins.
+
+Why native rather than `--mcp "halo-scan"`: behind the lazy MCP bridge the
+model sees only names and must spend `describe_tool` + `call_mcp_tool` to use
+one, while `read_file` and `grep_search` are native functions it already
+knows. Measured with Halo Scan's tool bench, 0.2 of 10.2 calls per question
+reached Halo Scan through the bridge. Exposed natively the structured tools
+replace grep → read → read loops with one call; see
+[Dev bench](#dev-bench-agent--judge) for how to measure the effect on your
+model.
+
+`--scan-profile` controls the schema cost. `auto` (default) exposes the base
+pack plus up to two packs chosen by fingerprinting the repo, and adds an
+`activate_pack` tool so the model can pull in the rest on demand; `base`
+is the smallest useful set; `full` exposes everything. The schemas are part
+of every request, so on a 16k window prefer `base`. `--no-scan` (or
+`scan: false` in `config.yaml`) keeps the builtin tool set only.
+
+In the SDK the same switch is `createAgent({ haloScan: true | false | {
+profile } })`; `agent.haloScan` reports what was embedded.
 
 **Approvals:** in a terminal, `write_file`, `edit_file`, and `run_command`
 each ask for y/N confirmation before running (`--mode ask`, the default).
@@ -311,10 +365,16 @@ else discovered on demand with tools. The system prompt is built per run:
    the top-level directory listing.
 5. **MCP tool index** — attached MCP tools by name and one-line description.
 
+6. **Halo Scan guidance** — when Halo Scan is embedded, a few lines on
+   navigating by structure (`repo_overview` to orient, `file_outline` /
+   `get_symbol` instead of whole-file reads, `symbol_context` before
+   changing a symbol).
+
 The user's message is sent as written — no hints, plans, or wrappers are
 added. README contents, project search results, and everything else come
 in through the model's own tool calls, so the prompt stays small and the
-model sees exactly what it asked for.
+model sees exactly what it asked for. The agent's own data directory
+(`.bf/`) is hidden from the workspace listing and from `list_dir`.
 
 Thinking-capable models get Ollama's native `think` mode enabled
 automatically (`--think` to control). Long transcripts are compacted
@@ -598,7 +658,8 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/providers/anthropic-client.mjs` | Optional `@anthropic-ai/sdk` peer adapter |
 | `src/providers/copilot-worker.mjs` | Nested `delegate_copilot` + completion guard |
 | `src/providers/message-bridge.mjs` | Loop transcript ↔ OpenAI / Anthropic wire formats |
-| `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating |
+| `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating, call-time name aliases |
+| `src/tools/halo-scan.mjs` | Embeds `@bitfieldcreek/halo-scan` natively: optional import, builtin replacement, pack activation, output spill |
 | `src/context-builder.mjs` | System prompt: instruction files, rule index, git snapshot, environment |
 | `src/compaction.mjs` | Summarizes old turns when the transcript outgrows its budget |
 | `src/checkpoints.mjs` | Pre-edit file snapshots under `.bf/bf-agent/checkpoints/` with list/restore |

@@ -20,8 +20,11 @@ import { registerWebSearchTool } from "./web-search.mjs";
  * @param {object} [options]
  * @param {string} [options.workspaceRoot] Directory file/shell tools are
  *   confined to. Defaults to the process working directory.
- * @param {{embed: Function}} [options.searchClient] When set, registers
- *   search_project over the local project index and powers fetch_url embeddings.
+ * @param {{embed: Function}} [options.searchClient] Embedding client: powers
+ *   fetch_url's micro-RAG and, with `projectIndex`, search_project.
+ * @param {boolean} [options.projectIndex] Register search_project over the
+ *   local project index (default true when a searchClient is given; callers
+ *   that embed Halo Scan normally leave it off).
  * @param {string} [options.embeddingModel]
  * @param {typeof fetch} [options.fetchImpl] Injectable fetch for web tools.
  * @param {import("../checkpoints.mjs").CheckpointStore} [options.checkpoints]
@@ -29,7 +32,14 @@ import { registerWebSearchTool } from "./web-search.mjs";
  */
 export function registerBuiltinTools(
   registry,
-  { workspaceRoot = process.cwd(), searchClient, embeddingModel, fetchImpl, checkpoints } = {},
+  {
+    workspaceRoot = process.cwd(),
+    searchClient,
+    projectIndex = true,
+    embeddingModel,
+    fetchImpl,
+    checkpoints,
+  } = {},
 ) {
   registry.register({
     name: "get_time",
@@ -61,7 +71,7 @@ export function registerBuiltinTools(
   registerWebSearchTool(registry, { fetchImpl });
   registerFetchUrlTool(registry, { fetchImpl, client: searchClient, embeddingModel });
   registerShellTools(registry, { workspaceRoot });
-  if (searchClient) {
+  if (searchClient && projectIndex) {
     registerProjectSearchTool(registry, { workspaceRoot, client: searchClient, embeddingModel });
   }
 

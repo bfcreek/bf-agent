@@ -16,6 +16,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { getConfigDir } from "./user-config.mjs";
+import { AGENT_DATA_HIDDEN_NAMES } from "./workspace-data.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,8 @@ export async function listWorkspaceTopLevel(workspaceRoot, maxEntries = DEFAULT_
   const root = path.resolve(workspaceRoot ?? process.cwd());
   const entries = await readdir(root, { withFileTypes: true });
   const names = entries
+    // The agent's own data directory is not part of the user's project.
+    .filter((e) => !AGENT_DATA_HIDDEN_NAMES.has(e.name))
     .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
     .sort((a, b) => a.localeCompare(b));
   return names.length > maxEntries ? names.slice(0, maxEntries) : names;

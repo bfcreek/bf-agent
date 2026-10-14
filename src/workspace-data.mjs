@@ -23,6 +23,12 @@ export const LEGACY_AGENT_DATA_DIR = LEGACY_AGENT_DATA_DIRS[0];
 export const AGENT_DATA_SKIP_NAMES = new Set([".halo-agent", ".bf", "bf-agent"]);
 
 /**
+ * Names hidden from directory listings shown to the model. Only the dot
+ * directories: a project may legitimately have a folder called `bf-agent`.
+ */
+export const AGENT_DATA_HIDDEN_NAMES = new Set([".halo-agent", ".bf"]);
+
+/**
  * Absolute path under the agent data directory.
  * @param {string} workspaceRoot
  * @param {...string} parts

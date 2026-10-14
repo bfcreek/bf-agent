@@ -663,3 +663,25 @@ test("agent loop hands the goal to tools via run context", async () => {
 test("writeFileSchemaIssue rejects conflated run_command fields", () => {
   assert.match(writeFileSchemaIssue({ path: "x.py", command: "echo hi" }) ?? "", /run_command/i);
 });
+
+test("list_dir hides the agent data directory", async () => {
+  await mkdir(path.join(root, ".bf", "bf-agent"), { recursive: true });
+  await mkdir(path.join(root, ".halo-agent"), { recursive: true });
+  await mkdir(path.join(root, "visible-dir"), { recursive: true });
+  const out = await registry.execute("list_dir", {});
+  assert.equal(out.ok, true);
+  assert.ok(out.result.entries.includes("visible-dir/"));
+  assert.ok(!out.result.entries.includes(".bf/"), ".bf/ should be hidden");
+  assert.ok(!out.result.entries.includes(".halo-agent/"), ".halo-agent/ should be hidden");
+});
+
+test("search_project is registered only when projectIndex is on", () => {
+  const embed = { embed: async () => [0, 1] };
+  const withIndex = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: root, searchClient: embed });
+  assert.ok(withIndex.has("search_project"), "default keeps the previous behavior for direct callers");
+  const noIndex = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: root, searchClient: embed, projectIndex: false });
+  assert.ok(!noIndex.has("search_project"));
+  assert.ok(noIndex.has("fetch_url"), "fetch_url still gets the embed client");
+  const noClient = registerBuiltinTools(new ToolRegistry(), { workspaceRoot: root, projectIndex: true });
+  assert.ok(!noClient.has("search_project"));
+});
