@@ -58,6 +58,7 @@ export function guardHollowCompletion({ goal, text, steps, loopCount } = {}, { m
     followupMessage:
       "This looks like implementation work, but no mutating tools (write_file, edit_file, or run_command) ran. " +
       "Use those tools to make the changes, then verify before declaring done. " +
+      "Do not ask the user to restate the task or to choose a file — the request above is the task. " +
       "If the goal is truly Q&A with no workspace changes, say so explicitly and answer." +
       (text ? `\n\nYour previous claim was:\n${String(text).slice(0, 800)}` : ""),
   };

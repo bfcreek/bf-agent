@@ -247,7 +247,10 @@ export class AgentLoop {
    * @param {string} [options.systemPrompt]
    * @param {number} [options.maxSteps] Safety cap on model round-trips per turn.
    * @param {(step: AgentStep) => void} [options.onStep] Observer for tracing.
-   * @param {(delta: string) => void} [options.onDelta] Live content tokens.
+   * @param {(delta: string) => void} [options.onDelta] Content tokens of the
+   *   user-visible answer. Tool narration, a cut-off tool call, and a turn a
+   *   stop hook sends back are not forwarded — the OpenAI stream cannot retract
+   *   tokens the editor already showed.
    * @param {{maxChars?: number, maxTokens?: number, keepRecent?: number, historyPath?: string}|false} [options.compaction]
    *   Summarize old turns when the transcript exceeds the budget. Off by
    *   default. `historyPath` is a workspace-relative file holding the full
@@ -426,6 +429,23 @@ export class AgentLoop {
     let currentGoal = goal;
     let wallClockExhausted = false;
     let tokenBudgetExhausted = false;
+    // This turn's content tokens. Committed only when the turn is the answer
+    // the caller shows. Cleared before the next model call otherwise.
+    /** @type {string[]} */
+    const pendingDeltas = [];
+    const captureDelta = (delta) => {
+      if (delta) pendingDeltas.push(String(delta));
+    };
+    const commitAnswer = (text) => {
+      const raw = pendingDeltas.join("");
+      const pieces = pendingDeltas.splice(0);
+      if (!this.onDelta || !text) return;
+      if (raw === text) {
+        for (const piece of pieces) this.onDelta(piece);
+      } else {
+        this.onDelta(text);
+      }
+    };
 
     while (true) {
       if (signal?.aborted) return finish({ text: "", stopReason: "aborted" });
@@ -479,6 +499,7 @@ export class AgentLoop {
       try {
         const think = nextThink;
         nextThink = undefined;
+        pendingDeltas.length = 0;
         chatResult = await timedTurn(() =>
           chatWithParseRecovery(
             this.client,
@@ -486,7 +507,7 @@ export class AgentLoop {
               messages,
               tools,
               signal,
-              onDelta: this.onDelta,
+              onDelta: this.onDelta ? captureDelta : undefined,
               ...(think !== undefined ? { think } : {}),
               ...(this.maxOutputTokens > 0 ? { options: { num_predict: this.maxOutputTokens } } : {}),
             },
@@ -612,7 +633,11 @@ export class AgentLoop {
       }
 
       if (toolCalls.length === 0) {
-        const text = textOf(message.content).trim();
+        const rawText = textOf(message.content).trim();
+        const text = stripStrayToolCallMarkup(rawText).trim();
+        if (text !== rawText && messages.at(-1)?.role === "assistant") {
+          messages[messages.length - 1].content = text;
+        }
         emptyRetries = 0;
         streakTool = null;
         streakCount = 0;
@@ -648,6 +673,7 @@ export class AgentLoop {
           continue;
         }
 
+        commitAnswer(text);
         return finish({ text, stopReason: "completed" });
       }
 
@@ -851,10 +877,14 @@ function uniqueToolForArgs(args, tools) {
  * @returns {{name: string, arguments: object}|null}
  */
 /**
- * True when assistant text opened a tool-call marker and never closed it.
+ * True when assistant text opened a tool-call marker and stopped there.
  * A balanced example inside prose is not incomplete. An unclosed
- * `<tool_call>`, `<function=`, or `<parameter=` is: the model stopped on
- * the call token and the body never arrived.
+ * `<tool_call>`, `<function=`, or `<parameter=` at the end of the message
+ * is: the model stopped on the call token and the body never arrived.
+ *
+ * A `<tool_call>` token in the middle of a finished answer is a leak, not
+ * a cutoff. Treating it as incomplete drops the answer and the model loses
+ * the task (it then asks the user to restate work it already had).
  *
  * @param {string} text
  * @returns {boolean}
@@ -862,11 +892,59 @@ function uniqueToolForArgs(args, tools) {
 export function incompleteToolCallText(text) {
   const body = String(text ?? "");
   if (!body) return false;
+  if (strayToolCallInsideAnswer(body)) return false;
   const count = (re) => (body.match(re) || []).length;
   if (count(/<tool_call\b/g) > count(/<\/tool_call>/g)) return true;
   if (count(/<function=/g) > count(/<\/function>/g)) return true;
   if (count(/<parameter=/g) > count(/<\/parameter>/g)) return true;
   return false;
+}
+
+/**
+ * Unclosed `<tool_call>` whose tail is the rest of the answer, not a call
+ * body. An unclosed `<function=` / `<parameter=` still counts as a cutoff.
+ * @param {string} body
+ * @returns {boolean}
+ */
+function strayToolCallInsideAnswer(body) {
+  const count = (re) => (body.match(re) || []).length;
+  if (count(/<tool_call\b/g) <= count(/<\/tool_call>/g)) return false;
+  if (count(/<function=/g) > count(/<\/function>/g)) return false;
+  if (count(/<parameter=/g) > count(/<\/parameter>/g)) return false;
+  return proseAfterLastMarker(body, /<tool_call\b[^>]*>/g);
+}
+
+/**
+ * @param {string} body
+ * @param {RegExp} re
+ * @returns {boolean}
+ */
+function proseAfterLastMarker(body, re) {
+  const global = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  let last = null;
+  let match;
+  while ((match = global.exec(body)) !== null) last = match;
+  if (!last) return false;
+  const tail = body.slice(last.index + last[0].length).trim();
+  if (!tail || tail.startsWith("<")) return false;
+  const words = tail.split(/\s+/).filter((word) => /[A-Za-z]{2,}/.test(word));
+  if (words.length >= 8) return true;
+  return words.length >= 4 && /[.!?]/.test(tail);
+}
+
+/**
+ * Remove a `<tool_call>` token the model wrote into an answer it finished
+ * in prose. A whole-message tool call is parsed before this runs.
+ * @param {string} text
+ * @returns {string}
+ */
+export function stripStrayToolCallMarkup(text) {
+  const raw = String(text ?? "");
+  if (!/<\/?tool_call\b/i.test(raw)) return raw;
+  return raw
+    .replace(/<\/?tool_call\b[^>]*>/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+([.,;:!?])/g, "$1");
 }
 
 export function parseTextToolCall(text, tools) {

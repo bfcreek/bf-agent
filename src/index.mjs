@@ -266,7 +266,8 @@ export {
  * @param {object|false} [options.compaction] Loop compaction settings; on by default.
  * @param {import("./agent-loop.mjs").AgentHooks} [options.hooks]
  * @param {(step: object) => void} [options.onStep]
- * @param {(delta: string) => void} [options.onDelta] Live content tokens from the model.
+ * @param {(delta: string) => void} [options.onDelta] Tokens of the user-visible answer.
+ *   Tool narration and discarded turns are not included.
  * @param {(request: {name: string, args: object}) => Promise<boolean>|boolean} [options.approvalHandler]
  *   Gate write/shell tools. Without one, gated tools run unattended.
  * @param {Array<import("./tool-registry.mjs").ToolDefinition>} [options.tools]

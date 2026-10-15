@@ -3,11 +3,11 @@
  * agent loop (with tools) underneath, chat.completion out. This is the door
  * Aura Wire routes IDE traffic through — clients need no halo-agent awareness.
  *
- * With `stream: true`, SSE headers go out immediately and content tokens are
- * forwarded live from Ollama via the loop's `onDelta` (when the client
- * supports `chatStream`). If the backend only supports non-streaming chat,
- * the finished answer is replayed as SSE chunks so streaming-only clients
- * still work.
+ * With `stream: true`, SSE headers go out immediately. Content tokens are the
+ * final answer only — the loop withholds tool narration and discarded turns,
+ * because this stream is the message the editor shows and it cannot be
+ * rewound. If the backend only supports non-streaming chat, the finished
+ * answer is replayed as SSE chunks so streaming-only clients still work.
  */
 
 import { randomUUID } from "node:crypto";

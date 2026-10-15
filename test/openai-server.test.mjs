@@ -236,6 +236,33 @@ test("stream:true forwards live token pieces from chatStream", async () => {
   );
 });
 
+test("stream:true omits tool-step narration and a discarded tool_call from the answer", async () => {
+  const client = new FakeClient(
+    [
+      {
+        role: "assistant",
+        content: "I'll create a complete playable 3D shoot-em-up game.",
+        tool_calls: [{ function: { name: "add", arguments: { a: 2, b: 3 } } }],
+      },
+      { role: "assistant", content: "First, I'll create the controller:<tool_call>" },
+      { role: "assistant", content: "The sum is 5." },
+    ],
+    { streamPieces: true },
+  );
+  await startServer(client);
+
+  const response = await postChat({ stream: true, messages: [{ role: "user", content: "2+3?" }] });
+  const text = await response.text();
+  const content = text
+    .split("\n\n")
+    .filter((line) => line.startsWith("data: ") && !line.includes("[DONE]"))
+    .map((line) => JSON.parse(line.slice("data: ".length)))
+    .map((c) => c.choices[0].delta.content ?? "")
+    .join("");
+  assert.equal(content, "The sum is 5.");
+  assert.doesNotMatch(content, /<tool_call>|shoot-em-up/);
+});
+
 test("stream:true still streams the final answer after tool calls", async () => {
   const client = new FakeClient(
     [

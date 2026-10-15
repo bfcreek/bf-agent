@@ -9,6 +9,7 @@ import {
   isToolCallParseError,
   incompleteToolCallText,
   parseTextToolCall,
+  stripStrayToolCallMarkup,
   repairToolCallParseError,
   toolResultContent,
   WALL_CLOCK_RESERVE_MIN_MS,
@@ -686,6 +687,41 @@ test("incompleteToolCallText is an unclosed marker, not a balanced example", () 
   );
   assert.equal(incompleteToolCallText("Use a </tool_call> only after <tool_call>."), false);
   assert.equal(incompleteToolCallText("I'll read the file next."), false);
+  assert.equal(
+    incompleteToolCallText(
+      "I'll start by cleaning up main.js <tool_call> see that I need to modify the existing files rather than create new ones.",
+    ),
+    false,
+  );
+});
+
+test("stripStrayToolCallMarkup removes a leaked tag and leaves the sentence", () => {
+  assert.equal(
+    stripStrayToolCallMarkup(
+      "implementing the complete game logic in it <tool_call> see that I need to modify the existing files.",
+    ),
+    "implementing the complete game logic in it see that I need to modify the existing files.",
+  );
+});
+
+test("a stray tool_call tag inside a finished answer is removed and not retried", async () => {
+  const requests = [];
+  const leaked =
+    "I'll start by cleaning up main.js <tool_call> see that I need to modify the existing files rather than create new ones. The game is ready.";
+  const client = {
+    async chat(request) {
+      requests.push(structuredClone(request.messages));
+      return { message: { role: "assistant", content: leaked }, raw: { done_reason: "stop" } };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 4 });
+
+  const result = await loop.run("create a playable 3d game");
+
+  assert.equal(requests.length, 1);
+  assert.equal(result.stopReason, "completed");
+  assert.doesNotMatch(result.text, /<tool_call>/);
+  assert.match(result.text, /The game is ready/);
 });
 
 test("a reply that ends on an unclosed tool_call token is retried, not accepted as final", async () => {

@@ -63,6 +63,7 @@ test("guard challenges create goals with zero mutating tools", () => {
   });
   assert.match(decision.followupMessage, /no mutating tools/);
   assert.match(decision.followupMessage, /Fully functional Electron app/);
+  assert.match(decision.followupMessage, /Do not ask the user to restate the task/);
 });
 
 test("guard allows Q&A goals and verified mutations", () => {
