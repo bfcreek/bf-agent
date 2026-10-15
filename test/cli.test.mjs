@@ -181,6 +181,7 @@ test("--wall-clock, --max-prompt-tokens, and --streak-nudge are documented in he
   assert.match(run.stdout, /HALO_WALL_CLOCK_SECONDS/);
   assert.match(run.stdout, /--max-prompt-tokens <n>/);
   assert.match(run.stdout, /--streak-nudge \[n\]/);
+  assert.match(run.stdout, /--no-completion-guard/);
 });
 
 test("a flag missing its value is reported", () => {

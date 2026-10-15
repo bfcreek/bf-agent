@@ -31,6 +31,7 @@ import {
 } from "./model-routing.mjs";
 import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./model-tuning.mjs";
 import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import { withHollowCompletionGuard } from "./hollow-completion-guard.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { KNOWN_PROVIDERS, ProviderClientError } from "./provider-client.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
@@ -193,6 +194,9 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
       }
       case "--no-streak-nudge":
         options.streakNudge = 0;
+        break;
+      case "--no-completion-guard":
+        options.completionGuard = false;
         break;
       case "--quiet":
         options.quiet = true;
@@ -389,6 +393,9 @@ Options:
                        up with a plain-text answer when it is exceeded (exit code 2)
   --streak-nudge [n]   After n (default ${DEFAULT_STREAK_NUDGE_AFTER}) consecutive calls to one read-only tool,
                        tell the model to answer or switch to a one-call tool. Off by default
+  --no-completion-guard
+                       Do not challenge "done" on create/implement goals when no mutating tools ran
+                       (write_file / edit_file / run_command). On by default
   --cwd <path>         Workspace root for file/shell tools (default: current directory)
   --mode <ask|agent>   ask: confirm writes/shell commands (default in a terminal)
                        agent: run them unattended (default when not a TTY, and in serve mode).
@@ -963,7 +970,7 @@ async function main() {
   }
 
   /** @type {import("./agent-loop.mjs").AgentHooks} */
-  let loopHooks = {};
+  let loopHooks = withHollowCompletionGuard({}, options.completionGuard !== false);
   let nestedOverlay = "";
   if (providerSetup.kind === "nested" && typeof providerSetup.applyNested === "function") {
     const nested = providerSetup.applyNested({
@@ -1022,6 +1029,7 @@ async function main() {
       defaultModel: options.model,
       tierModels: serveTierModels,
       defaultTier: options.taskTier ?? modelsConfigValues.defaultTier ?? DEFAULT_TASK_TIER,
+      hooks: loopHooks,
     });
     server.listen(options.port, () => {
       const { port } = server.address();

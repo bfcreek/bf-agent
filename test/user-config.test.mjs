@@ -83,6 +83,13 @@ test("max-prompt-tokens and streak-nudge config keys", () => {
   assert.ok(normalizeConfigValues({ "streak-nudge": "often" }).errors.some((e) => e.includes("streak-nudge")));
 });
 
+test("completion-guard config key defaults on and can be disabled", () => {
+  assert.equal(getBuiltinDefaults().completionGuard, true);
+  assert.equal(normalizeConfigValues({ "completion-guard": false }).values.completionGuard, false);
+  assert.equal(normalizeConfigValues({ "no-completion-guard": true }).values.completionGuard, false);
+  assert.ok(normalizeConfigValues({ "completion-guard": "maybe" }).errors.some((e) => e.includes("completion-guard")));
+});
+
 test("normalizeConfigValues reports invalid values", () => {
   const { errors } = normalizeConfigValues({
     "max-steps": 0,
@@ -134,6 +141,7 @@ test("ensureConfigFile creates a commented template", async () => {
     assert.match(text, /Bitfield Ollama Agent user configuration/);
     assert.match(text, /base-url:/);
     assert.match(text, /no-checkpoints:/);
+    assert.match(text, /completion-guard:/);
     assert.match(text, /instructions\.md/);
 
     await ensureConfigFile();

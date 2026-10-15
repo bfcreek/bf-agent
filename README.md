@@ -89,6 +89,7 @@ Options:
 | `--wall-clock <sec>` | off | Wall-clock budget for the run; the loop wraps up before the deadline instead of being killed |
 | `--max-prompt-tokens <n>` | off | Cumulative prompt-token budget for the run (`400k` works). Steps cost 3k–20k tokens each, so this caps spend where `--max-steps` cannot; exceeded → plain-text wrap-up, exit code 2 |
 | `--streak-nudge [n]` | off | After `n` (default 6) consecutive calls to one read-only tool, tell the model to answer or switch to a tool that answers in one call. Mutating tools (`write_file`, `edit_file`, `run_command`) never trigger it |
+| `--no-completion-guard` | guard on | Do not challenge “done” on create/implement goals when no mutating tools (`write_file` / `edit_file` / `run_command`) ran. On by default (same idea as Copilot’s completion guard for the plain LLM path) |
 | `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended. Deletes and cleanup writes still need an explicit approval |
@@ -235,12 +236,14 @@ const agent = await createAgent({
   haloScan: { profile: "auto" },          // default true; false keeps builtin file/search tools only
   maxPromptTokens: 400_000,               // cumulative budget per run; stopReason "token-budget" when hit
   streakNudge: true,                      // or a count; nudge after N calls in a row to one read-only tool
+  completionGuard: true,                  // default: challenge hollow "done" on create/implement goals
   approvalHandler: async ({ name, args }) => confirmSomehow(name, args),
   hooks: {
     // Refuse a tool call; the reason goes back to the model as the result.
     beforeToolCall: ({ name, args }) =>
       name === "run_command" && /git push/.test(args.command) ? { block: "no pushes from CI" } : undefined,
     // Keep the turn going when the model stops too early (Cursor's stop hook).
+    // Composed after the built-in hollow-completion guard when completionGuard is on.
     stop: ({ text, steps }) =>
       steps.some((s) => s.toolCalls.some((c) => c.name === "run_command")) ? undefined : { followupMessage: "Run the tests before finishing." },
   },
@@ -657,6 +660,7 @@ SWE-bench Verified is listed as planned (`--list`); it is not wired yet.
 | `src/providers/openai-client.mjs` | Optional `openai` peer adapter |
 | `src/providers/anthropic-client.mjs` | Optional `@anthropic-ai/sdk` peer adapter |
 | `src/providers/copilot-worker.mjs` | Nested `delegate_copilot` + completion guard |
+| `src/hollow-completion-guard.mjs` | Default stop hook: challenge hollow “done” on create/implement goals with no mutating tools |
 | `src/providers/message-bridge.mjs` | Loop transcript ↔ OpenAI / Anthropic wire formats |
 | `src/tool-registry.mjs` | Tool schema + executor dispatch, approval gating, call-time name aliases |
 | `src/tools/halo-scan.mjs` | Embeds `@bitfieldcreek/halo-scan` natively: optional import, builtin replacement, pack activation, output spill |

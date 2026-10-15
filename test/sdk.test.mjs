@@ -43,6 +43,8 @@ test("the SDK exports the full public surface", () => {
     "KNOWN_PROVIDERS",
     "createCompletionGuard",
     "registerDelegateCopilotTool",
+    "createHollowCompletionGuard",
+    "withHollowCompletionGuard",
     "createAgent",
     "createOpenAIServer",
     "SessionStore",

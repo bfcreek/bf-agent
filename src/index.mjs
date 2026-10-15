@@ -27,6 +27,7 @@ import { ensureProjectIndex } from "./project-index.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { withHollowCompletionGuard } from "./hollow-completion-guard.mjs";
 import { HALO_SCAN_CONTEXT_GUIDANCE, HALO_SCAN_STREAK_HINT, registerHaloScanTools } from "./tools/halo-scan.mjs";
 import { ensureAgentDataDir } from "./workspace-data.mjs";
 
@@ -172,6 +173,16 @@ export {
   createDelegationTracker,
   registerDelegateCopilotTool,
 } from "./providers/copilot-worker.mjs";
+
+export {
+  IMPLEMENTATION_GOAL,
+  MUTATING_TOOL_NAMES,
+  claimsQaOnly,
+  createHollowCompletionGuard,
+  guardHollowCompletion,
+  hasMutatingToolUse,
+  withHollowCompletionGuard,
+} from "./hollow-completion-guard.mjs";
 
 export { createOpenAIServer } from "./openai-server.mjs";
 
@@ -320,6 +331,8 @@ export async function createAgent({
   projectIndex = false,
   embeddingModel,
   checkpoints = true,
+  /** Challenge "done" on create/implement goals when no mutating tools ran. Default on. */
+  completionGuard = true,
   systemPrompt,
   think,
   requireVision = false,
@@ -408,7 +421,7 @@ export async function createAgent({
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
 
   /** @type {import("./agent-loop.mjs").AgentHooks} */
-  let resolvedHooks = hooks ?? {};
+  let resolvedHooks = withHollowCompletionGuard(hooks ?? {}, completionGuard !== false);
   let nestedOverlay = "";
   if (providerSetup?.kind === "nested" && typeof providerSetup.applyNested === "function") {
     const nested = providerSetup.applyNested({

@@ -28,6 +28,7 @@ const CONFIG_TEMPLATE = `# Bitfield Ollama Agent user configuration
 # max-steps: ${DEFAULT_MAX_STEPS}
 # max-prompt-tokens: 0   (cumulative prompt-token budget per run; 0 = none, e.g. 400000)
 # streak-nudge: false    (true, or a count: nudge after N calls in a row to one read-only tool)
+# completion-guard: true # challenge "done" on create/implement goals when no mutating tools ran
 # num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
 # cwd: .
 # mode: ask
@@ -262,7 +263,12 @@ export function normalizeConfigValues(raw) {
       case "scan":
       case "no-checkpoints":
       case "json":
+      case "completion-guard":
         if (typeof value === "boolean") values[configKeyToOption(key)] = value;
+        else errors.push(`config '${key}' must be true or false.`);
+        break;
+      case "no-completion-guard":
+        if (typeof value === "boolean") values.completionGuard = !value;
         else errors.push(`config '${key}' must be true or false.`);
         break;
       case "no-index":
@@ -336,6 +342,8 @@ function configKeyToOption(key) {
       return "scanProfile";
     case "no-checkpoints":
       return "noCheckpoints";
+    case "completion-guard":
+      return "completionGuard";
     case "api-key":
       return "apiKey";
     case "supervisor-provider":
@@ -444,6 +452,7 @@ export function getBuiltinDefaults() {
     scan: true,
     scanProfile: "auto",
     noCheckpoints: false,
+    completionGuard: true,
     json: false,
     think: DEFAULT_THINK,
     tierPreset: null,
