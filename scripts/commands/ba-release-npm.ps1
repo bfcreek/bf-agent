@@ -1,4 +1,4 @@
-# /ha-release-npm - publish the current package version to npm.
+# /ba-release-npm - publish the current package version to npm and create a GitHub release.
 #
 # Prerequisite: production CDN already matches package.json (admin promote).
 #
@@ -20,7 +20,7 @@ if (-not (Test-Path $PublishScript)) {
     throw "Missing npm publisher: $PublishScript"
 }
 
-Write-Host "bf-agent /ha-release-npm - verify production CDN, publish to npm" -ForegroundColor Cyan
+Write-Host "bf-agent /ba-release-npm - verify production CDN, GitHub release, publish to npm" -ForegroundColor Cyan
 Write-Host ""
 
 $argsList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PublishScript)

@@ -498,7 +498,7 @@ Production (after [admin promote](https://www.bitfieldcreek.com/admin/releases))
 .\scripts\commands\ha-release-npm.ps1
 ```
 
-`ha-release-npm` verifies production `latest.yml` matches `package.json`, then runs `npm publish`. Credentials: `scripts/release/.env.release` (`R2_*` for staging, `NPM_TOKEN` for production npm).
+`ha-release-npm` verifies production `latest.yml` matches `package.json`, creates a GitHub release tagged `v<version>` with notes generated from commits since the previous release, then runs `npm publish`. Credentials: `scripts/release/.env.release` (`R2_*` for staging, `NPM_TOKEN` for production npm) and `gh` authenticated for the `package.json` repository.
 
 ## Tests
 

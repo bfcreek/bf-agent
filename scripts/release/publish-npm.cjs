@@ -6,6 +6,9 @@
  * Required env: NPM_TOKEN (Automation token with publish access)
  * Optional: HALO_AGENT_UPDATES_BASE_URL
  *
+ * Also creates a GitHub release tagged v<version> with notes generated from
+ * commits since the previous release. The release is created before npm publish.
+ *
  * Usage:
  *   node scripts/release/publish-npm.cjs [--dry-run]
  *
@@ -16,6 +19,7 @@ require("./load-release-env.cjs").loadReleaseEnv();
 
 const { execFileSync } = require("child_process");
 const path = require("path");
+const { createGithubRelease } = require("./github-release.cjs");
 const { DEFAULT_PACKAGE_NAME, verifyReadyForNpmPublish } = require("./publish-npm-logic.cjs");
 
 const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
@@ -81,6 +85,13 @@ async function main() {
         publishArgs.push("--dry-run");
     }
 
+    const githubRelease = createGithubRelease({
+        version: packageVersion,
+        repository: pkg.repository,
+        repoRoot,
+        dryRun,
+    });
+
     console.log(`npm ${publishArgs.join(" ")}`);
     if (dryRun) {
         runNpmPublish(publishArgs, npmPublishEnv(process.env.NPM_TOKEN || "dry-run"));
@@ -92,6 +103,7 @@ async function main() {
 
     console.log(`Published ${packageName}@${packageVersion} to npm.`);
     console.log(`Install: npm install -g ${packageName}`);
+    console.log(`GitHub release: https://github.com/${githubRelease.repoSlug}/releases/tag/${githubRelease.tag}`);
 }
 
 main().catch((error) => {

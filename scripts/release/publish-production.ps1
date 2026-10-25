@@ -1,4 +1,5 @@
-# Publish @bitfieldcreek/bf-agent to npm after production CDN promotion.
+# Publish @bitfieldcreek/bf-agent to npm after production CDN promotion,
+# and create a GitHub release with generated notes.
 #
 # Prerequisite: halo-site admin promote for the staging zip (staging → production on R2).
 #
@@ -21,14 +22,14 @@ $Args = @($PublishNpm)
 if ($DryRun) { $Args += '--dry-run' }
 
 Write-Host ""
-Write-Host "-> Verify production CDN + publish to npm" -ForegroundColor Cyan
+Write-Host "-> Verify production CDN, create GitHub release, publish to npm" -ForegroundColor Cyan
 Write-Host "  node $($Args -join ' ')"
 
 Push-Location $RepoRoot
 try {
     & node @Args
     if ($LASTEXITCODE -ne 0) {
-        throw "npm publish failed (exit $LASTEXITCODE)."
+        throw "production publish failed (exit $LASTEXITCODE)."
     }
 } finally {
     Pop-Location
@@ -36,5 +37,5 @@ try {
 
 if (-not $DryRun) {
     Write-Host ""
-    Write-Host "Production npm publish complete." -ForegroundColor Green
+    Write-Host "Production npm publish and GitHub release complete." -ForegroundColor Green
 }
