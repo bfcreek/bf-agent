@@ -1,5 +1,7 @@
 # Bitfield Ollama Agent (`bf-agent`)
 
+![Bitfield Ollama Agent running in a PowerShell terminal](docs/assets/ads/google/bf-agent/gifs/terminal-16x9.gif)
+
 Local agent runtime that turns a completion API into a multi-step agent:
 the model calls tools, observes results, and repeats until the task is done.
 **Ollama is the default** (free, local). Optional peer SDKs can drive the same

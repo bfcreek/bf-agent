@@ -1,6 +1,6 @@
 {
   "name": "@bitfieldcreek/bf-agent",
-  "version": "1.1.23",
+  "version": "1.1.24",
   "description": "Local-first agent runtime (Ollama default): plan/act/observe loop, tools, optional peer providers, and an OpenAI-compatible facade.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -8,10 +8,10 @@
   "homepage": "https://www.bitfieldcreek.com/explore#bf-agent",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/froggy523/halo-agent.git"
+    "url": "git+https://github.com/bfcreek/bf-agent.git"
   },
   "bugs": {
-    "url": "https://github.com/froggy523/halo-agent/issues"
+    "url": "https://github.com/bfcreek/bf-agent/issues"
   },
   "keywords": [
     "ollama",
