@@ -92,7 +92,7 @@ export function defaultConfig() {
     maxSteps: 15,
     timeoutSeconds: 240,
     judgeModel: "auto",
-    judgeTimeoutSeconds: 300,
+    judgeTimeoutSeconds: 600,
     progression: { enabled: true, stopBelowScore: 50, maxTier: 5 },
     gates: defaultGatesConfig(),
     enforceGates: false,

@@ -21,7 +21,7 @@ local agent (via Aura Wire) or running it standalone.
 
 ## Model quality
 
-Benchmark reference models: **`qwen3-coder:30b`** (local line) and **`kimi-k2.7-code:cloud`** (cloud line) — the pins in `src/model-routing.mjs`, chosen by a 2026-09 bake-off (local: coder over `gpt-oss:20b` and `devstral-small-2`; cloud: kimi 2/4 resolved over `glm-5.3:cloud` 1/4) and fixed so the harness can be tuned against one model's behavior. Scores vary by model, hardware, and Ollama version; a run on another model is not comparable to the scoreboard history.
+Benchmark reference models: **`qwen3-coder:30b`** (local line) and **`kimi-k2.7-code:cloud`** (cloud line) — the pins in `src/model-routing.mjs`, fixed so the harness can be tuned against one model's behavior. The current published score is the 25 Oct 2026 result in the README. Scores vary by model, hardware, and Ollama version; a run on another model is not comparable to the scoreboard history.
 
 - **Tuned to the pin** — recovery paths in the loop target quirks seen on the pinned models (qwen3-coder writing tool calls as `<function=…>` text; gpt-oss's stray `]` in long arguments). Another model's failure modes will not have the same coverage until it is benchmarked.
 - **Local pin is a non-thinker** — `qwen3-coder:30b` has no thinking channel, so `--think` levels are ignored for it and reasoning happens in visible text. Its 30B MoE weights leave a 24 GB GPU room for a ~16k KV cache; the bench pins 24k and accepts partial CPU offload.

@@ -47,6 +47,16 @@
       "video": "videos/terminal-4x3.mp4",
       "gif": "gifs/terminal-4x3.gif",
       "note": "Same aspect ratios as Aura Wire and Aura Terran commercial capture (16:9, 1:1, 2:3, 4:3)."
+    },
+    {
+      "id": "2x1",
+      "width": 1920,
+      "height": 960,
+      "poster": "posters/terminal-2x1.png",
+      "animatedPoster": "posters/terminal-2x1.gif",
+      "video": "videos/terminal-2x1.mp4",
+      "gif": "gifs/terminal-2x1.gif",
+      "note": "GitHub social preview. Exact 2:1 so the card does not crop the title or the terminal."
     }
   ],
   "video": {

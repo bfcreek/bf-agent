@@ -6,7 +6,7 @@
   "timeoutSeconds": 480,
   "think": "max",
   "judgeModel": "auto",
-  "judgeTimeoutSeconds": 300,
+  "judgeTimeoutSeconds": 600,
   "judgeRetries": 2,
   "progression": {
     "enabled": true,

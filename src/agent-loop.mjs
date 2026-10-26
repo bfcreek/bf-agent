@@ -868,9 +868,13 @@ function uniqueToolForArgs(args, tools) {
  *     </function>
  *
  * (optionally inside `<tool_call>`), and a JSON object with `name` and
- * `arguments`. The whole message must be the call; prose around it means the
- * model was talking, not acting. XML parameter values are coerced to the
- * schema's declared number/boolean types. Returns null unless the tool exists.
+ * `arguments`. A message that is only the call is a call. So is one complete
+ * `<function>` block after a short preamble ("I need to find…", "Let me
+ * search…") with nothing after the block: the preamble is narration, and the
+ * call is what the model did. A finished answer that only leaks a call
+ * ("Done.", a path, prose after the block) stays text. XML parameter values
+ * are coerced to the schema's declared number/boolean types. Returns null
+ * unless the tool exists.
  *
  * @param {string} text
  * @param {Array<object>} tools Schemas in the OpenAI function shape.
@@ -952,22 +956,11 @@ export function parseTextToolCall(text, tools) {
   if (!body || body.length > 20_000) return null;
   const schemaFor = (name) => (tools ?? []).find((t) => t?.function?.name === name);
 
-  const xml = /^(?:<tool_call>\s*)?<function=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/function>\s*(?:<\/tool_call>\s*)?$/.exec(body);
-  if (xml) {
-    const schema = schemaFor(xml[1]);
-    if (!schema) return null;
-    const props = schema.function.parameters?.properties ?? {};
-    const args = {};
-    const param = /<parameter=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/parameter>/g;
-    let m;
-    let sawAny = false;
-    while ((m = param.exec(xml[2])) !== null) {
-      sawAny = true;
-      args[m[1]] = coerceByType(m[2].replace(/^\r?\n/, "").replace(/\r?\n$/, ""), props[m[1]]?.type);
-    }
-    if (!sawAny && xml[2].trim()) return null;
-    return { name: xml[1], arguments: args };
-  }
+  const whole = /^(?:<tool_call>\s*)?<function=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/function>\s*(?:<\/tool_call>\s*)?$/.exec(body);
+  if (whole) return parseXmlFunction(whole[1], whole[2], schemaFor);
+
+  const preamble = extractPreambleFunction(body);
+  if (preamble) return parseXmlFunction(preamble.name, preamble.inner, schemaFor);
 
   if (body.startsWith("{") && body.endsWith("}")) {
     let parsed;
@@ -983,6 +976,64 @@ export function parseTextToolCall(text, tools) {
     }
   }
   return null;
+}
+
+/**
+ * One complete `<function>` block after a short preamble and before no
+ * further prose. A finished answer ("Done.", a path) is not a preamble.
+ * @param {string} body
+ * @returns {{name: string, inner: string}|null}
+ */
+function extractPreambleFunction(body) {
+  const blocks = [...body.matchAll(/<function=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/function>/g)];
+  if (blocks.length !== 1) return null;
+  const block = blocks[0];
+  const before = body.slice(0, block.index).replace(/<tool_call>\s*$/i, "").trim();
+  const after = body.slice(block.index + block[0].length).replace(/^\s*<\/tool_call>/i, "").trim();
+  if (!before || after) return null;
+  if (!isShortToolPreamble(before)) return null;
+  return { name: block[1], inner: block[2] };
+}
+
+/**
+ * Narration in front of a tool call, not a deliverable the call leaked into.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isShortToolPreamble(text) {
+  if (/^(done|complete|completed|finished|the file|the path|answer|result|here(?:'s| is))\b/i.test(text)) {
+    return false;
+  }
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 80) return false;
+  const sentences = text.split(/[.!?]+/).map((part) => part.trim()).filter(Boolean);
+  if (sentences.length > 3) return false;
+  if (words.length <= 12 && /(?:^|\s)[\w./\\-]+\.(?:mjs|cjs|js|py|cs|ts|tsx|json|md)\b/i.test(text)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @param {string} name
+ * @param {string} inner
+ * @param {(name: string) => object|undefined} schemaFor
+ * @returns {{name: string, arguments: object}|null}
+ */
+function parseXmlFunction(name, inner, schemaFor) {
+  const schema = schemaFor(name);
+  if (!schema) return null;
+  const props = schema.function.parameters?.properties ?? {};
+  const args = {};
+  const param = /<parameter=([A-Za-z_][\w.-]*)>([\s\S]*?)<\/parameter>/g;
+  let match;
+  let sawAny = false;
+  while ((match = param.exec(inner)) !== null) {
+    sawAny = true;
+    args[match[1]] = coerceByType(match[2].replace(/^\r?\n/, "").replace(/\r?\n$/, ""), props[match[1]]?.type);
+  }
+  if (!sawAny && inner.trim()) return null;
+  return { name, arguments: args };
 }
 
 function coerceByType(value, type) {

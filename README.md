@@ -4,7 +4,18 @@
 
 ### Pinned result
 
-On 21 Sep 2026, local pin `qwen3-coder:30b` passed Terminal-Bench 2.1 task `multi-source-data-merger` (hidden tests, 1 minute 30 seconds). On that same two-task draw (seed `424242`), `gpt-oss:20b` and `devstral-small-2` did not. The other task, `qemu-alpine-ssh`, never started: the task image failed setup for all three. The same day, cloud pin `kimi-k2.7-code:cloud` passed `feal-differential-cryptanalysis`; `glm-5.3:cloud` on that draw did not. Agent 0.1.3, Windows, 32 cores, 64 GB RAM. Repeat the local draw with `.\bin\bench-tb-mini.ps1 -Count 2 -Seed 424242`.
+On 25 Oct 2026, bf-agent 1.1.25 scored **96 out of 100** on 34 graded tasks (69 minutes). Smaller tasks ran on local `qwen3-coder:30b`. Harder builds ran on `kimi-k2.7-code:cloud`. Windows, 32 cores, 64 GB RAM.
+
+| What we asked | Tasks | Score | Result |
+| --- | --- | --- | --- |
+| Answer a question, edit one file, or add a small module | 8 | 99 | All passed |
+| Fix a bug or add one behavior | 6 | 97 | All passed |
+| Write a small command-line tool | 5 | 92 | All passed |
+| Change a program that is already there | 5 | 97 | All passed |
+| Build a larger tool from scratch | 10 | 94 | All passed |
+| Do not change files you were only asked to read | 6 | — | 5 of 6 obeyed |
+
+The miss: one read-only task also created `README.md` and `src/index.mjs` in its throwaway workspace. Scores above count only whether the requested work was done.
 
 Local agent runtime that turns a completion API into a multi-step agent:
 the model calls tools, observes results, and repeats until the task is done.
@@ -130,12 +141,9 @@ Ollama versions. `bf-agent models` shows the classification and what
 
 **Why a pin.** The harness is tuned against one local line and one cloud
 line so that bench history stays comparable and fixes target a known model's
-quirks instead of the average of several. The pins came out of a 2026-09 bake-off on the same Terminal-Bench 2.1
-samples. Locally, `qwen3-coder:30b` was the only model to resolve a task,
-ahead of `gpt-oss:20b` and `devstral-small-2`. On the cloud line,
-`kimi-k2.7-code:cloud` resolved 2/4 (including the FEAL attack) against
-`glm-5.3:cloud` at 1/4; glm spent the hard tasks inside the output cap and
-then the wall clock. The tier presets (`local`, `hybrid`, `cloud`, `cloud-max`) all use those two models; `cloud-max` is the cloud pin at maximum reasoning effort, not a different model. Local image turns still use `devstral-small-2`, because the local pin has no vision. The Cursor judge is separate: it grades from one prompt file and does not run an Ollama model. Recognized-benchmark runs default to the local pin at
+quirks instead of the average of several. Those pins are `qwen3-coder:30b`
+and `kimi-k2.7-code:cloud`. The 25 Oct 2026 result above is the current score
+for them. The tier presets (`local`, `hybrid`, `cloud`, `cloud-max`) all use those two models; `cloud-max` is the cloud pin at maximum reasoning effort, not a different model. Local image turns still use `devstral-small-2`, because the local pin has no vision. The Cursor judge is separate: it grades from one prompt file and does not run an Ollama model. Recognized-benchmark runs default to the local pin at
 `--num-ctx 24576` (the spec's recommendation for a non-thinking model; on a
 24 GB GPU that costs ~16% decode speed versus a fully-resident 16k window and
 saves a compaction every few steps). Change a pin deliberately, and start a

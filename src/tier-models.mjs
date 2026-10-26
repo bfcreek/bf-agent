@@ -20,8 +20,7 @@ export const DEFAULT_TIER_PRESET = "auto";
  * Presets are built from the two pinned lines (PINNED_MODELS): the local pin
  * wherever local is allowed, the cloud pin wherever cloud is allowed.
  * `cloud-max` is the same cloud pin at maximum reasoning effort — not a
- * different model. A 2026-09 bake-off measured glm-5.3:cloud as worse on
- * this harness, so it is not a preset.
+ * different model.
  *
  * @type {Record<string, TierModelBand[]>}
  */

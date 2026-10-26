@@ -675,6 +675,67 @@ test("parseTextToolCall reads qwen3-coder's XML form and the name+arguments JSON
   assert.equal(parseTextToolCall("Done. <function=read_file><parameter=path>a</parameter></function>", shellSchemas()), null);
 });
 
+test("parseTextToolCall dispatches a preamble plus one function block", () => {
+  const searchSchema = {
+    type: "function",
+    function: {
+      name: "symbol_search",
+      parameters: {
+        type: "object",
+        properties: { pattern: { type: "string" }, kind: { type: "string" } },
+        required: ["pattern"],
+      },
+    },
+  };
+  const findExport = [
+    "I need to find which file exports the function `computeTax`. Let me search for this symbol across the codebase.",
+    "",
+    "<function=symbol_search>",
+    "<parameter=pattern>",
+    "^computeTax$",
+    "</parameter>",
+    "<parameter=kind>",
+    "function",
+    "</parameter>",
+    "</function>",
+  ].join("\n");
+  assert.deepEqual(parseTextToolCall(findExport, [searchSchema]), {
+    name: "symbol_search",
+    arguments: { pattern: "^computeTax$", kind: "function" },
+  });
+  const pyFind = [
+    "I need to find the function named `compute_tax` in the workspace. Let me search for it using the appropriate tool.",
+    "",
+    "<function=symbol_search>",
+    "<parameter=pattern>",
+    "compute_tax",
+    "</parameter>",
+    "</function>",
+  ].join("\n");
+  assert.deepEqual(parseTextToolCall(pyFind, [searchSchema]), {
+    name: "symbol_search",
+    arguments: { pattern: "compute_tax" },
+  });
+  assert.equal(
+    parseTextToolCall("lib/tax.mjs\n<function=symbol_search><parameter=pattern>computeTax</parameter></function>", [searchSchema]),
+    null,
+  );
+  assert.equal(
+    parseTextToolCall(
+      "<function=symbol_search><parameter=pattern>computeTax</parameter></function>\nlib/tax.mjs",
+      [searchSchema],
+    ),
+    null,
+  );
+  assert.equal(
+    parseTextToolCall(
+      "I need to find it.\n<function=nope><parameter=pattern>computeTax</parameter></function>",
+      [searchSchema],
+    ),
+    null,
+  );
+});
+
 test("incompleteToolCallText is an unclosed marker, not a balanced example", () => {
   assert.equal(
     incompleteToolCallText("First, I'll create the product controller with proper CRUD operations:<tool_call>"),

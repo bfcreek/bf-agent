@@ -140,7 +140,7 @@ export async function judgeRun({ scenario, agentResult, workspaceDir, oracle = n
       workspaceDir,
       model: options.model ?? "auto",
       agentBin: options.agentBin ?? DEFAULT_AGENT_BIN,
-      timeoutSeconds: options.timeoutSeconds ?? 300,
+      timeoutSeconds: options.timeoutSeconds ?? 600,
     });
     lastVerdict = parseJudgeResponse(lastRaw, { oracle });
     if (isUsableVerdict(lastVerdict)) return lastVerdict;

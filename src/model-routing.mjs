@@ -26,11 +26,7 @@ export class ModelRoutingError extends Error {
 export const MIN_EFFECTIVE_PARAMS_B = 7;
 
 /**
- * The models the harness is tuned against. Chosen by the 2026-09 bake-off
- * (Terminal-Bench 2.1 samples; see the train log in halo-agent-benchmark):
- * qwen3-coder:30b was the only local candidate to resolve a task and had the
- * best process scores, ahead of gpt-oss:20b (runaway thinking, refusals) and
- * devstral-small-2 (output-limit truncations). `auto` picks the local pin
+ * The models the harness is tuned against. `auto` picks the local pin
  * when it is installed and fits; the cloud pin is the hard-tier fallback.
  * Change these deliberately — bench history is only comparable within a pin.
  */

@@ -39,7 +39,7 @@ export async function judgeHarborTask(task, options = {}) {
     oracle: packed.oracle,
     options: {
       model: options.model ?? "auto",
-      timeoutSeconds: options.timeoutSeconds ?? 300,
+      timeoutSeconds: options.timeoutSeconds ?? 600,
       retries: options.retries ?? 2,
       preamble: packed.preamble,
       efficiency: packed.efficiency,

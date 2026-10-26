@@ -61,7 +61,7 @@ export function defaultRecognizedConfig() {
     seed: null,
     skipJudge: false,
     judgeModel: "auto",
-    judgeTimeoutSeconds: 300,
+    judgeTimeoutSeconds: 600,
     judgeRetries: 2,
     out: null,
     verbose: false,

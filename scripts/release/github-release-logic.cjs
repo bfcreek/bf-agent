@@ -216,7 +216,7 @@ function buildReleaseNotes(options) {
         "",
         "![Bitfield Ollama Agent running in a terminal](https://github.com/bfcreek/bf-agent/raw/main/docs/assets/ads/google/bf-agent/gifs/terminal-16x9.gif)",
         "",
-        "Pinned Terminal-Bench result: https://github.com/bfcreek/bf-agent#pinned-result",
+        "Pinned result: https://github.com/bfcreek/bf-agent#pinned-result",
     );
 
     return `${lines.join("\n")}\n`;
