@@ -5,7 +5,7 @@
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Bitfield Creek",
-  "homepage": "https://www.bitfieldcreek.com/explore#bf-agent",
+  "homepage": "https://www.bitfieldcreek.com/bf-agent",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bfcreek/bf-agent.git"
@@ -21,7 +21,9 @@
     "openai",
     "anthropic",
     "copilot",
-    "local-ai"
+    "local-ai",
+    "coding-agent",
+    "local-llm"
   ],
   "engines": {
     "node": ">=20"

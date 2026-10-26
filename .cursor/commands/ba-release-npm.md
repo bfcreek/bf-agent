@@ -40,6 +40,7 @@ Report to the user:
 - Published package and version (`@bitfieldcreek/bf-agent` at the `package.json` version)
 - Install: `npm install -g @bitfieldcreek/bf-agent`
 - GitHub release URL (`https://github.com/<owner>/<repo>/releases/tag/v<version>`)
+- The release notes include the terminal gif and a link to the README pinned result. If this version changed bench results, update that section before publishing so the link stays true.
 
 Do **not** commit unless the user explicitly asks.
 
@@ -50,7 +51,7 @@ Do **not** commit unless the user explicitly asks.
 | Node.js 20+ | `node` on PATH |
 | Production promote | Staging zip already promoted at https://www.halosoftworks.com/admin/releases so production `latest.yml` matches `package.json` |
 | `scripts/release/.env.release` | `NPM_TOKEN` (npm Automation token; see `.env.release.example`) |
-| GitHub CLI | `gh` on PATH, authenticated with permission to create releases on the repository in `package.json` |
+| GitHub CLI | `gh` on PATH, logged in as the repository owner (`bfcreek`). A user-level `GH_TOKEN` for another account is ignored. Sign in with `$env:GH_TOKEN = $null; gh auth login` |
 
 On failure, stop and report the failing step; do not retry publish.
 

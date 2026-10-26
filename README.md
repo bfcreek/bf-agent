@@ -2,6 +2,10 @@
 
 ![Bitfield Ollama Agent running in a PowerShell terminal](docs/assets/ads/google/bf-agent/gifs/terminal-16x9.gif)
 
+### Pinned result
+
+On 21 Sep 2026, local pin `qwen3-coder:30b` passed Terminal-Bench 2.1 task `multi-source-data-merger` (hidden tests, 1 minute 30 seconds). On that same two-task draw (seed `424242`), `gpt-oss:20b` and `devstral-small-2` did not. The other task, `qemu-alpine-ssh`, never started: the task image failed setup for all three. The same day, cloud pin `kimi-k2.7-code:cloud` passed `feal-differential-cryptanalysis`; `glm-5.3:cloud` on that draw did not. Agent 0.1.3, Windows, 32 cores, 64 GB RAM. Repeat the local draw with `.\bin\bench-tb-mini.ps1 -Count 2 -Seed 424242`.
+
 Local agent runtime that turns a completion API into a multi-step agent:
 the model calls tools, observes results, and repeats until the task is done.
 **Ollama is the default** (free, local). Optional peer SDKs can drive the same
@@ -55,7 +59,7 @@ Try without installing:
 npx @bitfieldcreek/bf-agent "summarize README.md"
 ```
 
-Or download the zip from [Explore](https://www.bitfieldcreek.com/explore#bf-agent) and use the `bin/` launchers below.
+Or download the zip from [Bitfield Ollama Agent](https://www.bitfieldcreek.com/bf-agent) and use the `bin/` launchers below.
 
 **Bitfield Ollama Agent** (`bf-agent`) is proprietary software — free for personal, non-commercial use. See [LICENSE](LICENSE) and the [Bitfield Creek EULA](https://www.bitfieldcreek.com/eula).
 

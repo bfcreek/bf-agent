@@ -7,6 +7,7 @@ const {
     buildReleaseNotes,
     githubReleaseCreateArgs,
     parseCommitLog,
+    githubAccountForRepo,
     parseGithubRepoSlug,
     parseRemoteTagShas,
     releaseTagName,
@@ -30,6 +31,11 @@ test("parseGithubRepoSlug reads package.json repository urls", () => {
         "bfcreek/bf-agent",
     );
     assert.throws(() => parseGithubRepoSlug("https://example.com/bf-agent"), /not a GitHub URL/);
+});
+
+test("githubAccountForRepo is the repository owner", () => {
+    assert.equal(githubAccountForRepo("bfcreek/bf-agent"), "bfcreek");
+    assert.throws(() => githubAccountForRepo(""), /owner is missing/);
 });
 
 test("selectPreviousReleaseTag picks the newest older tag", () => {
@@ -81,6 +87,9 @@ test("buildReleaseNotes lists commits and the compare link", () => {
         notes,
         /https:\/\/github\.com\/bfcreek\/bf-agent\/compare\/v1\.1\.23\.\.\.v1\.1\.24/,
     );
+    assert.match(notes, /npx @bitfieldcreek\/bf-agent "summarize README.md"/);
+    assert.match(notes, /terminal-16x9\.gif/);
+    assert.match(notes, /#pinned-result/);
 });
 
 test("githubReleaseCreateArgs targets the commit and reads notes from stdin", () => {

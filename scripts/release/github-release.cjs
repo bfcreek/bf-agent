@@ -6,6 +6,7 @@ const {
     githubReleaseCreateArgs,
     isPrereleaseVersion,
     parseCommitLog,
+    githubAccountForRepo,
     parseGithubRepoSlug,
     parseRemoteTagShas,
     releaseTagName,
@@ -26,14 +27,57 @@ function git(repoRoot, args) {
 }
 
 /**
- * @param {string[]} args
- * @param {{ cwd?: string, input?: string }} [options]
+ * Drop inherited GitHub tokens so a user-level GH_TOKEN cannot select another account.
+ * @param {NodeJS.ProcessEnv} baseEnv
+ * @param {string} [token]
+ * @returns {NodeJS.ProcessEnv}
  */
+function githubCliEnv(baseEnv, token) {
+    const env = { ...baseEnv };
+    delete env.GH_TOKEN;
+    delete env.GITHUB_TOKEN;
+    if (token) env.GH_TOKEN = token;
+    return env;
+}
+
+/**
+ * @param {string} account
+ * @returns {NodeJS.ProcessEnv}
+ */
+function githubEnvForAccount(account) {
+    const lookupEnv = githubCliEnv(process.env);
+    let token = "";
+    try {
+        token = execFileSync(
+            "gh",
+            ["auth", "token", "--hostname", "github.com", "--user", account],
+            {
+                env: lookupEnv,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        ).trim();
+    } catch (error) {
+        const stderr = error && error.stderr ? String(error.stderr).trim() : "";
+        const detail = stderr && !/gh[pousr]_/i.test(stderr) ? ` ${stderr}` : "";
+        throw new Error(
+            `GitHub CLI is not logged in as ${account}. `
+                + `Run \`gh auth login\` in a shell without GH_TOKEN and sign in as ${account}.`
+                + detail,
+        );
+    }
+    if (!token) {
+        throw new Error(`GitHub CLI returned an empty token for ${account}.`);
+    }
+    return githubCliEnv(process.env, token);
+}
+
 function runGh(args, options = {}) {
     try {
         return execFileSync("gh", args, {
             cwd: options.cwd,
             input: options.input,
+            env: options.env,
             encoding: "utf8",
             stdio: options.input ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
         });
@@ -65,9 +109,9 @@ function runGh(args, options = {}) {
  * @param {string} repoSlug
  * @param {string} tag
  */
-function githubReleaseExists(repoSlug, tag) {
+function githubReleaseExists(repoSlug, tag, env) {
     try {
-        runGh(["release", "view", tag, "--repo", repoSlug, "--json", "tagName"]);
+        runGh(["release", "view", tag, "--repo", repoSlug, "--json", "tagName"], { env });
         return true;
     } catch (error) {
         const detail = String(error && error.message ? error.message : error);
@@ -204,7 +248,11 @@ function createGithubRelease(options) {
         return { tag, repoSlug, notes, targetSha: headSha, created: false };
     }
 
-    if (githubReleaseExists(repoSlug, tag)) {
+    const account = githubAccountForRepo(repoSlug);
+    const ghEnv = githubEnvForAccount(account);
+    console.log(`Using GitHub account ${account} for ${repoSlug}.`);
+
+    if (githubReleaseExists(repoSlug, tag, ghEnv)) {
         console.log(`GitHub release ${tag} already exists; leaving it in place.`);
         return { tag, repoSlug, notes, targetSha: headSha, created: false, existed: true };
     }
@@ -216,7 +264,7 @@ function createGithubRelease(options) {
             targetSha: headSha,
             prerelease: isPrereleaseVersion(version),
         }),
-        { cwd: repoRoot, input: notes },
+        { cwd: repoRoot, input: notes, env: ghEnv },
     );
 
     console.log(`Created GitHub release https://github.com/${repoSlug}/releases/tag/${tag}`);

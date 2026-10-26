@@ -78,6 +78,20 @@ function parseGithubRepoSlug(repository) {
 }
 
 /**
+ * Releases are created as the repository owner, not whatever account a
+ * machine-wide GH_TOKEN happens to select.
+ * @param {string} repoSlug
+ * @returns {string}
+ */
+function githubAccountForRepo(repoSlug) {
+    const account = String(repoSlug || "").split("/")[0].trim();
+    if (!account) {
+        throw new Error("GitHub repository owner is missing.");
+    }
+    return account;
+}
+
+/**
  * Highest semver tag strictly older than `version`.
  * @param {string[]} tags
  * @param {string} version
@@ -192,6 +206,19 @@ function buildReleaseNotes(options) {
         lines.push("", `**Full Changelog**: https://github.com/${repoSlug}/commits/${tag}`);
     }
 
+    lines.push(
+        "",
+        "## Try it",
+        "",
+        "```",
+        'npx @bitfieldcreek/bf-agent "summarize README.md"',
+        "```",
+        "",
+        "![Bitfield Ollama Agent running in a terminal](https://github.com/bfcreek/bf-agent/raw/main/docs/assets/ads/google/bf-agent/gifs/terminal-16x9.gif)",
+        "",
+        "Pinned Terminal-Bench result: https://github.com/bfcreek/bf-agent#pinned-result",
+    );
+
     return `${lines.join("\n")}\n`;
 }
 
@@ -223,6 +250,7 @@ module.exports = {
     releaseTagName,
     isPrereleaseVersion,
     parseGithubRepoSlug,
+    githubAccountForRepo,
     selectPreviousReleaseTag,
     selectPreviousVersionCommit,
     parseRemoteTagShas,
