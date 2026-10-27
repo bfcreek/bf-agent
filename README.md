@@ -709,7 +709,7 @@ compression, and guardrails; Bitfield Ollama Agent provides the loop and local t
 IDE integration is deliberately Wire's job — editors point at Wire, and Wire
 routes to Bitfield Ollama Agent as a custom provider via `bf-agent serve` (the
 OpenAI-compatible door, roadmap item 10). Composition is HTTP only, no shared
-code. Details from the Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.
+code. 
 
 ---
 
