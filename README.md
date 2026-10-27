@@ -4,16 +4,18 @@
 
 ### Pinned result
 
-On 25 Oct 2026, bf-agent 1.1.25 scored **96 out of 100** on 34 graded tasks (69 minutes). Smaller tasks ran on local `qwen3-coder:30b`. Harder builds ran on `kimi-k2.7-code:cloud`. Windows, 32 cores, 64 GB RAM.
+On 25 Oct 2026, bf-agent 1.1.25 scored **96 out of 100** on 34 graded tasks. Smaller tasks ran on local `qwen3-coder:30b`. Harder builds ran on `kimi-k2.7-code:cloud`. Windows, RTX 4090 24 GB, 32 cores, 64 GB RAM. **Avg time** is agent start → done (what you would wait for); judging for the scoreboard took most of the ~69-minute suite.
 
-| What we asked | Tasks | Score | Result |
-| --- | --- | --- | --- |
-| Answer a question, edit one file, or add a small module | 8 | 99 | All passed |
-| Fix a bug or add one behavior | 6 | 97 | All passed |
-| Write a small command-line tool | 5 | 92 | All passed |
-| Change a program that is already there | 5 | 97 | All passed |
-| Build a larger tool from scratch | 10 | 94 | All passed |
-| Do not change files you were only asked to read | 6 | — | 5 of 6 obeyed |
+To match this pin with the same models: about **24 GB VRAM** so the ~18 GB local pin stays on the GPU (less VRAM spills layers to CPU and the times above will not hold), Ollama Cloud for `kimi-k2.7-code:cloud` on the harder tiers, and enough host RAM for the language toolchains the tasks run (this box had 64 GB). No GPU → use the cloud pin only (`--tier-preset cloud`); scores can still land, but the local-pin times and routing above do not apply.
+
+| What we asked | Tasks | Score | Avg time | Result |
+| --- | --- | --- | --- | --- |
+| Answer a question, edit one file, or add a small module | 8 | 99 | 3s | All passed |
+| Fix a bug or add one behavior | 6 | 97 | 7s | All passed |
+| Write a small command-line tool | 5 | 92 | 11s | All passed |
+| Change a program that is already there | 5 | 97 | 12s | All passed |
+| Build a larger tool from scratch | 10 | 94 | 40s | All passed |
+| Do not change files you were only asked to read | 6 | — | 7s | 5 of 6 obeyed |
 
 The miss: one read-only task also created `README.md` and `src/index.mjs` in its throwaway workspace. Scores above count only whether the requested work was done.
 
@@ -708,3 +710,12 @@ IDE integration is deliberately Wire's job — editors point at Wire, and Wire
 routes to Bitfield Ollama Agent as a custom provider via `bf-agent serve` (the
 OpenAI-compatible door, roadmap item 10). Composition is HTTP only, no shared
 code. Details from the Aura Wire side: `aura-wire/docs/halo-agent-integration.md`.
+
+---
+
+<p align="center">
+  <a href="https://www.bitfieldcreek.com">
+    <img src="docs/assets/branding/logo-mark-128.png" alt="Bitfield Creek" width="48" height="48" />
+  </a><br />
+  <a href="https://www.bitfieldcreek.com">bitfieldcreek.com</a>
+</p>
