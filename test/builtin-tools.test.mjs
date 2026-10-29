@@ -570,10 +570,10 @@ test("run_command blocks deletes the goal never authorized", async () => {
   });
   assert.equal(run.ok, false);
   assert.match(run.error, /did not explicitly name/);
-  assert.match(run.error, /ask the user/);
+  assert.match(run.error, /Do not retry rm|ask the user/i);
+  assert.match(run.error, /allow-overwrite|leaving temporary/i);
   assert.equal(await readFile(path.join(root, "precious.txt"), "utf8"), "keep me");
 });
-
 test("run_command blocks deletes of files the goal says to keep", async () => {
   await writeFile(path.join(root, "vital.txt"), "do not lose", "utf8");
   registry.setRunContext({

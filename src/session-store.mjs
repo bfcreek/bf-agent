@@ -93,6 +93,14 @@ export class SessionStore {
       compactionFailures: (existing?.compactionFailures ?? 0) + (runResult.compactionFailures ?? 0),
       truncatedTurns: (existing?.truncatedTurns ?? 0) + (runResult.truncatedTurns ?? 0),
       checkpointRunId: runResult.checkpointRunId ?? existing?.checkpointRunId ?? null,
+      ...(runResult.wallClockExhausted || existing?.wallClockExhausted
+        ? { wallClockExhausted: true }
+        : {}),
+      ...(typeof runResult.promptTokens === "number"
+        ? { promptTokens: (existing?.promptTokens ?? 0) + runResult.promptTokens }
+        : existing?.promptTokens != null
+          ? { promptTokens: existing.promptTokens }
+          : {}),
     };
   }
 

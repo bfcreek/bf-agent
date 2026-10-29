@@ -27,7 +27,9 @@ import { ensureProjectIndex } from "./project-index.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
 import { ToolRegistry } from "./tool-registry.mjs";
 import { registerBuiltinTools } from "./tools/builtin.mjs";
+import { withDeliverableGuard } from "./deliverable-guard.mjs";
 import { withHollowCompletionGuard } from "./hollow-completion-guard.mjs";
+import { withSecretFabricationGuard } from "./secret-fabrication-guard.mjs";
 import { HALO_SCAN_CONTEXT_GUIDANCE, HALO_SCAN_STREAK_HINT, registerHaloScanTools } from "./tools/halo-scan.mjs";
 import { ensureAgentDataDir } from "./workspace-data.mjs";
 
@@ -183,6 +185,29 @@ export {
   hasMutatingToolUse,
   withHollowCompletionGuard,
 } from "./hollow-completion-guard.mjs";
+
+export {
+  SECRET_GOAL,
+  claimedFlags,
+  claimedLabeledSecret,
+  createSecretFabricationGuard,
+  guardSecretFabrication,
+  isFabricated,
+  withSecretFabricationGuard,
+} from "./secret-fabrication-guard.mjs";
+
+export {
+  createDeliverableGuard,
+  deliverableCheckpointMessage,
+  deliverableStatus,
+  extractDeliverablePaths,
+  guardMissingDeliverable,
+  pathsMatch,
+  wasReadBack,
+  wasWritten,
+  withDeliverableGuard,
+  writtenPathsFromSteps,
+} from "./deliverable-guard.mjs";
 
 export { createOpenAIServer } from "./openai-server.mjs";
 
@@ -422,7 +447,13 @@ export async function createAgent({
   if (approvalHandler) registry.setApprovalHandler(approvalHandler);
 
   /** @type {import("./agent-loop.mjs").AgentHooks} */
-  let resolvedHooks = withHollowCompletionGuard(hooks ?? {}, completionGuard !== false);
+  let resolvedHooks = withSecretFabricationGuard(
+    withDeliverableGuard(
+      withHollowCompletionGuard(hooks ?? {}, completionGuard !== false),
+      completionGuard !== false,
+    ),
+    completionGuard !== false,
+  );
   let nestedOverlay = "";
   if (providerSetup?.kind === "nested" && typeof providerSetup.applyNested === "function") {
     const nested = providerSetup.applyNested({

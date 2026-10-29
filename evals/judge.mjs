@@ -35,6 +35,43 @@ import { agentAnswerText } from "./scenarios.mjs";
 const DEFAULT_AGENT_BIN = "agent";
 const INVALID_SUMMARY = "Judge response was not valid JSON.";
 
+/**
+ * Spawn errors worth retrying. On Windows `CreateProcess` can return
+ * ACCESS_DENIED transiently while the image is held by a real-time AV scan,
+ * which Node surfaces as `spawn cmd.exe EACCES` even though the binary, ACLs,
+ * and cwd are all fine. It clears within milliseconds, so a short backoff
+ * recovers it; a hard failure (ENOENT etc.) is still raised on the first try.
+ */
+export const TRANSIENT_SPAWN_CODES = new Set(["EACCES", "EBUSY"]);
+export const SPAWN_RETRIES = 3;
+export const SPAWN_RETRY_BASE_MS = 250;
+
+/**
+ * Run `attempt` and retry it on a transient spawn error (see
+ * TRANSIENT_SPAWN_CODES), with exponential backoff. The error's `cause` must
+ * carry the Node `code`.
+ *
+ * @template T
+ * @param {() => Promise<T>} attempt
+ * @param {{retries?: number, baseMs?: number, sleep?: (ms: number) => Promise<void>}} [options]
+ * @returns {Promise<T>}
+ */
+export async function withSpawnRetry(attempt, { retries = SPAWN_RETRIES, baseMs = SPAWN_RETRY_BASE_MS, sleep = defaultSleep } = {}) {
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      const code = err?.cause?.code ?? err?.code;
+      if (!TRANSIENT_SPAWN_CODES.has(code) || i >= retries) throw err;
+      await sleep(baseMs * 2 ** i);
+    }
+  }
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Outcome band when a mechanical oracle passed / failed. */
 export const ORACLE_PASS_FLOOR = 70;
 export const ORACLE_FAIL_CEILING = 50;
@@ -537,6 +574,21 @@ export async function runCursorAgent({ prompt, workspaceDir, model, agentBin, ti
   await persistJudgePrompt(workspaceDir, prompt);
   const args = buildCursorAgentArgs({ workspaceDir, model });
 
+  return withSpawnRetry(() => spawnCursorAgentOnce({ workspaceDir, agentBin, args, timeoutSeconds }));
+}
+
+/**
+ * One spawn of the Cursor CLI judge. A spawn-level failure rejects with the
+ * Node error as `cause` so withSpawnRetry can read its `code`.
+ *
+ * @param {object} options
+ * @param {string} options.workspaceDir
+ * @param {string} options.agentBin
+ * @param {string[]} options.args
+ * @param {number} options.timeoutSeconds
+ * @returns {Promise<string>}
+ */
+function spawnCursorAgentOnce({ workspaceDir, agentBin, args, timeoutSeconds }) {
   return new Promise((resolve, reject) => {
     const { command, args: spawnArgs } = buildAgentSpawn(agentBin, args);
     const child = spawn(command, spawnArgs, {
@@ -560,7 +612,7 @@ export async function runCursorAgent({ prompt, workspaceDir, model, agentBin, ti
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(new Error(`Failed to run '${agentBin}': ${err.message}`));
+      reject(new Error(`Failed to run '${agentBin}': ${err.message}`, { cause: err }));
     });
     child.on("close", (code) => {
       clearTimeout(timer);

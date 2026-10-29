@@ -73,6 +73,7 @@ class HaloAgent(BaseInstalledAgent):
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         await self._install_node(environment)
+        await self._install_recon_tools(environment)
         bundle = self._make_bundle()
         try:
             await environment.upload_file(bundle, "/tmp/halo-agent.tar.gz")
@@ -86,6 +87,47 @@ class HaloAgent(BaseInstalledAgent):
                 f"chmod -R a+rX {shlex.quote(INSTALL_ROOT)}"
             ),
         )
+
+    async def _install_recon_tools(self, environment: BaseEnvironment) -> None:
+        """Pre-install common recon/analysis tools the task sandboxes lack.
+
+        The agent runs as a non-root user (``exec_as_agent``) and cannot
+        ``apt-get install`` mid-task, so binaries the trace needs — ``file``,
+        ``strings``/``objdump``/``readelf`` (binutils), ``hexdump``/``xxd``,
+        ``7z``, ``unzip``, ``gdb``, ``strace``/``ltrace`` — are staged here as
+        root instead. They install at the system level (``/usr``), so they live
+        **outside** ``/app`` (the graded user project) and are discarded with
+        the ephemeral task container; nothing the agent recovers is polluted.
+
+        Best-effort and fail-open, like the Node install: many task images are
+        offline or run old apt pools. Each package is installed on its own so
+        one missing name does not block the rest. Set
+        ``HALO_AGENT_SKIP_SETUP_PACKAGES=1`` to run against the pristine image,
+        or ``HALO_AGENT_SETUP_PACKAGES`` to override the list.
+        """
+        if os.environ.get("HALO_AGENT_SKIP_SETUP_PACKAGES"):
+            return
+        override = os.environ.get("HALO_AGENT_SETUP_PACKAGES")
+        apt_pkgs = override or "file binutils xxd bsdmainutils p7zip-full unzip xz-utils gdb strace ltrace"
+        apk_pkgs = override or "file binutils xxd p7zip unzip xz gdb strace ltrace"
+        command = (
+            "set -u; "
+            f"APT={shlex.quote(apt_pkgs)}; APK={shlex.quote(apk_pkgs)}; "
+            "if command -v apt-get >/dev/null 2>&1; then "
+            "  DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true; "
+            "  for p in $APT; do DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \"$p\" >/dev/null 2>&1 || true; done; "
+            "elif command -v apk >/dev/null 2>&1; then "
+            "  apk update >/dev/null 2>&1 || true; "
+            "  for p in $APK; do apk add --no-cache \"$p\" >/dev/null 2>&1 || true; done; "
+            "fi; "
+            "true"
+        )
+        try:
+            await self.exec_as_root(environment, command=command)
+        except Exception as error:  # noqa: BLE001 — recon tools are a convenience, never fatal
+            self.logger.warning(
+                "recon tool pre-install failed (%s); continuing without them", error
+            )
 
     @override
     @with_prompt_template
@@ -151,6 +193,9 @@ class HaloAgent(BaseInstalledAgent):
             f"{wall_clock_flag}"
             f"-- \"$(cat {shlex.quote(remote_instruction)})\"; "
             "agent_code=$?; "
+            # Sessions live under .bf/bf-agent/ (legacy .halo-agent / bitfield paths still copied).
+            "cp -f .bf/bf-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || "
+            "cp -f bitfield/bf-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || "
             "cp -f .halo-agent/sessions/harbor.json /logs/agent/session.json 2>/dev/null || true; "
             # CLI exit 2 is max-steps: still a scored attempt, not a Harbor crash.
             "if [ \"$agent_code\" -eq 2 ]; then exit 0; fi; "

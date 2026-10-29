@@ -24,6 +24,9 @@ export const DEFAULT_CONTEXT_FRACTION = 0.75;
  */
 export const SUMMARY_MAX_TOKENS = 1_500;
 
+/** How many summarizer attempts before falling back to a stub compact. */
+export const SUMMARY_MAX_ATTEMPTS = 2;
+
 const SUMMARIZER_PROMPT = [
   "You compress an agent's conversation history into a brief it can use to",
   "continue the task. Keep the user's request unchanged — never invent a new",
@@ -33,6 +36,12 @@ const SUMMARIZER_PROMPT = [
   "done. Reduce dead ends to one line each. Reply with only the summary.",
 ].join(" ");
 
+/** Second attempt: thinking models sometimes return empty content the first time. */
+const SUMMARIZER_RETRY_PROMPT = [
+  SUMMARIZER_PROMPT,
+  "Your previous reply was empty. Output the summary as plain text now — no tools,",
+  "no markup, no preamble. At least a few sentences of concrete facts from the history.",
+].join(" ");
 /**
  * Tokenizer density, measured on gpt-oss and qwen3 tokenizers: code and
  * logs — which is what tool results are — run ~3 chars/token; prose ~5.
@@ -91,9 +100,11 @@ export function estimateTokens(messages, observedTokens = 0) {
  * @param {string} [options.historyPath] Workspace-relative path of a file
  *   holding the full transcript; referenced in the summary so the model can
  *   look up dropped details.
- * @param {(info: {reason: string, error?: Error}) => void} [options.onFailure]
+ * @param {(info: {reason: string, error?: Error, recovered?: boolean}) => void} [options.onFailure]
  *   Called when compaction was needed but the summarizer produced nothing
- *   usable; the transcript is returned unchanged in that case.
+ *   usable. When `recovered` is true the returned transcript was still
+ *   compacted with a stub so the window does not keep growing; otherwise the
+ *   original messages are returned unchanged.
  * @returns {Promise<Array<object>>} The original array when nothing was
  *   compacted, otherwise a new compacted array.
  */
@@ -120,43 +131,80 @@ export async function compactMessages({
   const middle = messages.slice(1, start);
   if (middle.length === 0) return messages;
 
-  let summary;
-  try {
-    // A summary needs no reasoning channel; cap output so the call cannot
-    // run the context window dry (see SUMMARY_MAX_TOKENS).
-    const { message } = await client.chat({
-      messages: [
-        { role: "system", content: SUMMARIZER_PROMPT },
-        { role: "user", content: middle.map(renderMessage).join("\n") },
-      ],
-      think: minimalThinkSetting(client?.model),
-      options: { num_predict: SUMMARY_MAX_TOKENS },
-    });
-    summary = typeof message.content === "string" ? message.content.trim() : "";
-  } catch (error) {
-    onFailure?.({ reason: "summarizer-error", error });
-    return messages;
-  }
-  if (!summary) {
-    onFailure?.({ reason: "empty-summary" });
-    return messages;
+  const historyBody = middle.map(renderMessage).join("\n");
+  let summary = "";
+  /** @type {Error|undefined} */
+  let lastError;
+  for (let attempt = 0; attempt < SUMMARY_MAX_ATTEMPTS; attempt++) {
+    try {
+      // A summary needs no reasoning channel; cap output so the call cannot
+      // run the context window dry (see SUMMARY_MAX_TOKENS).
+      const { message } = await client.chat({
+        messages: [
+          { role: "system", content: attempt === 0 ? SUMMARIZER_PROMPT : SUMMARIZER_RETRY_PROMPT },
+          { role: "user", content: historyBody },
+        ],
+        think: minimalThinkSetting(client?.model),
+        options: { num_predict: SUMMARY_MAX_TOKENS },
+      });
+      summary = typeof message.content === "string" ? message.content.trim() : "";
+      if (summary) break;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      // Network / model-down: retry once, then fall through to the stub.
+    }
   }
 
+  if (!summary) {
+    // Do not keep growing past the window after a failed summarizer. Drop the
+    // middle turns and leave a stub that points at the history file when known.
+    const stub = buildCompactionStub({ messages, historyPath, failed: true });
+    onFailure?.({
+      reason: lastError ? "summarizer-error" : "empty-summary",
+      ...(lastError ? { error: lastError } : {}),
+      recovered: true,
+    });
+    return [messages[0], { role: "user", content: stub }, ...messages.slice(start)];
+  }
+
+  return [
+    messages[0],
+    { role: "user", content: buildCompactionStub({ messages, historyPath, summary }) },
+    ...messages.slice(start),
+  ];
+}
+
+/**
+ * Build the compacted recap user message.
+ * @param {object} options
+ * @param {Array<object>} options.messages
+ * @param {string} [options.historyPath]
+ * @param {string} [options.summary]
+ * @param {boolean} [options.failed]
+ */
+function buildCompactionStub({ messages, historyPath, summary, failed = false }) {
   const original = extractOriginalInstruction(messages);
-  const parts = ["[Earlier conversation was compacted to save space. Summary:]"];
+  const parts = [
+    failed
+      ? "[Earlier conversation was compacted to save space. The summarizer returned nothing usable; older turns were dropped.]"
+      : "[Earlier conversation was compacted to save space. Summary:]",
+  ];
   if (original) {
     parts.push(`Original user instruction (verbatim — do not invent a new goal):\n${original}\n`);
   }
-  parts.push(summary);
+  if (summary) parts.push(summary);
+  else {
+    parts.push(
+      "Continue from recent turns below. Prefer tools over guessing about dropped details.",
+    );
+  }
   if (historyPath) {
     parts.push(
       `\nThe full earlier transcript is saved at ${historyPath}. If a detail you need is missing from this summary, grep_search or read_file that file instead of guessing.`,
     );
   }
-
-  return [messages[0], { role: "user", content: parts.join("\n") }, ...messages.slice(start)];
+  return parts.join("\n");
 }
-
 /**
  * First real user goal in the transcript, skipping compaction recaps.
  * @param {Array<object>} messages

@@ -274,6 +274,15 @@ export function modelPromptOverlay(model) {
       "  JSON strings: escape quotes and newlines instead of pasting raw text.",
     ].join("\n");
   }
+  if (/qwen3-coder/i.test(name)) {
+    return [
+      "## Model notes",
+      "- A tool call is finished only when it includes </tool_call>. Do not stop",
+      "  after the opening <tool_call> tag.",
+      "- Do not write a status paragraph before a tool call. Emit the call",
+      "  immediately, with short arguments.",
+    ].join("\n");
+  }
   if (/^(qwen|deepseek|llama|mistral|devstral|gemma|phi)/i.test(name)) {
     return [
       "## Model notes",

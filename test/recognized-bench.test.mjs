@@ -5,7 +5,14 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { parseRecognizedArgs, defaultRecognizedConfig, loadRecognizedOptions } from "../evals/recognized/config.mjs";
-import { buildHarborArgs, buildHarborEnv, ollamaUrlForContainer, toHarborTaskFilter } from "../evals/recognized/harbor.mjs";
+import {
+  buildHarborArgs,
+  buildHarborEnv,
+  buildHarborSpawn,
+  ollamaUrlForContainer,
+  resolveCommandPath,
+  toHarborTaskFilter,
+} from "../evals/recognized/harbor.mjs";
 import { findInstructionField, loadTrialAgentMetrics, loadTrialJudgeInput } from "../evals/recognized/judge.mjs";
 import { latestReportPaths, recognizedRoot, runDirectory, scoreboardPath, timestampRunId } from "../evals/recognized/layout.mjs";
 import { parseHarborJob, summarizeTasks } from "../evals/recognized/parse.mjs";
@@ -52,19 +59,17 @@ test("parseRecognizedArgs defaults to the pinned local model with no tier preset
   assert.equal(opts.model, PINNED_MODELS.local);
 });
 
-test("loadRecognizedOptions keeps the pinned local model when no tier preset is set", async () => {
+test("loadRecognizedOptions follows config.json tierPreset (currently cloud-max)", async () => {
   const { options } = await loadRecognizedOptions(["terminal-bench"]);
-  assert.equal(options.tierPreset, null);
-  assert.equal(options.model, PINNED_MODELS.local);
+  assert.equal(options.tierPreset, "cloud-max");
+  assert.equal(options.model, "tier-preset cloud-max");
 });
 
 test("loadRecognizedOptions honors explicit --model over the preset", async () => {
   const { options } = await loadRecognizedOptions(["terminal-bench", "--model", "gpt-oss:20b"]);
   assert.equal(options.model, "gpt-oss:20b");
   assert.equal(options.tierPreset, null);
-});
-
-test("loadRecognizedOptions turns auto + --tier-preset into a tier-preset model string", async () => {
+});test("loadRecognizedOptions turns auto + --tier-preset into a tier-preset model string", async () => {
   const { options } = await loadRecognizedOptions([
     "terminal-bench",
     "--tier-preset",
@@ -191,6 +196,29 @@ test("toHarborTaskFilter prefixes bare names so Harbor fnmatch can match package
   assert.equal(toHarborTaskFilter("build-pmars"), "*/build-pmars");
   assert.equal(toHarborTaskFilter("terminal-bench/build-pmars"), "terminal-bench/build-pmars");
   assert.equal(toHarborTaskFilter("*/openssl*"), "*/openssl*");
+});
+
+test("buildHarborSpawn runs Windows .exe directly and only shells scripts", () => {
+  if (process.platform !== "win32") {
+    assert.deepEqual(buildHarborSpawn("harbor", ["run"]), { command: "harbor", args: ["run"] });
+    return;
+  }
+  const exePath = "C:\\tools\\harbor.exe";
+  const exe = buildHarborSpawn(exePath, ["run", "-d", "tb"]);
+  assert.equal(exe.command, exePath);
+  assert.deepEqual(exe.args, ["run", "-d", "tb"]);
+  const scriptPath = "C:\\tools\\harbor.cmd";
+  const script = buildHarborSpawn(scriptPath, ["run"]);
+  assert.match(script.command.toLowerCase(), /cmd\.exe$/);
+  assert.deepEqual(script.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.equal(script.args[3], scriptPath);
+});
+
+test("resolveCommandPath finds harbor.exe on PATH when installed", () => {
+  const resolved = resolveCommandPath("harbor");
+  if (!resolved) return;
+  if (process.platform === "win32") assert.match(resolved.toLowerCase(), /\.exe$/);
+  assert.ok(path.isAbsolute(resolved));
 });
 
 test("recognized layout sits under the sibling benchmark folder", () => {

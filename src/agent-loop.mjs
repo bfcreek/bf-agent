@@ -16,6 +16,7 @@
  */
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
+import { deliverableCheckpointMessage } from "./deliverable-guard.mjs";
 import { minimalThinkSetting } from "./model-tuning.mjs";
 import { isProviderClientError, isTransientProviderError } from "./provider-client.mjs";
 
@@ -62,6 +63,9 @@ export function composeSystemPrompt({ contextGuidance = BUILTIN_CONTEXT_GUIDANCE
     "  named, and read the output. Fix what fails.",
     "- If a tool call fails, read the error and change your approach instead of",
     "  repeating the same call.",
+    "- When the task names an output file path, write that file early and keep it",
+    "  updated. A chat answer is not the deliverable — only the file counts.",
+    "  Before finishing, read each required output file back once.",
     "- Keep going until the task is complete, then reply to the user in plain",
     "  text with no tool calls. If you cannot finish, say what was done and what",
     "  remains.",
@@ -105,7 +109,7 @@ export const DEFAULT_MAX_STOP_HOOK_LOOPS = 5;
 /** Empty assistant turns (no text, no tool calls) re-asked before giving up. */
 const MAX_EMPTY_RETRIES = 2;
 export const EMPTY_RETRY_PROMPT =
-  "Your last message was empty. Call a tool to make progress, or reply to the user in plain text. Do not end the turn with only reasoning.";
+  "Your last message was empty. Call a tool now to make progress (for example write_file, run_command, or read_file). Do not end the turn with only reasoning. Only if the task needs no tool at all, reply in plain text.";
 /**
  * Sent instead of EMPTY_RETRY_PROMPT when the turn was cut off by the output
  * limit (`done_reason: "length"`) before any tool call or text — typically a
@@ -121,9 +125,11 @@ export const TRUNCATED_RETRY_PROMPT =
   "Only if the task needs no tool at all, give the answer in plain text.";
 /**
  * Sent when the model opened a tool-call marker (`<tool_call>`, `<function=`)
- * and stopped before the call was complete. `done_reason` is often `stop`
- * here — the marker itself is the ending token — so this is not the output
- * limit path. The partial text is dropped; keeping it would end the turn.
+ * and stopped before the call was complete. For qwen3-coder that is the
+ * trained tool format: Ollama only promotes a call once `</tool_call>`
+ * arrives, and a turn that ends on the open tag comes back as plain content.
+ * The partial is dropped. Keeping the status paragraph would seed another
+ * essay that ends the same way.
  */
 export const INCOMPLETE_TOOL_CALL_PROMPT =
   "Your last response started a tool call but the call was cut off before it could run. " +
@@ -131,14 +137,40 @@ export const INCOMPLETE_TOOL_CALL_PROMPT =
   "Do not write <tool_call> or <function=...> as message text.";
 
 /**
+ * qwen3-coder has no separate tool channel. A finished call is the XML block
+ * through `</tool_call>`; forbidding those tags makes the model open one and
+ * then stop. Other families should keep using native tool calls.
+ *
+ * @param {string} [model]
+ * @returns {string}
+ */
+export function incompleteToolCallPrompt(model) {
+  if (/qwen3-coder/i.test(String(model ?? ""))) {
+    return (
+      "Your last response opened a tool call and stopped before the function body. " +
+      "Do not write a status paragraph. Emit one complete tool call now and close it with </tool_call>. " +
+      "Keep the arguments short."
+    );
+  }
+  return INCOMPLETE_TOOL_CALL_PROMPT;
+}
+
+/**
  * Wall-clock budget policy (only when `wallClockMs` is set): stop the loop a
  * little before the deadline so the wrap-up and session save happen instead
  * of an external kill mid-turn.
  */
-export const WALL_CLOCK_RESERVE_RATIO = 0.05;
-export const WALL_CLOCK_RESERVE_MIN_MS = 15_000;
-export const WALL_CLOCK_RESERVE_MAX_MS = 60_000;
+export const WALL_CLOCK_RESERVE_RATIO = 0.08;
+export const WALL_CLOCK_RESERVE_MIN_MS = 30_000;
+export const WALL_CLOCK_RESERVE_MAX_MS = 120_000;
 export const WRAP_UP_TURN_MARGIN = 1.2;
+
+/**
+ * When this many steps remain (or wall-clock is nearly spent), inject a
+ * one-shot deliverable checkpoint while tools still work — wrap-up after
+ * max-steps offers no tools, so a missing `/app/….txt` cannot be fixed then.
+ */
+export const DELIVERABLE_STEP_RESERVE = 8;
 
 /**
  * Streak nudge: after this many consecutive calls to the same read-only tool
@@ -170,8 +202,8 @@ export function streakNudgePrompt(tool, count, hint = DEFAULT_STREAK_NUDGE_HINT)
 /** Sent when the step or time budget runs out, so the run still ends with an answer. */
 const WRAP_UP_PROMPT = [
   "The budget for this task is exhausted. Do not call any more tools.",
-  "Reply to the user in plain text: what you did, what you found, and what",
-  "remains if the task is not finished.",
+  "Reply to the user in plain text: what you did, what you found, any required",
+  "output paths that are still missing, and what remains if the task is not finished.",
 ].join(" ");
 
 /**
@@ -363,19 +395,49 @@ export class AgentLoop {
     const turnDurations = [];
     const meanTurnMs = () =>
       turnDurations.length ? turnDurations.reduce((a, b) => a + b, 0) / turnDurations.length : 0;
-    const timedTurn = async (fn) => {
-      const t0 = this.now();
-      try {
-        return await fn();
-      } finally {
-        turnDurations.push(Math.max(0, this.now() - t0));
-      }
-    };
     const remainingMs = () => (deadlineAt === null ? Infinity : deadlineAt - this.now());
     const outOfTime = () =>
       deadlineAt !== null && remainingMs() <= Math.max(deadlineReserveMs, meanTurnMs());
     const elapsed = () => this.now() - wallStarted;
-
+    /**
+     * Run a model call under the wall-clock budget. Between-turn checks alone
+     * miss hung `chat()` calls (Harbor AgentTimeoutError with stopReason still
+     * `running`); abort the in-flight request when the reserve is reached so
+     * wrap-up can still run.
+     * @template T
+     * @param {(signal: AbortSignal|undefined) => Promise<T>} fn
+     * @param {{budgetMs?: number}} [opts]
+     */
+    const timedTurn = async (fn, { budgetMs } = {}) => {
+      const t0 = this.now();
+      const turnBudget =
+        budgetMs !== undefined
+          ? budgetMs
+          : deadlineAt === null
+            ? Infinity
+            : Math.max(0, remainingMs() - Math.max(deadlineReserveMs, meanTurnMs()));
+      const turnCtl = new AbortController();
+      const onOuterAbort = () => turnCtl.abort();
+      if (signal) {
+        if (signal.aborted) turnCtl.abort();
+        else signal.addEventListener("abort", onOuterAbort, { once: true });
+      }
+      let timer;
+      if (Number.isFinite(turnBudget) && turnBudget > 0) {
+        timer = setTimeout(() => turnCtl.abort(), turnBudget);
+        // Don't keep the process alive solely for this timer (Node / tests).
+        timer.unref?.();
+      } else if (Number.isFinite(turnBudget) && turnBudget <= 0) {
+        turnCtl.abort();
+      }
+      try {
+        return await fn(turnCtl.signal);
+      } finally {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", onOuterAbort);
+        turnDurations.push(Math.max(0, this.now() - t0));
+      }
+    };
     // Tools get the user's own words for safety decisions (the shell tool
     // only deletes files the goal names) and the deadline so command
     // timeouts cannot outlive the run.
@@ -429,6 +491,7 @@ export class AgentLoop {
     let currentGoal = goal;
     let wallClockExhausted = false;
     let tokenBudgetExhausted = false;
+    let deliverableCheckpointSent = false;
     // This turn's content tokens. Committed only when the turn is the answer
     // the caller shows. Cleared before the next model call otherwise.
     /** @type {string[]} */
@@ -462,6 +525,8 @@ export class AgentLoop {
       if (this.compaction) {
         const { historyPath, ...compactionOptions } = this.compaction;
         const before = messages.length;
+        /** @type {{reason: string, error?: Error, recovered?: boolean}|null} */
+        let compactFailure = null;
         const compacted = await compactMessages({
           client: this.client,
           messages,
@@ -469,44 +534,54 @@ export class AgentLoop {
           historyPath,
           ...compactionOptions,
           observedTokens,
-          onFailure: ({ reason, error }) => {
-            compactionFailures += 1;
-            // Trace why the window was not reclaimed: an errored summarizer
-            // and one that returned nothing call for different fixes.
-            record({
-              index: stepIndex,
-              kind: "compaction",
-              content: `failed (${reason})${error ? `: ${String(error.message ?? error).slice(0, 300)}` : ""} at ~${observedTokens} tokens`,
-              toolCalls: [],
-            });
+          onFailure: (info) => {
+            compactFailure = info;
           },
         });
-        if (compacted !== messages) {
+        if (compactFailure) {
+          compactionFailures += 1;
+          // Trace why the summarizer failed; recovered stubs still shrink the
+          // window so the next model call is not over budget.
+          const errBit = compactFailure.error
+            ? `: ${String(compactFailure.error.message ?? compactFailure.error).slice(0, 300)}`
+            : "";
+          const recoverBit = compactFailure.recovered
+            ? `; recovered with stub ${before} -> ${compacted.length} messages`
+            : "";
           record({
             index: stepIndex,
             kind: "compaction",
-            content: `ok: ${before} -> ${compacted.length} messages at ~${observedTokens} tokens`,
+            content: `failed (${compactFailure.reason})${errBit}${recoverBit} at ~${observedTokens} tokens`,
             toolCalls: [],
           });
+        }
+        if (compacted !== messages) {
+          if (!compactFailure) {
+            record({
+              index: stepIndex,
+              kind: "compaction",
+              content: `ok: ${before} -> ${compacted.length} messages at ~${observedTokens} tokens`,
+              toolCalls: [],
+            });
+          }
           observedTokens = 0;
           compactions += 1;
         }
         messages = compacted;
       }
-
       const index = stepIndex + 1;
       let chatResult;
       try {
         const think = nextThink;
         nextThink = undefined;
         pendingDeltas.length = 0;
-        chatResult = await timedTurn(() =>
+        chatResult = await timedTurn((turnSignal) =>
           chatWithParseRecovery(
             this.client,
             {
               messages,
               tools,
-              signal,
+              signal: turnSignal,
               onDelta: this.onDelta ? captureDelta : undefined,
               ...(think !== undefined ? { think } : {}),
               ...(this.maxOutputTokens > 0 ? { options: { num_predict: this.maxOutputTokens } } : {}),
@@ -525,7 +600,21 @@ export class AgentLoop {
           ),
         );
       } catch (err) {
-        if (signal?.aborted || err?.name === "AbortError") throw err;
+        // Caller abort (Ctrl-C / Harbor kill of our process) vs wall-clock
+        // abort of a hung turn: only the former is `aborted`.
+        if (signal?.aborted) throw err;
+        if (err?.name === "AbortError") {
+          // In-flight chat aborted by the turn timer (wall-clock reserve),
+          // not by the caller's signal — wrap up with whatever we have.
+          wallClockExhausted = true;
+          record({
+            index,
+            kind: "failed",
+            content: "model turn aborted: wall-clock budget reached while waiting for the model",
+            toolCalls: [],
+          });
+          break;
+        }
         // Startup failures (no work done yet) propagate so callers can map
         // them to exit codes. Mid-run failures end as a failed run with the
         // steps preserved for the session log.
@@ -536,7 +625,6 @@ export class AgentLoop {
         record({ index, kind: "failed", content: error, toolCalls: [] });
         return finish({ text: "", stopReason: "failed", error });
       }
-
       const { message, raw } = chatResult;
       const usedTokens = (raw?.prompt_eval_count ?? 0) + (raw?.eval_count ?? 0);
       if (usedTokens > 0) observedTokens = usedTokens;
@@ -588,7 +676,13 @@ export class AgentLoop {
           // cut-off answer is not an answer — it is usually a script, a data
           // dump, or a call the model should have emitted natively.
           emptyRetries += 1;
-          if (truncated || incomplete) truncatedTurns += 1;
+          // Only a real output-limit stop (`done_reason: length`) is a
+          // truncated turn. An unclosed `<tool_call>` / `<function=` is the
+          // model stopping on the call token (`done_reason` is usually
+          // `stop`) with a few hundred completion tokens — the window was
+          // not exhausted, and labeling it truncated sends the bench looking
+          // for a bigger numCtx.
+          if (truncated) truncatedTurns += 1;
           // Empty turns are model round-trips too; record them so the trace
           // shows where the time and tokens went.
           record({
@@ -597,7 +691,6 @@ export class AgentLoop {
             content: text.slice(0, 500),
             toolCalls: [],
             ...turnMeta,
-            ...(incomplete ? { truncated: true } : {}),
           });
           if (emptyRetries <= MAX_EMPTY_RETRIES) {
             if (truncated || incomplete) {
@@ -611,7 +704,7 @@ export class AgentLoop {
               messages.pop();
               messages.push({
                 role: "user",
-                content: incomplete && !truncated ? INCOMPLETE_TOOL_CALL_PROMPT : TRUNCATED_RETRY_PROMPT,
+                content: incomplete && !truncated ? incompleteToolCallPrompt(this.client?.model) : TRUNCATED_RETRY_PROMPT,
               });
               nextThink = minimalThinkSetting(this.client?.model);
             } else {
@@ -714,6 +807,10 @@ export class AgentLoop {
           }
         }
       }
+      // A real tool call recovered the previous cutoff. The empty-retry budget
+      // is consecutive failures: three cutoffs spread across a productive run
+      // are not "repeatedly" empty, and must not end the turn.
+      emptyRetries = 0;
       record({ index, kind: "tool-calls", content: textOf(message.content), toolCalls: executed, ...turnMeta });
 
       if (this.streakNudgeAfter > 0 && streakTool && streakCount >= this.streakNudgeAfter && !streakNudged) {
@@ -722,6 +819,29 @@ export class AgentLoop {
         const text = streakNudgePrompt(streakTool, streakCount, this.streakNudgeHint);
         messages.push({ role: "user", content: text });
         record({ index, kind: "steer", content: text, toolCalls: [], nudge: { tool: streakTool, count: streakCount } });
+      }
+
+      // Named deliverables missing + budget nearly spent: force a write while
+      // tools still work (post-budget wrap-up cannot call write_file).
+      if (!deliverableCheckpointSent) {
+        const remainingSteps = Math.max(0, this.maxSteps - stepIndex);
+        const lowSteps = remainingSteps <= DELIVERABLE_STEP_RESERVE;
+        const lowClock =
+          deadlineAt !== null &&
+          remainingMs() <= Math.max(deadlineReserveMs * 2, meanTurnMs() * 3, 60_000);
+        if (lowSteps || lowClock) {
+          const checkpoint = deliverableCheckpointMessage({
+            goal: currentGoal,
+            steps,
+            remainingSteps,
+            remainingMs: deadlineAt === null ? undefined : Math.max(0, remainingMs()),
+          });
+          if (checkpoint) {
+            deliverableCheckpointSent = true;
+            messages.push({ role: "user", content: checkpoint });
+            record({ index, kind: "steer", content: checkpoint, toolCalls: [], deliverableCheckpoint: true });
+          }
+        }
       }
 
       // Steering lands at the tool boundary, after results, so in-flight
@@ -737,12 +857,23 @@ export class AgentLoop {
     // Out of steps or time: ask for a plain-text wrap-up (no tools offered)
     // when a turn still fits; otherwise return what we have.
     let text = "";
-    const wrapUpFits = deadlineAt === null || remainingMs() > meanTurnMs() * WRAP_UP_TURN_MARGIN;
+    // After a mid-turn wall-clock abort the reserve is already spent — use
+    // whatever milliseconds remain (minus a tiny save cushion).
+    const wrapCushionMs = wallClockExhausted ? 1_000 : Math.min(deadlineReserveMs, WALL_CLOCK_RESERVE_MIN_MS / 3);
+    const wrapBudgetMs =
+      deadlineAt === null ? Infinity : Math.max(0, remainingMs() - wrapCushionMs);
+    const wrapUpFits =
+      deadlineAt === null ||
+      wrapBudgetMs >= (wallClockExhausted ? 500 : 2_000) ||
+      (wrapBudgetMs > 0 && wrapBudgetMs > meanTurnMs() * WRAP_UP_TURN_MARGIN);
     if (!signal?.aborted && wrapUpFits) {
       try {
         const wrapUp = [...messages, { role: "user", content: WRAP_UP_PROMPT }];
         const wrapStarted = this.now();
-        const { message } = await chatWithRetry(this.client, { messages: wrapUp, signal });
+        const { message } = await timedTurn(
+          (turnSignal) => chatWithRetry(this.client, { messages: wrapUp, signal: turnSignal }),
+          { budgetMs: Number.isFinite(wrapBudgetMs) ? wrapBudgetMs : undefined },
+        );
         text = textOf(message.content).trim();
         if (text) {
           messages.push({ role: "user", content: WRAP_UP_PROMPT });
@@ -907,6 +1038,13 @@ export function incompleteToolCallText(text) {
 /**
  * Unclosed `<tool_call>` whose tail is the rest of the answer, not a call
  * body. An unclosed `<function=` / `<parameter=` still counts as a cutoff.
+ *
+ * Two leak shapes: prose *after* the stray marker, and — the one qwen3-coder
+ * produces most — a finished answer that merely appends a bare `<tool_call>`
+ * at the very end with nothing after it. The second is distinguished from a
+ * genuine cutoff ("Let me read the file.<tool_call>") by what precedes the
+ * marker: a substantial answer is a leak; a short narration is a real cutoff.
+ *
  * @param {string} body
  * @returns {boolean}
  */
@@ -915,7 +1053,28 @@ function strayToolCallInsideAnswer(body) {
   if (count(/<tool_call\b/g) <= count(/<\/tool_call>/g)) return false;
   if (count(/<function=/g) > count(/<\/function>/g)) return false;
   if (count(/<parameter=/g) > count(/<\/parameter>/g)) return false;
-  return proseAfterLastMarker(body, /<tool_call\b[^>]*>/g);
+  if (proseAfterLastMarker(body, /<tool_call\b[^>]*>/g)) return true;
+  return finishedAnswerBeforeFirstMarker(body, /<tool_call\b[^>]*>/g);
+}
+
+/**
+ * A complete answer that ends on a bare `<tool_call>` token with nothing
+ * after it. The text before the first marker decides: a short narration is a
+ * genuine cutoff (the model was about to call and stopped), a longer finished
+ * answer is a token the model leaked onto the end of its reply. Reuses the
+ * same preamble heuristic as the text-tool-call parser so the two agree.
+ *
+ * @param {string} body
+ * @param {RegExp} re
+ * @returns {boolean}
+ */
+function finishedAnswerBeforeFirstMarker(body, re) {
+  const global = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  const first = global.exec(body);
+  if (!first) return false;
+  const before = body.slice(0, first.index).replace(/<\/?tool_call\b[^>]*>/gi, "").trim();
+  if (!before) return false;
+  return !isShortToolPreamble(before);
 }
 
 /**

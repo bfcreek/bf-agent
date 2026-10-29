@@ -30,9 +30,9 @@ const MAX_TIMEOUT_SECONDS = positiveIntEnv("HALO_MAX_COMMAND_TIMEOUT", 300);
  * Wall-clock the run keeps for itself after the last command: a model turn to
  * read the result and answer, plus the session save.
  */
-export const DEADLINE_COMMAND_RESERVE_MS = 20_000;
+export const DEADLINE_COMMAND_RESERVE_MS = 45_000;
 /** Below this much remaining budget a command cannot finish and be acted on. */
-export const DEADLINE_MIN_COMMAND_MS = 5_000;
+export const DEADLINE_MIN_COMMAND_MS = 8_000;
 
 /**
  * Fit a requested command timeout inside the run's remaining wall-clock budget.
@@ -314,8 +314,10 @@ export function registerShellTools(registry, { workspaceRoot }) {
           throw new Error(
             `This command deletes files ('${segment}') that the user did not explicitly name for ` +
               `deletion${target ? ` (e.g. '${target}')` : ""}, which requires explicit user approval. ` +
-              "Do not attempt to delete them another way. If the task requires deleting files, " +
-              "stop and ask the user in your final answer to confirm exactly which files may be deleted.",
+              "Do not retry rm/del/Remove-Item or work around this check. Prefer leaving temporary " +
+              "files in place, overwriting with the next write (e.g. aria2c --allow-overwrite=true, " +
+              "cp/mv onto the path), or writing to a new name. If the task truly requires deleting " +
+              "those paths, stop and ask the user in your final answer to confirm the exact targets.",
           );
         }
       }

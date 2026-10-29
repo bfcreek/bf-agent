@@ -31,7 +31,9 @@ import {
 } from "./model-routing.mjs";
 import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./model-tuning.mjs";
 import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import { withDeliverableGuard } from "./deliverable-guard.mjs";
 import { withHollowCompletionGuard } from "./hollow-completion-guard.mjs";
+import { withSecretFabricationGuard } from "./secret-fabrication-guard.mjs";
 import { createOpenAIServer } from "./openai-server.mjs";
 import { KNOWN_PROVIDERS, ProviderClientError } from "./provider-client.mjs";
 import { createProviderClient, shouldRouteOllamaModel } from "./providers/factory.mjs";
@@ -970,7 +972,13 @@ async function main() {
   }
 
   /** @type {import("./agent-loop.mjs").AgentHooks} */
-  let loopHooks = withHollowCompletionGuard({}, options.completionGuard !== false);
+  let loopHooks = withSecretFabricationGuard(
+    withDeliverableGuard(
+      withHollowCompletionGuard({}, options.completionGuard !== false),
+      options.completionGuard !== false,
+    ),
+    options.completionGuard !== false,
+  );
   let nestedOverlay = "";
   if (providerSetup.kind === "nested" && typeof providerSetup.applyNested === "function") {
     const nested = providerSetup.applyNested({
@@ -1118,9 +1126,11 @@ async function main() {
   });
 
   const onKillSignal = () => {
-    void flushLiveSession({ stopReason: "timeout", error: "process received SIGTERM/SIGINT" }).finally(
-      () => process.exit(1),
-    );
+    // Drain the flush chain before exiting so Harbor's post-run `cp` of
+    // session.json sees steps (AgentTimeoutError used to leave an empty file).
+    void flushLiveSession({ stopReason: "timeout", error: "process received SIGTERM/SIGINT" })
+      .catch(() => {})
+      .finally(() => process.exit(1));
   };
   if (store && options.session && !options.interactive) {
     process.once("SIGTERM", onKillSignal);

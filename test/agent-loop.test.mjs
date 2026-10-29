@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_STEPS,
   DEFAULT_SYSTEM_PROMPT,
   isToolCallParseError,
+  incompleteToolCallPrompt,
   incompleteToolCallText,
   parseTextToolCall,
   stripStrayToolCallMarkup,
@@ -14,6 +15,7 @@ import {
   toolResultContent,
   WALL_CLOCK_RESERVE_MIN_MS,
 } from "../src/agent-loop.mjs";
+import { modelPromptOverlay } from "../src/model-tuning.mjs";
 import { ToolRegistry } from "../src/tool-registry.mjs";
 
 /** Client that replays a scripted sequence of assistant messages. */
@@ -67,6 +69,8 @@ test("system prompt is short and stays out of task specifics", () => {
   assert.match(DEFAULT_SYSTEM_PROMPT, /Gather context yourself/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Read a file before editing it/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Verify your work/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /output file path/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /chat answer is not the deliverable/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Communication:/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /final message must[\s\S]*stand alone/i);
   assert.match(DEFAULT_SYSTEM_PROMPT, /Change only what the task requires/);
@@ -754,6 +758,15 @@ test("incompleteToolCallText is an unclosed marker, not a balanced example", () 
     ),
     false,
   );
+  // A finished multi-sentence answer that merely appends a bare <tool_call>
+  // at the very end (qwen3-coder's trailing leak) is a leak, not a cutoff.
+  assert.equal(
+    incompleteToolCallText(
+      "I finished the task and saved the output to results.txt. I examined the binary and ran it with several inputs. " +
+        "I read the generated file and verified its contents. The file now holds the final result as requested.<tool_call>",
+    ),
+    false,
+  );
 });
 
 test("stripStrayToolCallMarkup removes a leaked tag and leaves the sentence", () => {
@@ -785,6 +798,28 @@ test("a stray tool_call tag inside a finished answer is removed and not retried"
   assert.match(result.text, /The game is ready/);
 });
 
+test("a finished answer that ends on a bare tool_call token is accepted, not retried", async () => {
+  const requests = [];
+  const answer =
+    "I finished the task and saved the output to results.txt. I examined the binary and ran it with several inputs. " +
+    "I read the generated file and verified its contents. The file now holds the final result as requested.<tool_call>";
+  const client = {
+    model: "qwen3-coder:30b",
+    async chat(request) {
+      requests.push(structuredClone(request.messages));
+      return { message: { role: "assistant", content: answer }, raw: { done_reason: "stop" } };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 4 });
+
+  const result = await loop.run("extract the secret key");
+
+  assert.equal(requests.length, 1, "the trailing leaked token did not trigger an empty-retry spin");
+  assert.equal(result.stopReason, "completed");
+  assert.doesNotMatch(result.text, /<tool_call>/);
+  assert.match(result.text, /final result as requested/);
+});
+
 test("a reply that ends on an unclosed tool_call token is retried, not accepted as final", async () => {
   const requests = [];
   const client = {
@@ -808,15 +843,52 @@ test("a reply that ends on an unclosed tool_call token is retried, not accepted 
   const result = await loop.run("go");
 
   assert.equal(result.steps[0].kind, "empty");
-  assert.equal(result.steps[0].truncated, true);
+  assert.equal(result.steps[0].truncated, undefined, "stopping on the call token is not an output-limit truncation");
+  assert.equal(result.truncatedTurns, 0);
   assert.match(result.steps[0].content, /<tool_call>/);
-  assert.match(requests[1].at(-1).content, /started a tool call/);
+  assert.match(requests[1].at(-1).content, /close it with <\/tool_call>/);
+  assert.doesNotMatch(requests[1].at(-1).content, /Do not write <tool_call>/);
+  assert.match(incompleteToolCallPrompt("llama3.1"), /native tool calling/);
+  assert.match(modelPromptOverlay("qwen3-coder:30b"), /<\/tool_call>/);
+  assert.match(modelPromptOverlay("llama3.1"), /JSON/);
   assert.ok(
     !requests[1].some((m) => m.role === "assistant" && /<tool_call>/.test(String(m.content ?? ""))),
     "the cut-off call is not re-sent",
   );
   assert.equal(result.steps[1].kind, "tool-calls");
-  assert.equal(result.truncatedTurns, 1);
+});
+
+test("incomplete tool-call cutoffs separated by a real call do not exhaust the retry budget", async () => {
+  const cutoff = "I'll scan the files next:<tool_call>";
+  let n = 0;
+  const client = {
+    model: "qwen3-coder:30b",
+    async chat() {
+      n += 1;
+      if (n === 1 || n === 3 || n === 5) {
+        return {
+          message: { role: "assistant", content: cutoff },
+          raw: { done_reason: "stop", eval_count: 160, prompt_eval_count: 12000 },
+        };
+      }
+      if (n === 6) {
+        return { message: { role: "assistant", content: "done" }, raw: { done_reason: "stop" } };
+      }
+      return {
+        message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+        raw: { done_reason: "stop" },
+      };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 8 });
+
+  const result = await loop.run("go");
+
+  assert.equal(result.stopReason, "completed");
+  assert.equal(result.text, "done");
+  assert.equal(result.truncatedTurns, 0);
+  assert.equal(result.steps.filter((s) => s.kind === "empty").length, 3);
+  assert.equal(n, 6);
 });
 
 function readSchema() {
@@ -1171,18 +1243,18 @@ test("wall-clock budget: the loop stops itself at the deadline reserve and wraps
       return { message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] }, raw: {} };
     },
   };
-  // Budget 20s, reserve is clamped up to 15s → about 5s of real work.
-  const loop = new AgentLoop({ client, registry: makeRegistry(), wallClockMs: 20_000, now });
+  // Budget 45s, reserve floors at WALL_CLOCK_RESERVE_MIN_MS → about 15s of real work.
+  const loop = new AgentLoop({ client, registry: makeRegistry(), wallClockMs: 45_000, now });
 
   const result = await loop.run("busy work");
 
   assert.equal(result.stopReason, "max-steps");
   assert.equal(result.wallClockExhausted, true);
   assert.equal(result.text, "out of time; here is what I did");
-  assert.equal(WALL_CLOCK_RESERVE_MIN_MS, 15_000);
+  assert.equal(WALL_CLOCK_RESERVE_MIN_MS, 30_000);
   const toolTurns = result.steps.filter((s) => s.kind === "tool-calls").length;
-  assert.ok(toolTurns >= 4 && toolTurns <= 6, `stopped after ${toolTurns} turns`);
-  assert.ok(result.elapsedMs <= 20_000);
+  assert.ok(toolTurns >= 12 && toolTurns <= 18, `stopped after ${toolTurns} turns`);
+  assert.ok(result.elapsedMs <= 45_000);
 });
 
 test("wall-clock budget: a wrap-up that cannot fit is skipped", async () => {
@@ -1204,6 +1276,38 @@ test("wall-clock budget: a wrap-up that cannot fit is skipped", async () => {
   assert.equal(result.text, "");
 });
 
+test("wall-clock budget: a hung model turn is aborted so wrap-up can still run", async () => {
+  let clock = 1_000;
+  const client = {
+    calls: 0,
+    async chat({ signal, tools }) {
+      this.calls += 1;
+      if (tools) {
+        // Simulate a cloud model that never returns until the turn timer fires.
+        await new Promise((_, reject) => {
+          const fail = () => {
+            // Leave several seconds on the wall clock so wrap-up can run.
+            clock += 10_000;
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          };
+          if (signal?.aborted) return fail();
+          signal.addEventListener("abort", fail, { once: true });
+        });
+      }
+      return { message: { role: "assistant", content: "wrapped after hang" }, raw: {} };
+    },
+  };
+  // 45s budget → 30s reserve → ~15s turn timer. After abort (+10s fake), wrap-up still fits.
+  const loop = new AgentLoop({ client, registry: makeRegistry(), wallClockMs: 45_000, now: () => clock });
+
+  const result = await loop.run("investigate the archive");
+
+  assert.equal(result.wallClockExhausted, true);
+  assert.equal(result.stopReason, "max-steps");
+  assert.equal(result.text, "wrapped after hang");
+  assert.ok(result.steps.some((s) => s.kind === "failed" && /wall-clock budget reached/.test(s.content)));
+  assert.ok(result.steps.some((s) => s.kind === "final" && s.wrapUp));
+});
 // --- compaction ---------------------------------------------------------------
 
 test("compaction runs before each model call when enabled", async () => {
@@ -1236,15 +1340,16 @@ test("compaction runs before each model call when enabled", async () => {
   assert.match(trace[0].content, /^ok: \d+ -> \d+ messages/);
 });
 
-test("a failed compaction is traced with its reason", async () => {
+test("a failed compaction is traced with its reason and recovers with a stub", async () => {
   let summarizerCalls = 0;
   const client = {
     calls: 0,
     async chat({ messages }) {
       if (/compress an agent's conversation/i.test(messages[0]?.content ?? "")) {
         summarizerCalls += 1;
-        // First: thinking ate the output budget, nothing came back. Then: a 500.
-        if (summarizerCalls === 1) return { message: { role: "assistant", content: "" }, raw: {} };
+        // First attempt empty; second attempt 500 — both count as one failed
+        // compaction that still stubs so the window shrinks.
+        if (summarizerCalls % 2 === 1) return { message: { role: "assistant", content: "" }, raw: {} };
         throw ollamaError("Ollama /api/chat returned 500: boom", 500);
       }
       this.calls += 1;
@@ -1263,14 +1368,12 @@ test("a failed compaction is traced with its reason", async () => {
   const result = await loop.run("x".repeat(50));
 
   assert.equal(result.stopReason, "completed");
-  assert.equal(result.compactions, 0);
-  assert.equal(result.compactionFailures, 2);
+  assert.ok(result.compactions >= 1);
+  assert.ok(result.compactionFailures >= 1);
   const trace = result.steps.filter((s) => s.kind === "compaction").map((s) => s.content);
-  assert.equal(trace.length, 2);
-  assert.match(trace[0], /^failed \(empty-summary\)/);
-  assert.match(trace[1], /^failed \(summarizer-error\): Ollama \/api\/chat returned 500: boom/);
+  assert.ok(trace.length >= 1);
+  assert.match(trace[0], /^failed \(summarizer-error\): Ollama \/api\/chat returned 500: boom; recovered with stub/);
 });
-
 // --- toolResultContent -------------------------------------------------------
 
 test("toolResultContent renders command results with a status header", () => {

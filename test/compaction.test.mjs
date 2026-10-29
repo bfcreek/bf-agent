@@ -126,7 +126,7 @@ test("token budget set and under it: no compaction, even past the char default",
   assert.equal(client.calls.length, 0);
 });
 
-test("summarizer failure leaves the transcript unchanged and reports it", async () => {
+test("summarizer failure retries then stubs a compact so the window still shrinks", async () => {
   const failing = {
     async chat() {
       throw new Error("model offline");
@@ -138,25 +138,61 @@ test("summarizer failure leaves the transcript unchanged and reports it", async 
     client: failing,
     messages,
     maxChars: 100,
+    keepRecent: 4,
     onFailure: (info) => failures.push(info),
   });
-  assert.equal(result, messages);
+  assert.notEqual(result, messages);
+  assert.equal(result.length, 6); // system + stub + keepRecent 4
+  assert.match(result[1].content, /summarizer returned nothing usable/);
   assert.equal(failures.length, 1);
   assert.equal(failures[0].reason, "summarizer-error");
+  assert.equal(failures[0].recovered, true);
   assert.match(failures[0].error.message, /offline/);
 });
 
-test("an empty summary (thinking-only reply) is a reported failure, not a silent no-op", async () => {
-  const client = new FakeClient([{ role: "assistant", content: "", thinking: "hmm ".repeat(2000) }]);
+test("an empty summary retries once, then stubs a compact instead of leaving the window over budget", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "", thinking: "hmm ".repeat(2000) },
+    { role: "assistant", content: "", thinking: "still thinking" },
+  ]);
   const failures = [];
   const messages = longTranscript();
 
-  const result = await compactMessages({ client, messages, maxChars: 100, onFailure: (i) => failures.push(i) });
+  const result = await compactMessages({
+    client,
+    messages,
+    maxChars: 100,
+    keepRecent: 4,
+    onFailure: (i) => failures.push(i),
+  });
 
-  assert.equal(result, messages);
-  assert.deepEqual(failures, [{ reason: "empty-summary" }]);
+  assert.equal(client.calls.length, 2);
+  assert.notEqual(result, messages);
+  assert.match(result[1].content, /summarizer returned nothing usable/);
+  assert.deepEqual(failures, [{ reason: "empty-summary", recovered: true }]);
 });
 
+test("an empty first summary that succeeds on retry uses the second reply", async () => {
+  const client = new FakeClient([
+    { role: "assistant", content: "", thinking: "..." },
+    { role: "assistant", content: "RETRY SUMMARY" },
+  ]);
+  const failures = [];
+  const messages = longTranscript();
+
+  const result = await compactMessages({
+    client,
+    messages,
+    maxChars: 100,
+    keepRecent: 4,
+    onFailure: (i) => failures.push(i),
+  });
+
+  assert.equal(client.calls.length, 2);
+  assert.equal(failures.length, 0);
+  assert.match(result[1].content, /RETRY SUMMARY/);
+  assert.doesNotMatch(result[1].content, /nothing usable/);
+});
 test("the summarizer runs with minimal thinking and a hard output cap", async () => {
   const client = new FakeClient([{ role: "assistant", content: "SUMMARY" }]);
   client.model = "gpt-oss:20b";
@@ -170,22 +206,23 @@ test("the summarizer runs with minimal thinking and a hard output cap", async ()
   assert.equal(other.calls[0].think, false);
 });
 
-test("agent loop counts compactions that produced nothing", async () => {
-  // Summarizer replies with thinking only -> compaction fails; the model then answers.
+test("agent loop counts empty-summary recovery as a failure that still compacted", async () => {
+  // Two empty summarizer replies -> stub compact; the model then answers.
   const client = new FakeClient([
+    { role: "assistant", content: "", thinking: "..." },
     { role: "assistant", content: "", thinking: "..." },
     { role: "assistant", content: "final" },
   ]);
   const registry = new ToolRegistry();
-  const loop = new AgentLoop({ client, registry, compaction: { maxChars: 100 } });
+  const loop = new AgentLoop({ client, registry, compaction: { maxChars: 100, keepRecent: 4 } });
 
   const result = await loop.run("continue", { history: longTranscript() });
 
   assert.equal(result.text, "final");
-  assert.equal(result.compactions, 0);
+  assert.equal(result.compactions, 1);
   assert.equal(result.compactionFailures, 1);
+  assert.ok(result.steps.some((s) => s.kind === "compaction" && /failed \(empty-summary\)/.test(s.content)));
 });
-
 test("agent loop compacts a long history before calling the model", async () => {
   const client = new FakeClient([
     { role: "assistant", content: "HISTORY SUMMARY" }, // compaction call

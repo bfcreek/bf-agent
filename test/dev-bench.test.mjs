@@ -29,7 +29,16 @@ import {
   saveCheckpoint,
   shouldStopBench,
 } from "../evals/checkpoint.mjs";
-import { buildAgentSpawn, buildCursorAgentArgs, buildJudgeInvocationPrompt, buildJudgePrompt, buildJudgeRetryPrompt, isUsableVerdict, parseJudgeResponse } from "../evals/judge.mjs";
+import {
+  buildAgentSpawn,
+  buildCursorAgentArgs,
+  buildJudgeInvocationPrompt,
+  buildJudgePrompt,
+  buildJudgeRetryPrompt,
+  isUsableVerdict,
+  parseJudgeResponse,
+  withSpawnRetry,
+} from "../evals/judge.mjs";
 import {
   buildAgentArtifacts,
   formatStepSummary,
@@ -419,6 +428,65 @@ test("buildAgentSpawn routes through cmd.exe on Windows", () => {
     assert.equal(command, "agent");
     assert.deepEqual(args, ["--print", "hi"]);
   }
+});
+
+/** Build the error shape runCursorAgent rejects with: wrapped message, Node error as cause. */
+function spawnFailure(code) {
+  const cause = Object.assign(new Error(`spawn C:\\WINDOWS\\system32\\cmd.exe ${code}`), { code, syscall: "spawn" });
+  return new Error(`Failed to run 'agent': ${cause.message}`, { cause });
+}
+
+test("withSpawnRetry retries a transient EACCES with backoff and then succeeds", async () => {
+  const sleeps = [];
+  let calls = 0;
+  const result = await withSpawnRetry(
+    async () => {
+      calls++;
+      if (calls <= 2) throw spawnFailure("EACCES");
+      return "verdict";
+    },
+    { retries: 3, baseMs: 100, sleep: async (ms) => void sleeps.push(ms) },
+  );
+  assert.equal(result, "verdict");
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [100, 200], "exponential backoff between attempts");
+});
+
+test("withSpawnRetry gives up after the retry budget and rethrows the last EACCES", async () => {
+  let calls = 0;
+  await assert.rejects(
+    withSpawnRetry(
+      async () => {
+        calls++;
+        throw spawnFailure("EACCES");
+      },
+      { retries: 2, baseMs: 1, sleep: async () => {} },
+    ),
+    (err) => err.cause?.code === "EACCES" && /Failed to run 'agent'/.test(err.message),
+  );
+  assert.equal(calls, 3, "one initial attempt plus two retries");
+});
+
+test("withSpawnRetry does not retry hard spawn failures or non-spawn errors", async () => {
+  let calls = 0;
+  await assert.rejects(
+    withSpawnRetry(async () => {
+      calls++;
+      throw spawnFailure("ENOENT");
+    }, { sleep: async () => {} }),
+    (err) => err.cause?.code === "ENOENT",
+  );
+  assert.equal(calls, 1, "ENOENT (missing binary) is not transient");
+
+  calls = 0;
+  await assert.rejects(
+    withSpawnRetry(async () => {
+      calls++;
+      throw new Error("Cursor agent exited 1: boom");
+    }, { sleep: async () => {} }),
+    /exited 1/,
+  );
+  assert.equal(calls, 1, "a non-zero exit is a real judge failure, not a spawn hiccup");
 });
 
 test("buildCursorAgentArgs keeps invocation under Windows command-line limit", () => {

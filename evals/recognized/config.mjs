@@ -81,6 +81,9 @@ export async function loadRecognizedOptions(argv, cwd = process.cwd()) {
   const modelExplicit = argv.includes("--model") || argv.includes("-m");
   const presetExplicit = argv.includes("--tier-preset");
   if (presetExplicit && !modelExplicit) options.model = "auto";
+  // An explicit --model wins over a config-file tierPreset; leave the preset
+  // only when the caller also named --tier-preset (or did not name a model).
+  if (modelExplicit && !presetExplicit) options.tierPreset = null;
   if ((!options.model || options.model === "auto" || options.model === "tier") && options.tierPreset) {
     // Keep the preset as the model string so the Harbor adapter can pass
     // --tier-preset through to the CLI (think / cloud policy applied there).

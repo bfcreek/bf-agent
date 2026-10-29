@@ -44,12 +44,10 @@ export function findHarbor() {
   if (process.env.HARBOR_BIN) {
     return { bin: process.env.HARBOR_BIN, argsPrefix: [] };
   }
-  for (const candidate of ["harbor", "uvx"]) {
-    if (commandExists(candidate === "uvx" ? "uvx" : "harbor")) {
-      if (candidate === "uvx") return { bin: "uvx", argsPrefix: ["harbor"] };
-      return { bin: "harbor", argsPrefix: [] };
-    }
-  }
+  const harbor = resolveCommandPath("harbor");
+  if (harbor) return { bin: harbor, argsPrefix: [] };
+  const uvx = resolveCommandPath("uvx");
+  if (uvx) return { bin: uvx, argsPrefix: ["harbor"] };
   return null;
 }
 
@@ -166,9 +164,54 @@ export async function runHarborProcess({ harbor, args, env, cwd, dryRun }) {
 }
 
 export function commandExists(name) {
-  const probe = process.platform === "win32" ? ["where.exe", [name]] : ["which", [name]];
-  const result = spawnSync(probe[0], probe[1], { encoding: "utf8", windowsHide: true });
-  return result.status === 0;
+  return resolveCommandPath(name) != null;
+}
+
+/**
+ * Absolute path to the first match of `name` on PATH, or null.
+ * On Windows this prefers a real binary (`.exe`) over a shim when both appear.
+ * @param {string} name
+ * @returns {string|null}
+ */
+export function resolveCommandPath(name) {
+  if (!name) return null;
+  if (path.isAbsolute(name)) return name;
+  const probe =
+    process.platform === "win32"
+      ? spawnSync("where.exe", [name], { encoding: "utf8", windowsHide: true })
+      : spawnSync("which", [name], { encoding: "utf8" });
+  if (probe.status !== 0) return null;
+  const hits = String(probe.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (hits.length === 0) return null;
+  if (process.platform === "win32") {
+    const exe = hits.find((hit) => /\.(exe|com)$/i.test(hit));
+    if (exe) return exe;
+  }
+  return hits[0];
+}
+
+/**
+ * Windows can spawn `.exe` / `.com` directly. `.cmd` / `.bat` / `.ps1` still
+ * need `cmd.exe`. Routing every Harbor call through `cmd.exe` has failed with
+ * `spawn cmd.exe EACCES` in some Windows terminals, so prefer a direct spawn.
+ *
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {{command: string, args: string[], shell?: boolean}}
+ */
+export function buildHarborSpawn(command, args) {
+  if (process.platform !== "win32") return { command, args };
+  const resolved = resolveCommandPath(command) ?? command;
+  if (/\.(cmd|bat|ps1)$/i.test(resolved)) {
+    return {
+      command: process.env.ComSpec ?? "cmd.exe",
+      args: ["/d", "/s", "/c", resolved, ...args],
+    };
+  }
+  return { command: resolved, args };
 }
 
 function quoteArg(value) {
@@ -178,17 +221,28 @@ function quoteArg(value) {
 
 function spawnInherit(command, args, { cwd, env }) {
   return new Promise((resolve, reject) => {
-    const spawnSpec =
-      process.platform === "win32"
-        ? { command: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", command, ...args] }
-        : { command, args };
+    const spawnSpec = buildHarborSpawn(command, args);
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd,
       env,
       stdio: "inherit",
       windowsHide: true,
+      shell: false,
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      if (err?.code === "EACCES") {
+        reject(
+          new Error(
+            `Failed to start '${spawnSpec.command}' (EACCES). ` +
+              `If this is cmd.exe, the Terminal-Bench launcher now prefers harbor.exe directly — ` +
+              `set HARBOR_BIN to the full path of harbor.exe and retry.`,
+            { cause: err },
+          ),
+        );
+        return;
+      }
+      reject(err);
+    });
     child.on("close", (code) => resolve(code ?? 1));
   });
 }
