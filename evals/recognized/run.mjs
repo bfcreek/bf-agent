@@ -26,6 +26,7 @@ import {
   buildHarborEnv,
   commandExists,
   findHarbor,
+  llmUrlForContainer,
   ollamaUrlForContainer,
   runHarborProcess,
 } from "./harbor.mjs";
@@ -71,14 +72,16 @@ ${listSuites()
 
 Options:
   --dataset <id>         2.1 (default), 2.0, 1.0, 3.0, or a raw Harbor dataset id
-  --model, -m <name>     Ollama model (default: auto — normal startup routing / models.yaml)
+  --model, -m <name>     Model id (Ollama tag or OpenAI/Anthropic model)
+  --provider <name>      ollama (default) | openai | anthropic
   --tier-preset <name>   Optional routing preset when --model is auto (cloud, cloud-max, hybrid, local)
-  --base-url <url>       Host Ollama URL (rewritten to host.docker.internal in Docker)
+  --base-url <url>       Host Ollama URL (rewritten to host.docker.internal in Docker);
+                         ignored for openai/anthropic unless it is a custom gateway
   --include, -i <glob>   Task name or glob (short names like build-pmars are ok)
   --exclude, -x <glob>   Exclude task names
   --sample <n>           Random subset of n tasks (shuffle; not Harbor --n-tasks)
   --seed <int>           Reproducible RNG seed for --sample
-  --n-concurrent <n>     Parallel Harbor trials (default 1)
+  --n-concurrent <n>     Parallel Harbor trials (default 1; raise for cloud providers)
   --attempts, -k <n>     Attempts per task (default 1)
   --max-steps <n>        bf-agent loop cap (default 80)
   --skip-judge           Harbor tests only; skip Cursor CLI grading
@@ -193,13 +196,26 @@ async function main() {
     }
     const jobName = options.jobName ?? "harbor";
     harborJobDir = path.join(runDir, jobName);
+    const provider = options.provider ?? "ollama";
+    const containerBaseUrl = llmUrlForContainer(options.baseUrl, provider);
+    if (provider === "openai" && !process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
+      console.error("OpenAI provider needs OPENAI_API_KEY (or OPENAI_KEY) in the environment.");
+      process.exitCode = 1;
+      return;
+    }
+    if (provider === "anthropic" && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_KEY) {
+      console.error("Anthropic provider needs ANTHROPIC_API_KEY in the environment.");
+      process.exitCode = 1;
+      return;
+    }
     const args = buildHarborArgs({
       datasetId: dataset.id,
       model: options.model,
+      provider,
       jobsDir: runDir,
       jobName,
       repoRoot: REPO_ROOT,
-      containerBaseUrl: ollamaUrlForContainer(options.baseUrl),
+      containerBaseUrl,
       nConcurrent: options.nConcurrent,
       nAttempts: options.nAttempts,
       maxSteps: options.maxSteps,
@@ -215,8 +231,10 @@ async function main() {
       repoRoot: REPO_ROOT,
       agentVersion: PACKAGE_VERSION,
       model: options.model,
-      containerBaseUrl: ollamaUrlForContainer(options.baseUrl),
+      provider,
+      containerBaseUrl,
       hostMemory: { totalMemBytes: os.totalmem(), vramBytes: await detectVramBytes() },
+      timeoutMultiplier: options.timeoutMultiplier,
     });
     if (!options.dryRun) await mkdir(runDir, { recursive: true });
     const result = await runHarborProcess({
@@ -308,7 +326,8 @@ async function main() {
       cpus: os.cpus().length,
       memoryGb: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10,
       ollamaBaseUrl: options.baseUrl,
-      containerOllama: ollamaUrlForContainer(options.baseUrl),
+      containerOllama: llmUrlForContainer(options.baseUrl, options.provider ?? "ollama"),
+      provider: options.provider ?? "ollama",
     },
     notes: [
       "Harbor reward is the shareable mechanical score (hidden tests). It fixes the judge's outcome band (pass 70–100, fail 0–50).",
@@ -378,14 +397,22 @@ async function runChecks(options) {
   rows.push(["Harbor", harbor ? `${harbor.bin} ${(harbor.argsPrefix ?? []).join(" ")}`.trim() : "MISSING — uv tool install harbor"]);
   rows.push(["Docker", commandExists("docker") ? "ok" : "MISSING"]);
   rows.push(["Cursor CLI (agent)", commandExists("agent") ? "ok" : "MISSING — needed unless --skip-judge"]);
-  let ollama = "unreachable";
-  try {
-    const res = await fetch(`${options.baseUrl.replace(/\/$/, "")}/api/tags`, { signal: AbortSignal.timeout(3000) });
-    ollama = res.ok ? "ok" : `HTTP ${res.status}`;
-  } catch (err) {
-    ollama = err?.message ?? String(err);
+  const provider = options.provider ?? "ollama";
+  rows.push(["Provider", provider]);
+  if (provider === "ollama") {
+    let ollama = "unreachable";
+    try {
+      const res = await fetch(`${options.baseUrl.replace(/\/$/, "")}/api/tags`, { signal: AbortSignal.timeout(3000) });
+      ollama = res.ok ? "ok" : `HTTP ${res.status}`;
+    } catch (err) {
+      ollama = err?.message ?? String(err);
+    }
+    rows.push(["Ollama", `${ollama} (${options.baseUrl} → ${ollamaUrlForContainer(options.baseUrl)} in Docker)`]);
+  } else if (provider === "openai") {
+    rows.push(["OpenAI key", process.env.OPENAI_API_KEY || process.env.OPENAI_KEY ? "set" : "MISSING"]);
+  } else if (provider === "anthropic") {
+    rows.push(["Anthropic key", process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_KEY ? "set" : "MISSING"]);
   }
-  rows.push(["Ollama", `${ollama} (${options.baseUrl} → ${ollamaUrlForContainer(options.baseUrl)} in Docker)`]);
   for (const [name, value] of rows) {
     console.log(`  ${name.padEnd(22)} ${value}`);
   }

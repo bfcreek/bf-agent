@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { parseRecognizedArgs, defaultRecognizedConfig, loadRecognizedOptions } from "../evals/recognized/config.mjs";
 import {
   buildHarborArgs,
+  llmUrlForContainer,
   buildHarborEnv,
   buildHarborSpawn,
   ollamaUrlForContainer,
@@ -172,6 +173,31 @@ test("buildHarborArgs passes num_ctx 0 for auto and the number when explicit", (
   const args = buildHarborArgs({ ...base, numCtx: 32768, maxSteps: 40 });
   assert.ok(args.every((a) => !/:int=/.test(a)), "no typed-kwarg suffixes");
   assert.ok(args.includes("max_steps=40"));
+});
+
+test("llmUrlForContainer rewrites Ollama loopback but leaves OpenAI on the public API", () => {
+  assert.equal(
+    llmUrlForContainer("http://127.0.0.1:11434", "ollama"),
+    "http://host.docker.internal:11434",
+  );
+  assert.equal(llmUrlForContainer("http://127.0.0.1:11434", "openai"), "");
+  assert.equal(
+    llmUrlForContainer("https://my-gateway.example/v1", "openai"),
+    "https://my-gateway.example/v1",
+  );
+});
+
+test("buildHarborArgs passes provider for OpenAI peer runs", () => {
+  const args = buildHarborArgs({
+    datasetId: "d",
+    model: "gpt-5.4-mini",
+    provider: "openai",
+    jobsDir: "C:\\out",
+    jobName: "harbor",
+    repoRoot: "C:\\repo",
+    containerBaseUrl: "",
+  });
+  assert.ok(args.includes('provider="openai"'));
 });
 
 test("buildHarborArgs uses custom halo-agent import and downloads /app for the judge", () => {

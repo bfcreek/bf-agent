@@ -59,6 +59,7 @@ export function findHarbor() {
  * @param {string} input.jobName
  * @param {string} input.repoRoot
  * @param {string} input.containerBaseUrl
+ * @param {string} [input.provider] ollama | openai | anthropic
  * @param {number} [input.nConcurrent]
  * @param {number} [input.nAttempts]
  * @param {number} [input.maxSteps]
@@ -71,6 +72,7 @@ export function findHarbor() {
  * @param {string} [input.agentVersion]
  */
 export function buildHarborArgs(input) {
+  const provider = String(input.provider ?? "ollama").trim().toLowerCase() || "ollama";
   const args = [
     "run",
     "-d",
@@ -102,17 +104,20 @@ export function buildHarborArgs(input) {
   // bare integers arrive typed. (An older `key:int=value` spelling made the
   // suffix part of the key, and every kwarg silently fell back to the
   // adapter's default — num_ctx among them.)
+  // Strings for provider must be JSON-quoted so Harbor does not treat them as names.
   args.push(
     "--ak",
     `max_steps=${input.maxSteps ?? 80}`,
     // 0 = auto: the CLI sizes the window to the model and the Ollama host's
-    // memory (passed in through buildHarborEnv).
+    // memory (passed in through buildHarborEnv). Ignored for openai/anthropic.
     "--ak",
     `num_ctx=${typeof input.numCtx === "number" && input.numCtx > 0 ? input.numCtx : 0}`,
     "--ak",
     `command_timeout=${input.commandTimeoutSeconds ?? 120}`,
     "--ak",
     `max_command_timeout=${input.maxCommandTimeoutSeconds ?? 1800}`,
+    "--ak",
+    `provider=${JSON.stringify(provider)}`,
   );
   return args;
 }
@@ -127,13 +132,19 @@ export function buildHarborArgs(input) {
  */
 export function buildHarborEnv(input) {
   const env = { ...process.env };
+  const provider = String(input.provider ?? "ollama").trim().toLowerCase() || "ollama";
   env.PYTHONPATH = env.PYTHONPATH
     ? `${ADAPTER_DIR}${path.delimiter}${env.PYTHONPATH}`
     : ADAPTER_DIR;
   env.HALO_AGENT_REPO = input.repoRoot;
   env.HALO_AGENT_VERSION = input.agentVersion ?? "0.1.0";
   env.HALO_AGENT_MODEL = input.model;
-  env.HALO_AGENT_BASE_URL = input.containerBaseUrl;
+  env.HALO_AGENT_PROVIDER = provider;
+  if (input.containerBaseUrl) {
+    env.HALO_AGENT_BASE_URL = input.containerBaseUrl;
+  }
+  // Peer API keys: prefer process env already present; adapter forwards into
+  // the task container. Do not invent keys here.
   const mem = input.hostMemory ?? {};
   if (Number.isFinite(mem.totalMemBytes) && mem.totalMemBytes > 0) {
     env.HALO_HOST_TOTAL_MEM_BYTES = String(Math.round(mem.totalMemBytes));
@@ -147,6 +158,27 @@ export function buildHarborEnv(input) {
   env.PYTHONUTF8 = "1";
   env.PYTHONIOENCODING = "utf-8";
   return env;
+}
+
+/**
+ * Base URL the agent container should call for LLM traffic.
+ * Ollama on the host needs host.docker.internal; OpenAI/Anthropic use the
+ * public API (or an explicit custom base URL) and must not be rewritten.
+ *
+ * @param {string} baseUrl
+ * @param {string} [provider]
+ */
+export function llmUrlForContainer(baseUrl, provider = "ollama") {
+  const name = String(provider ?? "ollama").trim().toLowerCase();
+  if (name === "openai" || name === "anthropic") {
+    const raw = String(baseUrl ?? "").trim();
+    // Default config still points at local Ollama — ignore that for cloud peers.
+    if (!raw || /127\.0\.0\.1|localhost|::1|host\.docker\.internal/i.test(raw)) {
+      return "";
+    }
+    return raw.replace(/\/$/, "");
+  }
+  return ollamaUrlForContainer(baseUrl);
 }
 
 /**

@@ -111,9 +111,10 @@ if (-not $List -and -not $Check) {
     Write-Host "Starting Terminal-Bench $dataset (Harbor / Docker sandboxes)" -ForegroundColor Cyan
     Write-Host "  model:  $model"
     Write-Host "  grade:  $judge"
-    Write-Host "  needs:  Docker Desktop, Harbor, host Ollama (published as host.docker.internal)"
+    Write-Host "  needs:  Docker Desktop, Harbor; Ollama on host (or --provider openai/anthropic + API key)"
     Write-Host "  out:    ../halo-agent-benchmark/recognized/"
     Write-Host "  local:  .\bin\bench-local.ps1  (dev bench, no Harbor)"
+    Write-Host "  tip:    cloud providers can raise --n-concurrent (e.g. 5) so tasks run in parallel"
     Write-Host ""
 }
 

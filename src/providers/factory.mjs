@@ -16,6 +16,21 @@ import { createOpenAIClient } from "./openai-client.mjs";
 
 export { KNOWN_PROVIDERS, normalizeProvider };
 
+/** Default Ollama URL from CLI builtins — not a valid OpenAI/Anthropic endpoint. */
+const LOCAL_OLLAMA_URL = /^https?:\/\/(127\.0\.0\.1|localhost|::1|host\.docker\.internal)(:11434)?\/?$/i;
+
+/**
+ * Drop the CLI's Ollama default so peer SDKs use their public API defaults,
+ * unless the caller passed a real custom gateway.
+ * @param {string|undefined|null} baseUrl
+ * @returns {string|undefined}
+ */
+export function peerBaseUrl(baseUrl) {
+  const raw = String(baseUrl ?? "").trim();
+  if (!raw || LOCAL_OLLAMA_URL.test(raw.replace(/\/+$/, ""))) return undefined;
+  return raw;
+}
+
 /**
  * @typedef {object} ProviderSetup
  * @property {"ollama"|"openai"|"anthropic"|"copilot"} provider
@@ -66,12 +81,21 @@ export async function createProviderClient({
   }
 
   if (name === "openai") {
-    const client = await createOpenAIClient({ model, apiKey, baseUrl });
+    // CLI defaults baseUrl to local Ollama; that must not become OpenAI's baseURL.
+    const client = await createOpenAIClient({
+      model,
+      apiKey,
+      baseUrl: peerBaseUrl(baseUrl),
+    });
     return { provider: "openai", kind: "llm", client };
   }
 
   if (name === "anthropic") {
-    const client = await createAnthropicClient({ model, apiKey, baseUrl });
+    const client = await createAnthropicClient({
+      model,
+      apiKey,
+      baseUrl: peerBaseUrl(baseUrl),
+    });
     return { provider: "anthropic", kind: "llm", client };
   }
 

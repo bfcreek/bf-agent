@@ -34,6 +34,7 @@ class HaloAgent(BaseInstalledAgent):
         command_timeout: int = 120,
         max_command_timeout: int = 1800,
         wall_clock: int = 0,
+        provider: str | None = None,
         base_url: str | None = None,
         repo_root: str | None = None,
         **kwargs: Any,
@@ -48,10 +49,21 @@ class HaloAgent(BaseInstalledAgent):
         # 0 = derive from the task's [agent] timeout_sec (Harbor kills the agent
         # at that point, so the loop should know it and wrap up first).
         self._wall_clock = int(wall_clock)
+        self._provider = (
+            str(provider or os.environ.get("HALO_AGENT_PROVIDER") or "ollama")
+            .strip()
+            .lower()
+            or "ollama"
+        )
+        default_base = (
+            ""
+            if self._provider in ("openai", "anthropic")
+            else "http://host.docker.internal:11434"
+        )
         self._base_url = (
             base_url
             or os.environ.get("HALO_AGENT_BASE_URL")
-            or "http://host.docker.internal:11434"
+            or default_base
         )
         self._repo_root = Path(
             repo_root or os.environ.get("HALO_AGENT_REPO") or Path.cwd()
@@ -164,6 +176,16 @@ class HaloAgent(BaseInstalledAgent):
             "HALO_COMMAND_TIMEOUT": str(self._command_timeout),
             "HALO_MAX_COMMAND_TIMEOUT": str(self._max_command_timeout),
         }
+        # Peer providers read keys from the process env inside the container.
+        for key in (
+            "OPENAI_API_KEY",
+            "OPENAI_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_KEY",
+        ):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
         # The agent runs in the task container but Ollama runs on the host;
         # hand the host's memory to the CLI so fit decisions are about the
         # machine the models actually load on.
@@ -178,6 +200,22 @@ class HaloAgent(BaseInstalledAgent):
         wall_clock = self._resolve_wall_clock_seconds()
         wall_clock_flag = f"--wall-clock {wall_clock} " if wall_clock > 0 else ""
         tier_flag = f"--tier-preset {shlex.quote(preset)} " if preset else ""
+        provider_flag = (
+            f"--provider {shlex.quote(self._provider)} "
+            if self._provider and self._provider != "ollama"
+            else ""
+        )
+        # Ollama needs an explicit host URL; openai/anthropic use SDK defaults
+        # unless HALO_AGENT_BASE_URL / --ak base_url pointed at a custom gateway.
+        base_url_flag = (
+            f"--base-url {shlex.quote(self._base_url)} " if self._base_url else ""
+        )
+        # num_ctx is Ollama-only; skip for peer providers.
+        num_ctx_cli = (
+            f"--num-ctx {num_ctx_flag} "
+            if self._provider == "ollama"
+            else ""
+        )
         # Think mode follows CLI defaults / models.yaml; cloud-max policy sets
         # --think max when an explicit --tier-preset cloud-max is passed.
         cmd = (
@@ -186,10 +224,11 @@ class HaloAgent(BaseInstalledAgent):
             f"--mode agent --quiet --no-index "
             f"--session harbor --cwd \"$PWD\" "
             f"--model {shlex.quote(model)} "
+            f"{provider_flag}"
             f"{tier_flag}"
-            f"--base-url {shlex.quote(self._base_url)} "
+            f"{base_url_flag}"
             f"--max-steps {self._max_steps} "
-            f"--num-ctx {num_ctx_flag} "
+            f"{num_ctx_cli}"
             f"{wall_clock_flag}"
             f"-- \"$(cat {shlex.quote(remote_instruction)})\"; "
             "agent_code=$?; "
@@ -268,7 +307,70 @@ class HaloAgent(BaseInstalledAgent):
         with tarfile.open(tmp, "w:gz") as tar:
             tar.add(src, arcname="src")
             tar.add(package_json, arcname="package.json")
+            # Peer SDKs are optional on the host; pack them when present so the
+            # containerized CLI can `import('openai')` without npm inside the
+            # sandbox (many TB images have broken/offline apt).
+            peer_modules = self._peer_node_modules()
+            if peer_modules is not None:
+                tar.add(peer_modules, arcname="node_modules")
         return tmp
+
+    def _peer_node_modules(self) -> Path | None:
+        """Cached host ``node_modules`` for the active peer provider, or None.
+
+        Packs a dedicated ``npm install --prefix`` tree (not the whole repo
+        node_modules) so the Harbor tarball stays small and works offline
+        inside the task container.
+        """
+        if self._provider == "openai":
+            pkg = "openai@^4"
+            probe_name = "openai"
+        elif self._provider == "anthropic":
+            pkg = "@anthropic-ai/sdk@^0.39"
+            probe_name = "@anthropic-ai/sdk"
+        else:
+            return None
+
+        # Slim dedicated tree (not the whole repo node_modules) so concurrent
+        # Harbor installs do not re-tar aws-sdk / other host deps five times.
+        cache_root = Path(
+            os.environ.get("HALO_PEER_CACHE")
+            or Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache")
+            / "halo-agent"
+            / "peer-modules"
+            / self._provider
+        )
+        modules = cache_root / "node_modules"
+        probe = modules.joinpath(*probe_name.split("/"))
+        if probe.exists():
+            return modules
+
+        cache_root.mkdir(parents=True, exist_ok=True)
+        import shutil
+        import subprocess
+
+        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        if not npm:
+            raise RuntimeError(
+                f"Provider '{self._provider}' needs '{pkg}' staged for Harbor, but npm was not found on PATH. "
+                f"Install Node.js, or run `npm install {pkg}` in {self._repo_root}."
+            )
+        # Windows: npm is a .cmd shim — CreateProcess needs shell=True.
+        result = subprocess.run(
+            f'"{npm}" install --prefix "{cache_root}" --omit=dev {pkg}'
+            if os.name == "nt"
+            else [npm, "install", "--prefix", str(cache_root), "--omit=dev", pkg],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=(os.name == "nt"),
+        )
+        if result.returncode != 0 or not probe.exists():
+            raise RuntimeError(
+                f"Failed to stage peer package '{pkg}' for Harbor under {cache_root}.\n"
+                f"npm exit {result.returncode}\n{result.stderr or result.stdout}"
+            )
+        return modules
 
     async def _install_node(self, environment: BaseEnvironment) -> None:
         """Put Node >= 20 in the container.

@@ -18,6 +18,7 @@ export const DEFAULT_CONFIG_PATH = path.join(__dirname, "config.json");
  * @typedef {object} RecognizedConfig
  * @property {string} model
  * @property {string|null} [tierPreset] Named routing preset; used when model is auto/tier.
+ * @property {"ollama"|"openai"|"anthropic"} [provider] LLM provider for Harbor trials (default ollama).
  * @property {string} baseUrl
  * @property {string} dataset
  * @property {number} nConcurrent
@@ -46,6 +47,7 @@ export function defaultRecognizedConfig() {
     // within a pin, so runs default to it rather than to `auto` routing.
     model: PINNED_MODELS.local,
     tierPreset: null,
+    provider: "ollama",
     baseUrl: "http://127.0.0.1:11434",
     dataset: "2.1",
     nConcurrent: 1,
@@ -141,6 +143,7 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     dataset: null,
     model: null,
     tierPreset: null,
+    provider: null,
     baseUrl: null,
     nConcurrent: null,
     nAttempts: null,
@@ -185,6 +188,13 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     else if (arg === "--dataset") cli.dataset = take();
     else if (arg === "--model" || arg === "-m") cli.model = take();
     else if (arg === "--tier-preset") cli.tierPreset = parseTierPresetArg(take());
+    else if (arg === "--provider") {
+      const raw = String(take()).trim().toLowerCase();
+      if (!["ollama", "openai", "anthropic"].includes(raw)) {
+        throw new Error(`--provider must be ollama, openai, or anthropic (got '${raw}').`);
+      }
+      cli.provider = raw;
+    }
     else if (arg === "--base-url") cli.baseUrl = take();
     else if (arg === "--n-concurrent" || arg === "--concurrent") cli.nConcurrent = Number.parseInt(take(), 10);
     else if (arg === "--attempts" || arg === "-k") cli.nAttempts = Number.parseInt(take(), 10);
@@ -232,6 +242,7 @@ export function parseRecognizedArgs(argv, fileConfig = defaultRecognizedConfig()
     dataset: cli.dataset ?? fileConfig.dataset,
     model: cli.model ?? fileConfig.model,
     tierPreset: cli.tierPreset ?? fileConfig.tierPreset ?? null,
+    provider: cli.provider ?? fileConfig.provider ?? "ollama",
     baseUrl: cli.baseUrl ?? fileConfig.baseUrl,
     nConcurrent: cli.nConcurrent ?? fileConfig.nConcurrent,
     nAttempts: cli.nAttempts ?? fileConfig.nAttempts,

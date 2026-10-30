@@ -1,6 +1,6 @@
 {
-  "model": "auto",
-  "tierPreset": "cloud-max",
+  "model": "qwen3-coder:30b",
+  "tierPreset": null,
   "baseUrl": "http://127.0.0.1:11434",
   "dataset": "2.1",
   "nConcurrent": 1,
