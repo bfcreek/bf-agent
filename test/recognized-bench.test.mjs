@@ -60,10 +60,10 @@ test("parseRecognizedArgs defaults to the pinned local model with no tier preset
   assert.equal(opts.model, PINNED_MODELS.local);
 });
 
-test("loadRecognizedOptions follows config.json tierPreset (currently cloud-max)", async () => {
+test("loadRecognizedOptions follows config.json (local pin, no tier preset)", async () => {
   const { options } = await loadRecognizedOptions(["terminal-bench"]);
-  assert.equal(options.tierPreset, "cloud-max");
-  assert.equal(options.model, "tier-preset cloud-max");
+  assert.equal(options.tierPreset, null);
+  assert.equal(options.model, PINNED_MODELS.local);
 });
 
 test("loadRecognizedOptions honors explicit --model over the preset", async () => {

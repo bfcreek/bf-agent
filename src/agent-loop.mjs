@@ -16,7 +16,7 @@
  */
 
 import { compactMessages, DEFAULT_CONTEXT_FRACTION } from "./compaction.mjs";
-import { deliverableCheckpointMessage } from "./deliverable-guard.mjs";
+import { deliverableCheckpointMessage, deliverableStatus } from "./deliverable-guard.mjs";
 import { minimalThinkSetting } from "./model-tuning.mjs";
 import { isProviderClientError, isTransientProviderError } from "./provider-client.mjs";
 
@@ -109,20 +109,21 @@ export const DEFAULT_MAX_STOP_HOOK_LOOPS = 5;
 /** Empty assistant turns (no text, no tool calls) re-asked before giving up. */
 const MAX_EMPTY_RETRIES = 2;
 export const EMPTY_RETRY_PROMPT =
-  "Your last message was empty. Call a tool now to make progress (for example write_file, run_command, or read_file). Do not end the turn with only reasoning. Only if the task needs no tool at all, reply in plain text.";
+  "Your last message was empty. Call a tool now (write_file, run_command, or read_file). " +
+  "Do not reply with only reasoning or a plan. Tools are available — use one.";
 /**
  * Sent instead of EMPTY_RETRY_PROMPT when the turn was cut off by the output
- * limit (`done_reason: "length"`) before any tool call or text — typically a
- * thinking model that reasoned until the context window ran out. The retry
- * also drops thinking to the model's minimum so the budget goes to the action.
- * Worded as "continue", not "answer": offered a plain-text exit, gpt-oss:20b
- * at low thinking took it as an apology in 2 of 6 replays of a cut-off turn.
+ * limit (`done_reason: "length"`) before any tool call — typically a long
+ * analysis dump or thinking that exhausted `num_predict`. The partial is
+ * discarded; the retry drops thinking to the model's minimum. No plain-text
+ * escape hatch: offered one, models (GLM Flash on TB, gpt-oss earlier) burned
+ * the remaining empty-retries on more prose.
  */
 export const TRUNCATED_RETRY_PROMPT =
-  "Your last response was cut off by the output limit before it reached a tool call. " +
-  "Do not start over and do not apologize: keep reasoning brief and take the next concrete step now by calling a tool " +
-  "(for example, write the file you were working on with write_file, then run it). " +
-  "Only if the task needs no tool at all, give the answer in plain text.";
+  "Your last response was cut off by the output limit before any tool call. That partial is discarded. " +
+  "Do not continue the analysis, do not apologize, and do not answer in plain text. " +
+  "Reply with a single tool call only — write_file for a required output path, or the next concrete action " +
+  "(run_command / read_file / edit_file). Put no reasoning in the message content.";
 /**
  * Sent when the model opened a tool-call marker (`<tool_call>`, `<function=`)
  * and stopped before the call was complete. For qwen3-coder that is the
@@ -135,6 +136,46 @@ export const INCOMPLETE_TOOL_CALL_PROMPT =
   "Your last response started a tool call but the call was cut off before it could run. " +
   "Do not start over and do not apologize: call the tool now using native tool calling, with short arguments. " +
   "Do not write <tool_call> or <function=...> as message text.";
+
+/**
+ * Truncation retry that names missing deliverables when the goal requires them.
+ * Forces write_file instead of another analysis pass (feal/torch/cobol TB fails).
+ *
+ * @param {object} [input]
+ * @param {string} [input.goal]
+ * @param {Array<object>} [input.steps]
+ * @returns {string}
+ */
+export function truncatedRetryPrompt({ goal, steps } = {}) {
+  const { missing } = deliverableStatus(goal, steps);
+  if (missing.length > 0) {
+    return (
+      `Your last response was cut off by the output limit before any tool call. That partial is discarded. ` +
+      `Required file(s) still missing: ${missing.map((p) => `\`${p}\``).join(", ")}. ` +
+      `Call write_file now with the best content you have for that path. ` +
+      `No analysis, no apology, no plain-text answer — one write_file tool call only.`
+    );
+  }
+  return TRUNCATED_RETRY_PROMPT;
+}
+
+/**
+ * Empty-turn retry; names missing deliverables when known.
+ * @param {object} [input]
+ * @param {string} [input.goal]
+ * @param {Array<object>} [input.steps]
+ * @returns {string}
+ */
+export function emptyRetryPrompt({ goal, steps } = {}) {
+  const { missing } = deliverableStatus(goal, steps);
+  if (missing.length > 0) {
+    return (
+      `Your last message was empty. Required file(s) still missing: ${missing.map((p) => `\`${p}\``).join(", ")}. ` +
+      `Call write_file now for that path (or the next tool that produces it). No reasoning-only reply.`
+    );
+  }
+  return EMPTY_RETRY_PROMPT;
+}
 
 /**
  * qwen3-coder has no separate tool channel. A finished call is the XML block
@@ -232,6 +273,9 @@ const TOOL_CALL_PARSE_NUDGE = [
  * @property {Array<{name: string, args: object, ok: boolean, result?: unknown, error?: string, durationMs?: number}>} toolCalls
  * @property {number} [durationMs] Wall time of the model call that produced this step.
  * @property {number} [promptTokens] Prompt tokens reported by the model for this call.
+ * @property {number} [cachedPromptTokens] Of those, prompt tokens served from the provider's
+ *   prefix cache (Ollama `prompt_eval_cached_count`, OpenAI `cached_tokens`, Anthropic
+ *   `cache_read_input_tokens`). Omitted when the provider does not report it.
  * @property {number} [completionTokens] Completion tokens reported by the model for this call.
  * @property {boolean} [truncated] The model call ended on the output limit (`done_reason: "length"`).
  */
@@ -637,6 +681,9 @@ export class AgentLoop {
       const turnMeta = {
         durationMs: Math.round(turnDurations.at(-1) ?? 0),
         ...(typeof raw?.prompt_eval_count === "number" ? { promptTokens: raw.prompt_eval_count } : {}),
+        ...(typeof raw?.prompt_eval_cached_count === "number"
+          ? { cachedPromptTokens: raw.prompt_eval_cached_count }
+          : {}),
         ...(typeof raw?.eval_count === "number" ? { completionTokens: raw.eval_count } : {}),
         ...(truncated ? { truncated: true } : {}),
       };
@@ -704,11 +751,17 @@ export class AgentLoop {
               messages.pop();
               messages.push({
                 role: "user",
-                content: incomplete && !truncated ? incompleteToolCallPrompt(this.client?.model) : TRUNCATED_RETRY_PROMPT,
+                content:
+                  incomplete && !truncated
+                    ? incompleteToolCallPrompt(this.client?.model)
+                    : truncatedRetryPrompt({ goal: currentGoal, steps }),
               });
               nextThink = minimalThinkSetting(this.client?.model);
             } else {
-              messages.push({ role: "user", content: EMPTY_RETRY_PROMPT });
+              messages.push({
+                role: "user",
+                content: emptyRetryPrompt({ goal: currentGoal, steps }),
+              });
             }
             continue;
           }

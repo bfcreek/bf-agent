@@ -7,8 +7,11 @@ import {
   DEFAULT_MAX_STEPS,
   DEFAULT_SYSTEM_PROMPT,
   isToolCallParseError,
+  emptyRetryPrompt,
   incompleteToolCallPrompt,
   incompleteToolCallText,
+  truncatedRetryPrompt,
+  TRUNCATED_RETRY_PROMPT,
   parseTextToolCall,
   stripStrayToolCallMarkup,
   repairToolCallParseError,
@@ -249,6 +252,32 @@ test("prompt-token budget: cumulative prompt tokens stop the loop with a wrap-up
   assert.equal(result.promptTokens, 4500);
   assert.equal(result.text, "Out of budget; here is what I have.");
   assert.equal(client.calls.at(-1).tools, undefined, "wrap-up offers no tools");
+});
+
+test("steps record cached prompt tokens when the provider reports them", async () => {
+  const script = [
+    { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+    { role: "assistant", content: "done" },
+  ];
+  const usage = [
+    { prompt_eval_count: 1000, eval_count: 10 },
+    { prompt_eval_count: 1200, prompt_eval_cached_count: 980, eval_count: 5 },
+  ];
+  const client = {
+    async chat() {
+      const message = script.shift();
+      return { message, raw: { message, ...usage.shift() } };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry() });
+
+  const result = await loop.run("go");
+
+  const [first, second] = result.steps;
+  assert.equal(first.promptTokens, 1000);
+  assert.equal("cachedPromptTokens" in first, false, "omitted when the provider does not report it");
+  assert.equal(second.promptTokens, 1200);
+  assert.equal(second.cachedPromptTokens, 980);
 });
 
 test("prompt-token budget is off by default and ignores providers that report no usage", async () => {
@@ -953,8 +982,57 @@ test("a content-only turn cut off by the output limit is retried, not accepted a
   assert.equal(result.steps[0].truncated, true);
   assert.match(result.steps[0].content, /^Here is the script/, "the cut-off text is kept in the trace");
   assert.match(requests[1].at(-1).content, /cut off by the output limit/);
+  assert.match(requests[1].at(-1).content, /single tool call only/, "demands a tool call, not more prose");
+  assert.doesNotMatch(requests[1].at(-1).content, /Only if the task needs no tool/);
   assert.ok(!requests[1].some((m) => /print\(1\)/.test(m.content ?? "")), "the cut-off text is not re-sent");
   assert.equal(result.steps[1].kind, "tool-calls");
+});
+
+test("truncatedRetryPrompt names missing deliverables and demands write_file", () => {
+  assert.equal(truncatedRetryPrompt({ goal: "say hi", steps: [] }), TRUNCATED_RETRY_PROMPT);
+  const withPath = truncatedRetryPrompt({
+    goal: "Write the solution to /app/attack.py and run it.",
+    steps: [],
+  });
+  assert.match(withPath, /\/app\/attack\.py/);
+  assert.match(withPath, /write_file/);
+  assert.match(withPath, /one write_file tool call only/);
+  assert.doesNotMatch(withPath, /plain text/);
+});
+
+test("truncated retry with a missing deliverable steers write_file for that path", async () => {
+  const requests = [];
+  const client = {
+    model: "glm-5.3-flash:cloud",
+    async chat(request) {
+      requests.push(request.messages.at(-1));
+      if (requests.length === 1) {
+        return {
+          message: { role: "assistant", content: "Let me analyze FEAL-4... ".repeat(400) },
+          raw: { done_reason: "length", eval_count: 12000 },
+        };
+      }
+      return {
+        message: { role: "assistant", content: "", tool_calls: [toolCall("add", { a: 1, b: 1 })] },
+        raw: {},
+      };
+    },
+  };
+  const loop = new AgentLoop({ client, registry: makeRegistry(), maxSteps: 3 });
+
+  await loop.run("Recover the key. Write /app/attack.py with your solution.");
+
+  assert.match(requests[1].content, /\/app\/attack\.py/);
+  assert.match(requests[1].content, /write_file/);
+  assert.equal(requests[1].role, "user");
+});
+
+test("emptyRetryPrompt names missing deliverables", () => {
+  assert.match(emptyRetryPrompt({ goal: "hi", steps: [] }), /Call a tool now/);
+  assert.match(
+    emptyRetryPrompt({ goal: "Write results to /app/out.txt", steps: [] }),
+    /\/app\/out\.txt/,
+  );
 });
 
 test("isToolCallParseError detects Ollama parse failures", () => {

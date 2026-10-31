@@ -29,6 +29,35 @@ export const DEFAULT_TEMPERATURE = 0.2;
 /** Default think mode: enable native reasoning on capable models. */
 export const DEFAULT_THINK = "auto";
 
+/**
+ * How long Ollama keeps the model (and its KV cache) loaded after a call.
+ * Sent as `keep_alive` on every chat request; twice Ollama's 5m server
+ * default so the prompt-prefix cache survives longer tool calls and judge
+ * gaps between agent turns. Ollama duration string, seconds, or -1 (forever).
+ */
+export const DEFAULT_KEEP_ALIVE = "10m";
+
+/**
+ * Validate a `keep_alive` value from a flag or config file.
+ * Accepts a Go-style duration (`10m`, `1h30m`, `90s`), a number of seconds,
+ * `0` (unload immediately), or `-1` (keep loaded forever).
+ * @param {unknown} raw
+ * @returns {{ok: true, value: string|number} | {ok: false, error: string}}
+ */
+export function parseKeepAlive(raw) {
+  const text = String(raw ?? "").trim();
+  if (/^-?\d+(\.\d+)?$/.test(text)) {
+    const n = Number(text);
+    if (n >= -1) return { ok: true, value: n };
+  } else if (/^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/.test(text)) {
+    return { ok: true, value: text };
+  }
+  return {
+    ok: false,
+    error: `needs a duration like 10m or 1h30m, seconds, 0, or -1 (keep loaded), got '${text}'.`,
+  };
+}
+
 export class OllamaClient {
   /**
    * @param {object} [options]
@@ -41,6 +70,9 @@ export class OllamaClient {
    *   default.
    * @param {boolean|string} [options.think] Ollama native thinking: `auto`
    *   (default), `true`/`false`, or a level (`low`, `medium`, `high`, `max`).
+   * @param {string|number|null} [options.keepAlive] Ollama `keep_alive` sent
+   *   with every chat call (default DEFAULT_KEEP_ALIVE). Pass null to omit it
+   *   and use the server's OLLAMA_KEEP_ALIVE / 5m default.
    * @param {object} [options.modelOptions] Extra Ollama options (temperature,
    *   top_p, ...) merged into every chat call; per-call options win.
    * @param {typeof fetch} [options.fetchImpl] Injectable for tests.
@@ -50,6 +82,7 @@ export class OllamaClient {
     model = "llama3.2",
     numCtx = "auto",
     think = DEFAULT_THINK,
+    keepAlive = DEFAULT_KEEP_ALIVE,
     modelOptions,
     fetchImpl,
   } = {}) {
@@ -71,6 +104,8 @@ export class OllamaClient {
     /** @type {string[]} Spec warnings for the configured window (context-spec.mjs). */
     this.numCtxWarnings = [];
     this.think = think;
+    /** @type {string|number|null} */
+    this.keepAlive = keepAlive;
     /** @type {boolean|null} Set via configureClientModel after model resolution. */
     this.thinkingCapable = null;
     /** @type {number} Parameters in billions; used for think auto-levels. */
@@ -100,6 +135,9 @@ export class OllamaClient {
     if (resolvedThink !== undefined) {
       body.think = resolvedThink;
     }
+    if (this.keepAlive !== null && this.keepAlive !== undefined) {
+      body.keep_alive = this.keepAlive;
+    }
     if (tools && tools.length > 0) {
       body.tools = tools;
     }
@@ -127,7 +165,8 @@ export class OllamaClient {
    * @param {AbortSignal} [request.signal]
    * @returns {Promise<{message: object, raw: object}>} Assistant message
    *   (`{role, content, tool_calls?}`) plus the raw Ollama response — `raw`
-   *   carries `prompt_eval_count`/`eval_count` for token accounting.
+   *   carries `prompt_eval_count`/`eval_count` for token accounting and
+   *   `prompt_eval_cached_count` (prompt tokens served from the KV cache).
    */
   async chat(request) {
     const { signal } = request;

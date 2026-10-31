@@ -109,6 +109,15 @@ test("num-ctx defaults to auto and accepts auto or a positive integer", () => {
   assert.ok(normalizeConfigValues({ "num-ctx": "lots" }).errors.some((e) => /num-ctx.*'auto'/.test(e)));
 });
 
+test("keep-alive defaults to 10m and accepts durations, seconds, or -1", () => {
+  assert.equal(getBuiltinDefaults().keepAlive, "10m");
+  assert.equal(normalizeConfigValues({ "keep-alive": "30m" }).values.keepAlive, "30m");
+  assert.equal(normalizeConfigValues({ "keep-alive": "1h30m" }).values.keepAlive, "1h30m");
+  assert.equal(normalizeConfigValues({ "keep-alive": 600 }).values.keepAlive, 600);
+  assert.equal(normalizeConfigValues({ "keep-alive": -1 }).values.keepAlive, -1);
+  assert.ok(normalizeConfigValues({ "keep-alive": "forever" }).errors.some((e) => /keep-alive/.test(e)));
+});
+
 test("normalizeConfigValues accepts auto-approve policies", () => {
   assert.equal(normalizeConfigValues({ "auto-approve": true }).values.autoApprove, "all");
   assert.equal(normalizeConfigValues({ "auto-approve": "off" }).values.autoApprove, "off");

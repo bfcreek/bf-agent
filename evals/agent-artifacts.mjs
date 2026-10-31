@@ -97,6 +97,7 @@ export function buildAgentArtifacts(agentResult, extra = {}) {
       content: step.content ?? "",
       ...(typeof step.durationMs === "number" ? { durationMs: step.durationMs } : {}),
       ...(typeof step.promptTokens === "number" ? { promptTokens: step.promptTokens } : {}),
+      ...(typeof step.cachedPromptTokens === "number" ? { cachedPromptTokens: step.cachedPromptTokens } : {}),
       ...(typeof step.completionTokens === "number" ? { completionTokens: step.completionTokens } : {}),
       ...(step.truncated === true ? { truncated: true } : {}),
       toolCalls: (step.toolCalls ?? []).map((call) => ({

@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { DEFAULT_MAX_STEPS, DEFAULT_STREAK_NUDGE_AFTER } from "./agent-loop.mjs";
-import { DEFAULT_NUM_CTX, DEFAULT_THINK } from "./ollama-client.mjs";
+import { DEFAULT_KEEP_ALIVE, DEFAULT_NUM_CTX, DEFAULT_THINK, parseKeepAlive } from "./ollama-client.mjs";
 import { parseAutoApproveSpec } from "./tool-registry.mjs";
 
 export const CONFIG_FILE_NAME = "config.yaml";
@@ -30,6 +30,7 @@ const CONFIG_TEMPLATE = `# Bitfield Ollama Agent user configuration
 # streak-nudge: false    (true, or a count: nudge after N calls in a row to one read-only tool)
 # completion-guard: true # challenge "done" on create/implement goals when no mutating tools ran
 # num-ctx: auto   (sized to the model and your memory; floor ${DEFAULT_NUM_CTX}, or give a number)
+# keep-alive: ${DEFAULT_KEEP_ALIVE}  (how long Ollama keeps the model + prompt cache loaded; 30m, 1h, -1 = forever)
 # cwd: .
 # mode: ask
 # auto-approve: off   # all, off, or a tool list: write_file,edit_file,run_command
@@ -252,6 +253,12 @@ export function normalizeConfigValues(raw) {
         else errors.push(`config 'num-ctx' needs a positive integer or 'auto', got '${value}'.`);
         break;
       }
+      case "keep-alive": {
+        const parsed = parseKeepAlive(value);
+        if (parsed.ok) values.keepAlive = parsed.value;
+        else errors.push(`config 'keep-alive' ${parsed.error}`);
+        break;
+      }
       case "port": {
         const p = Number(value);
         if (Number.isFinite(p) && p >= 0 && p <= 65535) values.port = p;
@@ -336,6 +343,8 @@ function configKeyToOption(key) {
       return "streakNudge";
     case "num-ctx":
       return "numCtx";
+    case "keep-alive":
+      return "keepAlive";
     case "embed-model":
       return "embedModel";
     case "scan-profile":
@@ -441,6 +450,7 @@ export function getBuiltinDefaults() {
     maxPromptTokens: 0,
     streakNudge: 0,
     numCtx: "auto",
+    keepAlive: DEFAULT_KEEP_ALIVE,
     quiet: false,
     cwd: process.cwd(),
     port: 11435,

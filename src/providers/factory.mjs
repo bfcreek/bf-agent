@@ -52,6 +52,7 @@ export function peerBaseUrl(baseUrl) {
  * @param {string} [options.apiKey]
  * @param {number|null|"auto"} [options.numCtx]
  * @param {boolean|string} [options.think]
+ * @param {string|number|null} [options.keepAlive] Ollama keep_alive per chat call
  * @param {string} [options.supervisorProvider] For provider=copilot
  * @param {string} [options.supervisorModel] For provider=copilot
  * @param {string} [options.supervisorBaseUrl]
@@ -64,6 +65,7 @@ export async function createProviderClient({
   apiKey,
   numCtx,
   think,
+  keepAlive,
   supervisorProvider,
   supervisorModel,
   supervisorBaseUrl,
@@ -76,6 +78,7 @@ export async function createProviderClient({
       model: model ?? "llama3.2",
       ...(numCtx !== undefined ? { numCtx } : {}),
       ...(think !== undefined ? { think } : {}),
+      ...(keepAlive !== undefined ? { keepAlive } : {}),
     });
     return { provider: "ollama", kind: "llm", client };
   }
@@ -128,6 +131,7 @@ export async function createProviderClient({
     apiKey,
     numCtx,
     think,
+    keepAlive,
   });
 
   const tracker = createDelegationTracker();

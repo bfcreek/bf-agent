@@ -89,6 +89,7 @@ test("TIER_PRESETS primary and vision models are all tool-capable", () => {
   }
   assert.equal(isLikelyToolCapable(PINNED_MODELS.local), true);
   assert.equal(isLikelyToolCapable(PINNED_MODELS.cloud), true);
+  assert.equal(isLikelyToolCapable(PINNED_MODELS.cloudMax), true);
 });
 
 test("parseTierPresetArg accepts cloud-max and lists it in help", () => {
@@ -137,17 +138,25 @@ test("coerceTierPresetModel treats Harbor's model string as a preset", () => {
   assert.equal(ordinary.model, "gpt-oss:20b");
 });
 
-test("cloud-max preset is the pinned cloud model at every band", () => {
+test("cloud-max preset is the quality cloud pin at every band", () => {
   const bands = getTierPresetBands("cloud-max");
   assert.equal(bands.length, 1);
-  assert.equal(bands[0].model, PINNED_MODELS.cloud);
-  assert.equal(bands[0].vision, PINNED_MODELS.cloud);
-  assert.equal(resolveTierModel(0, bands, "fallback"), PINNED_MODELS.cloud);
-  assert.equal(resolveTierModel(6, bands, "fallback", { requireVision: true }), PINNED_MODELS.cloud);
+  assert.equal(bands[0].model, PINNED_MODELS.cloudMax);
+  assert.equal(bands[0].vision, PINNED_MODELS.cloudMax);
+  assert.notEqual(PINNED_MODELS.cloudMax, PINNED_MODELS.cloud);
+  assert.equal(resolveTierModel(0, bands, "fallback"), PINNED_MODELS.cloudMax);
+  assert.equal(resolveTierModel(6, bands, "fallback", { requireVision: true }), PINNED_MODELS.cloudMax);
   assert.deepEqual(
     bands.map((band) => band.model),
     TIER_PRESETS["cloud-max"].map((band) => band.model),
   );
+});
+
+test("cloud and hybrid hard band use the value cloud pin", () => {
+  assert.equal(getTierPresetBands("cloud")[0].model, PINNED_MODELS.cloud);
+  const hybrid = getTierPresetBands("hybrid");
+  assert.equal(hybrid[0].model, PINNED_MODELS.local);
+  assert.equal(hybrid.at(-1).model, PINNED_MODELS.cloud);
 });
 
 test("detectAutoTierPreset picks hybrid when a local model qualifies", async () => {

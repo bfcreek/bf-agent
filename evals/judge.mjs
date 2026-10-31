@@ -232,7 +232,9 @@ function formatAgentStepsForJudge(agentResult) {
         typeof step.durationMs === "number" || typeof step.promptTokens === "number"
           ? ` {${[
               typeof step.durationMs === "number" ? `${(step.durationMs / 1000).toFixed(1)}s` : null,
-              typeof step.promptTokens === "number" ? `${step.promptTokens} prompt tok` : null,
+              typeof step.promptTokens === "number"
+                ? `${step.promptTokens} prompt tok${typeof step.cachedPromptTokens === "number" ? ` (${step.cachedPromptTokens} cached)` : ""}`
+                : null,
             ]
               .filter(Boolean)
               .join(", ")}}`

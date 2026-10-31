@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_NUM_CTX, DEFAULT_TEMPERATURE, OllamaClient } from "../src/ollama-client.mjs";
+import {
+  DEFAULT_KEEP_ALIVE,
+  DEFAULT_NUM_CTX,
+  DEFAULT_TEMPERATURE,
+  OllamaClient,
+  parseKeepAlive,
+} from "../src/ollama-client.mjs";
 
 /** fetch stub that records requests and replays scripted JSON responses. */
 function makeFetch(responses) {
@@ -24,6 +30,7 @@ function makeFetch(responses) {
 const CHAT_REPLY = {
   message: { role: "assistant", content: "hi" },
   prompt_eval_count: 120,
+  prompt_eval_cached_count: 100,
   eval_count: 30,
 };
 
@@ -55,6 +62,31 @@ test("constructor numCtx and modelOptions flow into the request; per-call option
     temperature: 0.5,
     top_p: 0.9,
   });
+});
+
+test("chat sends keep_alive (10m default) so the prompt cache outlives Ollama's 5m unload", async () => {
+  const { fetchImpl, requests } = makeFetch([CHAT_REPLY, CHAT_REPLY, CHAT_REPLY]);
+
+  await new OllamaClient({ fetchImpl }).chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(DEFAULT_KEEP_ALIVE, "10m");
+  assert.equal(requests[0].body.keep_alive, "10m");
+
+  await new OllamaClient({ fetchImpl, keepAlive: -1 }).chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(requests[1].body.keep_alive, -1);
+
+  await new OllamaClient({ fetchImpl, keepAlive: null }).chat({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal("keep_alive" in requests[2].body, false, "null defers to the server's OLLAMA_KEEP_ALIVE");
+});
+
+test("parseKeepAlive accepts Go durations, seconds, 0 and -1; rejects words", () => {
+  assert.deepEqual(parseKeepAlive("10m"), { ok: true, value: "10m" });
+  assert.deepEqual(parseKeepAlive("1h30m"), { ok: true, value: "1h30m" });
+  assert.deepEqual(parseKeepAlive(" 600 "), { ok: true, value: 600 });
+  assert.deepEqual(parseKeepAlive("0"), { ok: true, value: 0 });
+  assert.deepEqual(parseKeepAlive(-1), { ok: true, value: -1 });
+  assert.equal(parseKeepAlive("-5").ok, false);
+  assert.equal(parseKeepAlive("forever").ok, false);
+  assert.equal(parseKeepAlive("").ok, false);
 });
 
 test("numCtx null omits num_ctx (Ollama server default)", async () => {
@@ -93,6 +125,7 @@ test("chat returns the raw response with token counts for context accounting", a
 
   assert.equal(message.content, "hi");
   assert.equal(raw.prompt_eval_count, 120);
+  assert.equal(raw.prompt_eval_cached_count, 100);
   assert.equal(raw.eval_count, 30);
 });
 

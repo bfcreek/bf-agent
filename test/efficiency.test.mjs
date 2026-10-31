@@ -57,6 +57,31 @@ test("a clean read → edit → verify run has no flags", () => {
   assert.equal(m.heuristicScore, 100);
 });
 
+test("cached prompt tokens roll up into tokens.cachedPrompt / cachedShare and the judge line", () => {
+  const m = computeEfficiency({
+    stopReason: "completed",
+    steps: [
+      step(1, [call("read_file", { path: "a" })], { promptTokens: 1000, cachedPromptTokens: 0 }),
+      step(2, [call("read_file", { path: "b" })], { promptTokens: 1500, cachedPromptTokens: 1000 }),
+      step(3, [], { promptTokens: 2000, cachedPromptTokens: 1500 }),
+    ],
+  });
+  assert.equal(m.tokens.prompt, 4500);
+  assert.equal(m.tokens.cachedPrompt, 2500);
+  assert.ok(Math.abs(m.tokens.cachedShare - 2500 / 4500) < 1e-9);
+  assert.match(formatEfficiencyForPrompt(m), /2500 served from prompt cache \(56%\)/);
+
+  const without = computeEfficiency({
+    stopReason: "completed",
+    steps: [step(1, [], { promptTokens: 1000 })],
+  });
+  assert.equal("cachedPrompt" in without.tokens, false, "absent when no step reported a cached count");
+  assert.doesNotMatch(formatEfficiencyForPrompt(without), /prompt cache/);
+
+  assert.ok(Math.abs(summarizeEfficiency([m, without]).avgCachedShare - 2500 / 4500) < 1e-9);
+  assert.equal(summarizeEfficiency([without]).avgCachedShare, null);
+});
+
 test("blind edit, no verification, and edit misses are flagged", () => {
   const m = computeEfficiency({
     stopReason: "completed",

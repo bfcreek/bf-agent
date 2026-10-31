@@ -30,7 +30,13 @@ import {
   suggestModel,
 } from "./model-routing.mjs";
 import { configureClientModel, MAX_AUTO_NUM_CTX, modelPromptOverlay } from "./model-tuning.mjs";
-import { DEFAULT_NUM_CTX, OllamaClient, OllamaClientError } from "./ollama-client.mjs";
+import {
+  DEFAULT_KEEP_ALIVE,
+  DEFAULT_NUM_CTX,
+  OllamaClient,
+  OllamaClientError,
+  parseKeepAlive,
+} from "./ollama-client.mjs";
 import { withDeliverableGuard } from "./deliverable-guard.mjs";
 import { withHollowCompletionGuard } from "./hollow-completion-guard.mjs";
 import { withSecretFabricationGuard } from "./secret-fabrication-guard.mjs";
@@ -167,6 +173,14 @@ function parseArgs(argv, initial = getBuiltinDefaults()) {
         const n = Number.parseInt(raw ?? "", 10);
         if (Number.isFinite(n) && n > 0) options.numCtx = n;
         else if (raw !== undefined) options.errors.push(`--num-ctx needs a positive integer or 'auto', got '${raw}'.`);
+        break;
+      }
+      case "--keep-alive": {
+        const raw = value(arg, ++i);
+        if (raw === undefined) break;
+        const parsed = parseKeepAlive(raw);
+        if (parsed.ok) options.keepAlive = parsed.value;
+        else options.errors.push(`--keep-alive ${parsed.error}`);
         break;
       }
       case "--wall-clock": {
@@ -386,6 +400,9 @@ Options:
   --max-steps <n>      Max model round-trips (default ${DEFAULT_MAX_STEPS})
   --num-ctx <n|auto>   Context window in tokens sent to Ollama. auto (default) sizes it to the
                        model and this machine's memory: floor ${DEFAULT_NUM_CTX}, ceiling ${MAX_AUTO_NUM_CTX}
+  --keep-alive <dur>   How long Ollama keeps the model and its prompt cache loaded after each
+                       call (default ${DEFAULT_KEEP_ALIVE}; e.g. 30m, 1h, -1 = forever). Sent per request,
+                       so it overrides the server's OLLAMA_KEEP_ALIVE
   --wall-clock <sec>   Wall-clock budget for the run (also HALO_WALL_CLOCK_SECONDS). Time spent
                        counts toward budget pressure, command timeouts are clamped to what
                        remains, and the loop wraps up before the deadline instead of being killed
@@ -828,6 +845,7 @@ async function main() {
       apiKey: options.apiKey,
       numCtx: options.numCtx,
       think: options.think,
+      keepAlive: options.keepAlive,
       supervisorProvider: options.supervisorProvider,
       supervisorModel: options.supervisorModel,
     });

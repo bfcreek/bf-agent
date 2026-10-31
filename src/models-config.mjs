@@ -38,8 +38,8 @@ default-tier: ${DEFAULT_TASK_TIER}
 #   - through-tier: 3
 #     model: qwen3-coder:30b
 #     vision: devstral-small-2
-#   - model: kimi-k2.7-code:cloud
-#     vision: kimi-k2.7-code:cloud
+#   - model: glm-5.3-flash:cloud
+#     vision: glm-5.3-flash:cloud
 `;
 
 /** @returns {string} */

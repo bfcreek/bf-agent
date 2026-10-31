@@ -27,19 +27,21 @@ export const MIN_EFFECTIVE_PARAMS_B = 7;
 
 /**
  * The models the harness is tuned against. `auto` picks the local pin
- * when it is installed and fits; the cloud pin is the hard-tier fallback.
+ * when it is installed and fits; the cloud pin is the hard-tier / value
+ * fallback; `cloudMax` is the quality pin used only by `--tier-preset cloud-max`.
  * Change these deliberately — bench history is only comparable within a pin.
  */
 export const PINNED_MODELS = Object.freeze({
   local: "qwen3-coder:30b",
-  cloud: "kimi-k2.7-code:cloud",
+  cloud: "glm-5.3-flash:cloud",
+  cloudMax: "kimi-k2.7-code:cloud",
 });
 
 /**
  * Coding-tuned families. Most are non-thinking; they still make good agents
  * because the tuning covers tool use, so `auto` accepts them without thinking.
  */
-const CODING_TUNED = [/coder/i, /^devstral/i, /codestral/i, /^kimi-k[\d.]+-code/i];
+const CODING_TUNED = [/coder/i, /^devstral/i, /codestral/i, /^kimi-k[\d.]+-code/i, /^glm/i];
 
 /** @param {string} name */
 export function isCodingModel(name) {
@@ -67,8 +69,9 @@ const TOOL_CAPABLE = [
   /^granite3/,
   /^nemotron/,
   /^smollm2/,
-  // Pinned cloud line (PINNED_MODELS.cloud / tier presets); matches CODING_TUNED.
+  // Pinned cloud lines (PINNED_MODELS.cloud / cloudMax / tier presets).
   /^kimi-k[\d.]+-code/,
+  /^glm/,
 ];
 
 /** Families known to lack tool calling (vision, embedding, legacy chat). */
@@ -328,12 +331,14 @@ export async function suggestModel({
 
   const pinnedLocal = findInstalled(PINNED_MODELS.local, (models ?? []).map((m) => m.name));
   const pinnedCloud = findInstalled(PINNED_MODELS.cloud, (models ?? []).map((m) => m.name));
+  const pinnedCloudMax = findInstalled(PINNED_MODELS.cloudMax, (models ?? []).map((m) => m.name));
 
   for (const entry of models ?? []) {
     if (cloudOnly && !isCloudModel(entry.name)) continue;
     const { tools, thinking, vision } = await detectCapabilities(client, entry.name);
     if (tools !== true) continue;
-    const pinned = entry.name === pinnedLocal || entry.name === pinnedCloud;
+    const pinned =
+      entry.name === pinnedLocal || entry.name === pinnedCloud || entry.name === pinnedCloudMax;
     if (requireVision) {
       if (vision !== true) continue;
     } else if (thinking !== true && !isCodingModel(entry.name) && !pinned) {
@@ -393,7 +398,7 @@ function noSuitableModelHelp(requireVision) {
       `No installed model is suitable for agent use with images (needs tool calling + vision, ` +
       `>=${MIN_EFFECTIVE_PARAMS_B}B parameters, and to fit in memory). ` +
       "Pull a tools+vision model (e.g. ollama pull devstral-small-2) or an Ollama cloud model " +
-      "with vision (e.g. ollama pull kimi-k2.7-code:cloud), or pass --model to override."
+      `with vision (e.g. ollama pull ${PINNED_MODELS.cloud}), or pass --model to override.`
     );
   }
   return (

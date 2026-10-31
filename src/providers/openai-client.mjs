@@ -95,6 +95,7 @@ export class OpenAIClient {
     const raw = {
       ...completion,
       prompt_eval_count: completion?.usage?.prompt_tokens,
+      prompt_eval_cached_count: completion?.usage?.prompt_tokens_details?.cached_tokens,
       eval_count: completion?.usage?.completion_tokens,
       ...(doneReason ? { done_reason: doneReason } : {}),
     };
@@ -185,6 +186,7 @@ export class OpenAIClient {
     const raw = {
       usage,
       prompt_eval_count: usage?.prompt_tokens,
+      prompt_eval_cached_count: usage?.prompt_tokens_details?.cached_tokens,
       eval_count: usage?.completion_tokens,
       message: openaiMessage,
       ...(doneReason ? { done_reason: doneReason } : {}),

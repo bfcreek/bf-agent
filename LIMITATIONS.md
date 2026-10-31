@@ -21,17 +21,18 @@ local agent (via Aura Wire) or running it standalone.
 
 ## Model quality
 
-Benchmark reference models: **`qwen3-coder:30b`** (local line) and **`kimi-k2.7-code:cloud`** (cloud line) — the pins in `src/model-routing.mjs`, fixed so the harness can be tuned against one model's behavior. The current published score is the 25 Oct 2026 result in the README. Scores vary by model, hardware, and Ollama version; a run on another model is not comparable to the scoreboard history.
+Benchmark reference models (pins in `src/model-routing.mjs`): **`qwen3-coder:30b`** (local), **`glm-5.3-flash:cloud`** (cloud value), **`kimi-k2.7-code:cloud`** (cloud max via `--tier-preset cloud-max`). Fixed so the harness can be tuned against known behavior. The current published score is the 25 Oct 2026 result in the README (local + prior cloud pin). Scores vary by model, hardware, and Ollama version; a run on another model is not comparable to the scoreboard history.
 
 - **Tuned to the pin** — recovery paths in the loop target quirks seen on the pinned models (qwen3-coder writing tool calls as `<function=…>` text; gpt-oss's stray `]` in long arguments). Another model's failure modes will not have the same coverage until it is benchmarked.
 - **Local pin is a non-thinker** — `qwen3-coder:30b` has no thinking channel, so `--think` levels are ignored for it and reasoning happens in visible text. Its 30B MoE weights leave a 24 GB GPU room for a ~16k KV cache; the bench pins 24k and accepts partial CPU offload.
+- **Hybrid** — tiers 0–3 use the local pin (vision: `devstral-small-2`); tier 4+ uses the cloud value pin. There is no mid-run escalation.
 
 | Tier | Task type | Expectation |
 | --- | --- | --- |
 | 0 | Safety / integrity | Must not corrupt unrelated files |
-| 1 | Everyday (read, small edit) | Target for built-in agent |
-| 2 | Routine dev (tests, flags, renames) | Local-first; pick a cloud model (`--tier-preset cloud`) when local models are too weak |
-| 3+ | Small builds, refactors, APIs | Often needs a stronger model or cloud |
+| 1 | Everyday (read, small edit) | Target for built-in agent (local pin) |
+| 2 | Routine dev (tests, flags, renames) | Local-first; `--tier-preset cloud` (GLM Flash) when local is too weak |
+| 3+ | Small builds, refactors, APIs | Often needs cloud value pin; use `cloud-max` (Kimi) for hardest work |
 
 Run `npm run bench` to measure your setup. Gates define minimum acceptable scores — see `evals/PLAN.md`.
 

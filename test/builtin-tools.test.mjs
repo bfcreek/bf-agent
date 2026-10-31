@@ -17,6 +17,7 @@ import {
   findInteractiveCommand,
   fitTimeoutToDeadline,
   DEADLINE_COMMAND_RESERVE_MS,
+  DEADLINE_MAX_COMMAND_FRACTION,
   DEADLINE_MIN_COMMAND_MS,
 } from "../src/tools/shell.mjs";
 
@@ -260,11 +261,22 @@ test("fitTimeoutToDeadline clamps a command timeout to the run's remaining wall 
   const roomy = fitTimeoutToDeadline({ requestedMs: 60_000, deadlineAt: now + 900_000, now });
   assert.equal(roomy.timeoutMs, 60_000);
   assert.equal(roomy.clamped, false);
-  // A 1500s install inside a run with 300s left is cut to what remains minus the reserve.
+  // A 1500s install inside a run with 300s left is cut to half the usable
+  // window (not the full usable) so later commands still have room.
   const tight = fitTimeoutToDeadline({ requestedMs: 1_500_000, deadlineAt: now + 300_000, now });
+  const usable = 300_000 - DEADLINE_COMMAND_RESERVE_MS;
   assert.equal(tight.clamped, true);
-  assert.equal(tight.timeoutMs, 300_000 - DEADLINE_COMMAND_RESERVE_MS);
+  assert.equal(tight.timeoutMs, Math.floor(usable * DEADLINE_MAX_COMMAND_FRACTION));
   assert.equal(tight.remainingMs, 300_000);
+  // Even when the request fits in `usable`, a request larger than the fraction
+  // cap is still clamped (the extract-moves-from-video failure mode).
+  const halfBurn = fitTimeoutToDeadline({
+    requestedMs: 1_800_000,
+    deadlineAt: now + DEADLINE_COMMAND_RESERVE_MS + 1_400_000,
+    now,
+  });
+  assert.equal(halfBurn.clamped, true);
+  assert.equal(halfBurn.timeoutMs, Math.floor(1_400_000 * DEADLINE_MAX_COMMAND_FRACTION));
   // Nothing useful can finish: report exhaustion instead of a doomed command.
   const gone = fitTimeoutToDeadline({
     requestedMs: 30_000,
@@ -297,7 +309,8 @@ test("run_command clamps timeout_seconds to the remaining wall clock and says so
   });
   assert.equal(run.ok, true);
   assert.equal(run.result.status, "success");
-  assert.match(run.result.note, /clamped from 300s to (39|40)s/);
+  // Usable window is 40s; the fraction cap keeps half of that for later work.
+  assert.match(run.result.note, /clamped from 300s to 20s/);
   assert.match(run.result.note, /wall-clock budget remain/);
   registry.setRunContext(null);
 });

@@ -107,7 +107,9 @@ export function classifyTool(name) {
  * @property {number} emptyRetries Model round-trips with neither text nor a tool call.
  * @property {number} truncatedTurns Model calls cut off by the context window (done_reason length).
  * @property {number} steers
- * @property {{prompt: number, completion: number, peakPrompt: number, perStep: number, window: number|null}|null} tokens
+ * @property {{prompt: number, completion: number, peakPrompt: number, perStep: number, window: number|null, cachedPrompt?: number, cachedShare?: number}|null} tokens
+ *   `cachedPrompt` / `cachedShare` (0–1 of prompt tokens served from the provider's prefix
+ *   cache) are present only when at least one step reported a cached count.
  * @property {string[]} flags
  * @property {number} heuristicScore 0–100, penalties from flags. A comparison aid, not a grade.
  */
@@ -127,7 +129,9 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
   let promptTokens = 0;
   let completionTokens = 0;
   let peakPrompt = 0;
+  let cachedPromptTokens = 0;
   let sawTokens = false;
+  let sawCached = false;
   let modelCalls = 0;
   let parseRecoveries = 0;
   let parseRepairs = 0;
@@ -152,6 +156,10 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
       sawTokens = true;
       promptTokens += step.promptTokens;
       peakPrompt = Math.max(peakPrompt, step.promptTokens);
+    }
+    if (typeof step?.cachedPromptTokens === "number") {
+      sawCached = true;
+      cachedPromptTokens += step.cachedPromptTokens;
     }
     if (typeof step?.completionTokens === "number") {
       sawTokens = true;
@@ -292,6 +300,12 @@ export function computeEfficiency(agentResult, { maxSteps = null } = {}) {
           peakPrompt,
           perStep: modelCalls ? Math.round(promptTokens / modelCalls) : 0,
           window: typeof agentResult?.numCtx === "number" && agentResult.numCtx > 0 ? agentResult.numCtx : null,
+          ...(sawCached
+            ? {
+                cachedPrompt: cachedPromptTokens,
+                cachedShare: promptTokens > 0 ? cachedPromptTokens / promptTokens : 0,
+              }
+            : {}),
         }
       : null,
     flags: [],
@@ -357,8 +371,12 @@ export function formatEfficiencyForPrompt(m) {
     );
   }
   if (m.tokens) {
+    const cached =
+      typeof m.tokens.cachedPrompt === "number"
+        ? `, ${m.tokens.cachedPrompt} served from prompt cache (${Math.round((m.tokens.cachedShare ?? 0) * 100)}%)`
+        : "";
     lines.push(
-      `tokens: prompt ${m.tokens.prompt} (peak ${m.tokens.peakPrompt}${m.tokens.window ? ` of a ${m.tokens.window} window` : ""}, ~${m.tokens.perStep}/call), completion ${m.tokens.completion}`,
+      `tokens: prompt ${m.tokens.prompt} (peak ${m.tokens.peakPrompt}${m.tokens.window ? ` of a ${m.tokens.window} window` : ""}, ~${m.tokens.perStep}/call${cached}), completion ${m.tokens.completion}`,
     );
   }
   lines.push(
@@ -383,12 +401,14 @@ export function summarizeEfficiency(list) {
       avgToolCalls: null,
       avgFailedToolRate: null,
       avgPromptTokens: null,
+      avgCachedShare: null,
       verifiedRate: null,
       avgHeuristicScore: null,
       flagCounts: {},
     };
   }
   const withTokens = rows.filter((r) => r.tokens);
+  const withCached = withTokens.filter((r) => typeof r.tokens.cachedShare === "number");
   const mutated = rows.filter((r) => r.verifiedAfterLastMutation != null);
   const flagCounts = {};
   for (const r of rows) for (const f of r.flags ?? []) flagCounts[f] = (flagCounts[f] ?? 0) + 1;
@@ -398,6 +418,7 @@ export function summarizeEfficiency(list) {
     avgToolCalls: avg(rows.map((r) => r.toolCalls)),
     avgFailedToolRate: avg(rows.map((r) => r.failedToolRate)),
     avgPromptTokens: withTokens.length ? avg(withTokens.map((r) => r.tokens.prompt)) : null,
+    avgCachedShare: withCached.length ? avg(withCached.map((r) => r.tokens.cachedShare)) : null,
     verifiedRate: mutated.length
       ? mutated.filter((r) => r.verifiedAfterLastMutation === true).length / mutated.length
       : null,

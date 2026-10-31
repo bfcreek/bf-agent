@@ -97,6 +97,7 @@ export class AnthropicClient {
     const raw = {
       ...response,
       prompt_eval_count: response?.usage?.input_tokens,
+      prompt_eval_cached_count: response?.usage?.cache_read_input_tokens,
       eval_count: response?.usage?.output_tokens,
     };
     return { message, raw };
@@ -175,6 +176,7 @@ export class AnthropicClient {
         const raw = {
           ...final,
           prompt_eval_count: final?.usage?.input_tokens,
+          prompt_eval_cached_count: final?.usage?.cache_read_input_tokens,
           eval_count: final?.usage?.output_tokens,
         };
         return { message, raw };
@@ -204,6 +206,7 @@ export class AnthropicClient {
       usage,
       stop_reason: stopReason,
       prompt_eval_count: usage?.input_tokens,
+      prompt_eval_cached_count: usage?.cache_read_input_tokens,
       eval_count: usage?.output_tokens,
     };
     return { message, raw };

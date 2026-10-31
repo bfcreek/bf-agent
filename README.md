@@ -4,9 +4,9 @@
 
 ### Pinned result
 
-On 25 Oct 2026, bf-agent 1.1.25 scored **96 out of 100** on 34 graded tasks. Smaller tasks ran on local `qwen3-coder:30b`. Harder builds ran on `kimi-k2.7-code:cloud`. Windows, RTX 4090 24 GB, 32 cores, 64 GB RAM. **Avg time** is agent start → done (what you would wait for); judging for the scoreboard took most of the ~69-minute suite.
+On 25 Oct 2026, bf-agent 1.1.25 scored **96 out of 100** on 34 graded tasks. Smaller tasks ran on local `qwen3-coder:30b`. Harder builds ran on `kimi-k2.7-code:cloud` (the cloud-max pin). Windows, RTX 4090 24 GB, 32 cores, 64 GB RAM. **Avg time** is agent start → done (what you would wait for); judging for the scoreboard took most of the ~69-minute suite.
 
-To match this pin with the same models: about **24 GB VRAM** so the ~18 GB local pin stays on the GPU (less VRAM spills layers to CPU and the times above will not hold), Ollama Cloud for `kimi-k2.7-code:cloud` on the harder tiers, and enough host RAM for the language toolchains the tasks run (this box had 64 GB). No GPU → use the cloud pin only (`--tier-preset cloud`); scores can still land, but the local-pin times and routing above do not apply.
+Current pins (see `PINNED_MODELS`): local `qwen3-coder:30b`, cloud value `glm-5.3-flash:cloud`, cloud max `kimi-k2.7-code:cloud`. To match the 25 Oct hybrid scoreboard times you still want ~**24 GB VRAM** for the local pin and enough host RAM for task toolchains (this box had 64 GB). No GPU → `--tier-preset cloud` (GLM Flash) or `cloud-max` (Kimi); scores can still land, but local-pin times do not apply. Terminal-Bench mini evidence for the cloud pins is in [`docs/tb-mini-model-matrix-seed-3717582705.md`](docs/tb-mini-model-matrix-seed-3717582705.md).
 
 | What we asked | Tasks | Score | Avg time | Result |
 | --- | --- | --- | --- | --- |
@@ -48,7 +48,7 @@ Product shape:
 
 - Node.js 20+
 - [Ollama](https://ollama.com) running locally (default `http://127.0.0.1:11434`) for the default provider
-- The pinned local model, `ollama pull qwen3-coder:30b` (or the cloud pin, `ollama pull kimi-k2.7-code:cloud`, when there is no GPU)
+- The pinned local model, `ollama pull qwen3-coder:30b` (or a cloud pin when there is no GPU: `ollama pull glm-5.3-flash:cloud`, or `ollama pull kimi-k2.7-code:cloud` for `--tier-preset cloud-max`)
 
 **Zero runtime dependencies by default** — the Ollama path uses only Node built-ins.
 Optional peer packages (`openai`, `@anthropic-ai/sdk`, `@github/copilot-sdk`) are
@@ -110,6 +110,7 @@ Options:
 | `--streak-nudge [n]` | off | After `n` (default 6) consecutive calls to one read-only tool, tell the model to answer or switch to a tool that answers in one call. Mutating tools (`write_file`, `edit_file`, `run_command`) never trigger it |
 | `--no-completion-guard` | guard on | Do not challenge “done” on create/implement goals when no mutating tools (`write_file` / `edit_file` / `run_command`) ran. On by default (same idea as Copilot’s completion guard for the plain LLM path) |
 | `--num-ctx <n\|auto>` | `auto` | Context window (tokens) sent to Ollama on every call — Ollama's own default is small and overflows silently. `auto` sizes it to the model and your memory (floor 16384, ceiling 65536); see `docs/context-spec.md` |
+| `--keep-alive <dur>` | `10m` | How long Ollama keeps the model and its prompt (KV) cache loaded after each call (`30m`, `1h`, `-1` = forever). Sent on every request, so it overrides the server's `OLLAMA_KEEP_ALIVE`; twice Ollama's own 5m default so the cache survives long tool calls between turns |
 | `--cwd <path>` | current directory | Workspace root that file and shell tools are confined to |
 | `--mode <ask\|agent>` | `ask` in a terminal, `agent` otherwise | `ask` confirms each write/shell call with a y/N prompt; `agent` runs unattended. Deletes and cleanup writes still need an explicit approval |
 | `--auto-approve [policy]` | `off` | Approve gated tools without a prompt. Bare flag or `all`: every gated tool. `off`: none. Or a comma-separated list such as `write_file,run_command`. Those calls count as approved, including deletes. In ask mode, tools outside the list still prompt |
@@ -132,7 +133,7 @@ coding-tuned, has at least 7B parameters, and fits comfortably in this
 machine's memory — a model too weak to finish agent tasks wastes more than it
 saves. When no local model qualifies, an installed
 [Ollama cloud](https://ollama.com/cloud) model is used instead, the pinned
-cloud model (`kimi-k2.7-code:cloud`) first: local-first, cloud only when we
+cloud value model (`glm-5.3-flash:cloud`) first: local-first, cloud only when we
 must. Explicit `--model` names are always honored
 (untagged names match their tags, so `llama3.2` finds `llama3.2:latest`)
 with a warning when the choice looks too weak; missing names fall back to
@@ -141,11 +142,14 @@ new models classify correctly; a family-name list is the fallback for older
 Ollama versions. `bf-agent models` shows the classification and what
 `auto` would pick.
 
-**Why a pin.** The harness is tuned against one local line and one cloud
-line so that bench history stays comparable and fixes target a known model's
-quirks instead of the average of several. Those pins are `qwen3-coder:30b`
-and `kimi-k2.7-code:cloud`. The 25 Oct 2026 result above is the current score
-for them. The tier presets (`local`, `hybrid`, `cloud`, `cloud-max`) all use those two models; `cloud-max` is the cloud pin at maximum reasoning effort, not a different model. Local image turns still use `devstral-small-2`, because the local pin has no vision. The Cursor judge is separate: it grades from one prompt file and does not run an Ollama model. Recognized-benchmark runs default to the local pin at
+**Why a pin.** The harness is tuned against fixed lines so bench history stays
+comparable and fixes target known quirks. Pins: **local** `qwen3-coder:30b`,
+**cloud** (value) `glm-5.3-flash:cloud`, **cloudMax** `kimi-k2.7-code:cloud`.
+Tier presets: `local` / `hybrid` (local through tier 3, then cloud value) /
+`cloud` (GLM Flash) / `cloud-max` (Kimi at `think: max`). Local image turns
+still use `devstral-small-2`, because the local pin has no vision. The Cursor
+judge is separate: it grades from one prompt file and does not run an Ollama
+model. Recognized-benchmark runs default to the local pin at
 `--num-ctx 24576` (the spec's recommendation for a non-thinking model; on a
 24 GB GPU that costs ~16% decode speed versus a fully-resident 16k window and
 saves a compaction every few steps). Change a pin deliberately, and start a

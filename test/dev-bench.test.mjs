@@ -189,7 +189,7 @@ test("loadBenchOptions file tierPreset overrides user models.yaml", async () => 
     const { options } = await loadBenchOptions(["--config", benchConfigPath, "--flat"]);
     assert.equal(options.tierPreset, "cloud-max");
     assert.ok(options.tierModels?.every((band) => band.model.includes(":cloud")));
-    assert.equal(options.tierModels.at(-1).model, PINNED_MODELS.cloud);
+    assert.equal(options.tierModels.at(-1).model, PINNED_MODELS.cloudMax);
   } finally {
     process.env = previous;
     await rm(dir, { recursive: true, force: true });

@@ -17,19 +17,18 @@ export { PINNED_MODELS };
 export const DEFAULT_TIER_PRESET = "auto";
 
 /**
- * Presets are built from the two pinned lines (PINNED_MODELS): the local pin
- * wherever local is allowed, the cloud pin wherever cloud is allowed.
- * `cloud-max` is the same cloud pin at maximum reasoning effort — not a
- * different model.
+ * Presets are built from the pinned lines (PINNED_MODELS): local wherever
+ * local is allowed, value cloud (`cloud`) for default cloud / hybrid hard
+ * tiers, and quality cloud (`cloudMax`) for `cloud-max` at maximum think.
  *
  * @type {Record<string, TierModelBand[]>}
  */
 export const TIER_PRESETS = {
-  /** Ollama cloud only — no local GPU or RAM required. */
+  /** Ollama cloud value pin — no local GPU or RAM required. */
   cloud: [{ model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud }],
-  /** Cloud pin only, at max think (see getTierPresetPolicy). */
-  "cloud-max": [{ model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud }],
-  /** Pinned local model for easy/medium work; pinned cloud model for hard tiers. */
+  /** Quality cloud pin at max think (see getTierPresetPolicy). */
+  "cloud-max": [{ model: PINNED_MODELS.cloudMax, vision: PINNED_MODELS.cloudMax }],
+  /** Pinned local for easy/medium work; value cloud pin for hard tiers. */
   hybrid: [
     { throughTier: 3, model: PINNED_MODELS.local, vision: "devstral-small-2" },
     { model: PINNED_MODELS.cloud, vision: PINNED_MODELS.cloud },
@@ -67,7 +66,8 @@ export function parseTierPresetArg(raw) {
 
 /**
  * Quality / routing policy implied by a named preset.
- * `cloud-max` keeps the run on the pinned cloud model at maximum reasoning effort.
+ * `cloud-max` keeps the run on the quality cloud pin (`PINNED_MODELS.cloudMax`)
+ * at maximum reasoning effort.
  *
  * @param {string|null|undefined} preset
  * @returns {{think: string|null, cloudOnly: boolean}}

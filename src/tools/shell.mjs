@@ -33,11 +33,19 @@ const MAX_TIMEOUT_SECONDS = positiveIntEnv("HALO_MAX_COMMAND_TIMEOUT", 300);
 export const DEADLINE_COMMAND_RESERVE_MS = 45_000;
 /** Below this much remaining budget a command cannot finish and be acted on. */
 export const DEADLINE_MIN_COMMAND_MS = 8_000;
+/**
+ * Cap any one command to this share of the usable remaining budget. Without
+ * it a single `timeout_seconds: 1800` OCR/ffmpeg blast (legal under Harbor's
+ * raised HALO_MAX_COMMAND_TIMEOUT) can consume the whole trial and leave no
+ * time to write the deliverable — seen on extract-moves-from-video.
+ */
+export const DEADLINE_MAX_COMMAND_FRACTION = 0.5;
 
 /**
  * Fit a requested command timeout inside the run's remaining wall-clock budget.
  * The run owns the budget, not the command, so the timeout is clamped to what
- * is left after a reserve for the final turn.
+ * is left after a reserve for the final turn, and never more than
+ * {@link DEADLINE_MAX_COMMAND_FRACTION} of that usable window.
  *
  * @param {object} input
  * @param {number} input.requestedMs
@@ -48,13 +56,18 @@ export function fitTimeoutToDeadline({ requestedMs, deadlineAt, now = Date.now()
   if (!Number.isFinite(deadlineAt) || deadlineAt <= 0) {
     return { timeoutMs: requestedMs, clamped: false, remainingMs: null };
   }
-  const remainingMs = deadlineAt - now;
+  const remainingMs = Math.max(0, deadlineAt - now);
   const usable = remainingMs - DEADLINE_COMMAND_RESERVE_MS;
   if (usable < DEADLINE_MIN_COMMAND_MS) {
-    return { exhausted: true, remainingMs: Math.max(0, remainingMs) };
+    return { exhausted: true, remainingMs };
   }
-  if (requestedMs <= usable) return { timeoutMs: requestedMs, clamped: false, remainingMs };
-  return { timeoutMs: usable, clamped: true, remainingMs };
+  const fractionCap = Math.max(
+    DEADLINE_MIN_COMMAND_MS,
+    Math.floor(usable * DEADLINE_MAX_COMMAND_FRACTION),
+  );
+  const allowed = Math.min(usable, fractionCap);
+  if (requestedMs <= allowed) return { timeoutMs: requestedMs, clamped: false, remainingMs };
+  return { timeoutMs: allowed, clamped: true, remainingMs };
 }
 
 /**

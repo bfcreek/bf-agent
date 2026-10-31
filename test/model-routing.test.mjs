@@ -46,6 +46,7 @@ test("known tool-capable families are detected", () => {
     "devstral-small-2:latest",
     "gpt-oss:20b",
     "kimi-k2.7-code:cloud",
+    "glm-5.3-flash:cloud",
   ]) {
     assert.equal(isLikelyToolCapable(name), true, name);
   }
@@ -337,6 +338,7 @@ test("suggestModel accepts coding-tuned non-thinking models, preferring thinkers
   assert.equal(isCodingModel("qwen3-coder:30b"), true);
   assert.equal(isCodingModel("devstral-small-2:latest"), true);
   assert.equal(isCodingModel("kimi-k2.7-code:cloud"), true);
+  assert.equal(isCodingModel("glm-5.3-flash:cloud"), true);
   assert.equal(isCodingModel("qwen3:14b"), false);
   const client = makeAutoClient([
     { name: "devstral-small-2:latest", sizeBytes: 15 * GB, parameterSize: "24B", capabilities: TOOLS_ONLY },
